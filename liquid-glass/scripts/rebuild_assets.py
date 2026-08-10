@@ -11,6 +11,7 @@ Strategy:
   6. Compile with actool, including every .icon package registered in icons.json
 """
 
+import copy
 import json
 import os
 import re
@@ -392,59 +393,118 @@ def build_xcassets(symbol_variants, raster_groups):
 # Step 5 – compile
 # ---------------------------------------------------------------------------
 
-def _pin_specializations(entries, mode):
-    """Return a specialization list whose Default and Dark values are pinned.
+def _pin_specializations(entries, mode, root_fill=False):
+    """Write the selected appearance into both Default and Dark slots.
 
-    Icon Composer stores appearance overrides in property-specific
-    ``*-specializations`` arrays. For Light, replace Dark overrides with
-    explicit copies of the Default values; merely dropping Dark entries lets
-    the renderer auto-darken some properties. For Dark, promote each Dark
-    override to the equivalent appearance-neutral slot so Default inherits
-    Dark too. Tinted specializations remain intact in both modes.
+    A value placed only in the appearance-neutral slot can still be
+    auto-adjusted by Icon Composer when actool renders the Dark rendition.
+    Conversely, a Dark-only value falls back to the original Default value in
+    a Light environment. Emitting the selected value in both slots prevents
+    either fallback while retaining the source icon's Tinted specialization.
     """
-    kept = [entry for entry in entries
-            if not (isinstance(entry, dict) and entry.get("appearance") == "dark")]
-    if mode == "light":
-        default_entries = [entry for entry in kept if (
-            isinstance(entry, dict) and "appearance" not in entry
-        )]
-        for default_entry in default_entries:
-            dark_copy = dict(default_entry)
-            dark_copy["appearance"] = "dark"
-            kept.append(dark_copy)
-        return kept
+    defaults = [entry for entry in entries
+                if isinstance(entry, dict) and "appearance" not in entry]
+    darks = [entry for entry in entries
+             if isinstance(entry, dict) and entry.get("appearance") == "dark"]
+    tinted = [copy.deepcopy(entry) for entry in entries
+              if isinstance(entry, dict) and entry.get("appearance") == "tinted"]
+    other = [copy.deepcopy(entry) for entry in entries if (
+        not isinstance(entry, dict)
+        or entry.get("appearance") not in (None, "dark", "tinted")
+    )]
+    selected = defaults if mode == "light" else (darks or defaults)
 
-    dark_entries = [entry for entry in entries
-                    if isinstance(entry, dict) and entry.get("appearance") == "dark"]
-    for dark_entry in dark_entries:
-        promoted = dict(dark_entry)
-        promoted.pop("appearance", None)
-        qualifiers = {key: value for key, value in promoted.items() if key != "value"}
-        kept = [entry for entry in kept if not (
-            isinstance(entry, dict)
-            and "appearance" not in entry
-            and {key: value for key, value in entry.items() if key != "value"} == qualifiers
-        )]
-        kept.append(promoted)
-    return kept
+    pinned = []
+    for entry in selected:
+        neutral = copy.deepcopy(entry)
+        neutral.pop("appearance", None)
+        # Root-level ``automatic`` is the normal automatic Dark background,
+        # which resolves to Icon Composer's system-dark gradient. Naming that
+        # result directly also makes it stable in a Light environment.
+        if root_fill and mode == "dark" and neutral.get("value") == "automatic":
+            neutral["value"] = "system-dark"
+        dark = copy.deepcopy(neutral)
+        dark["appearance"] = "dark"
+        pinned.extend([neutral, dark])
+    pinned.extend(tinted)
+    pinned.extend(other)
+    return pinned
 
 
-def _pin_icon_appearance(value, mode):
+def _pin_icon_appearance(value, mode, path=()):
     if isinstance(value, dict):
         for key in list(value):
             child = value[key]
             if key.endswith("-specializations") and isinstance(child, list):
-                pinned = _pin_specializations(child, mode)
+                pinned = _pin_specializations(
+                    child,
+                    mode,
+                    root_fill=(not path and key == "fill-specializations"),
+                )
                 if pinned:
                     value[key] = pinned
                 else:
                     del value[key]
             else:
-                _pin_icon_appearance(child, mode)
+                _pin_icon_appearance(child, mode, path + (key,))
     elif isinstance(value, list):
-        for child in value:
-            _pin_icon_appearance(child, mode)
+        for index, child in enumerate(value):
+            _pin_icon_appearance(child, mode, path + (str(index),))
     return value
+
+
+def _is_monochrome_svg(package_path, image_name):
+    """Return whether an SVG has one authored paint color.
+
+    Icon Composer lets monochrome artwork in a combined-lighting group inherit
+    the icon's root fill. When a static Dark clone replaces that root fill with
+    system-dark, materialize the authored fill on those layers first so their
+    artwork color remains unchanged. Multicolor SVGs must keep their own fills.
+    """
+    if not image_name or not image_name.lower().endswith(".svg"):
+        return False
+    asset_path = os.path.join(package_path, "Assets", image_name)
+    try:
+        with open(asset_path, encoding="utf-8") as fp:
+            source = fp.read()
+    except OSError:
+        return False
+
+    paints = set()
+    patterns = [
+        r'(?:fill|stroke|stop-color)\s*:\s*([^;\}\s]+)',
+        r'(?:fill|stroke|stop-color)\s*=\s*["\']([^"\']+)["\']',
+    ]
+    for pattern in patterns:
+        for paint in re.findall(pattern, source, flags=re.IGNORECASE):
+            paint = paint.strip().lower()
+            if paint not in {"none", "transparent"} and not paint.startswith("url("):
+                paints.add(paint)
+    return len(paints) == 1
+
+
+def _pin_root_fill(icon, mode, package_path):
+    """Specialize Icon Composer's direct root fill without losing inheritance."""
+    if "fill" not in icon:
+        return
+    source_fill = icon.pop("fill")
+    if mode == "dark":
+        for group in icon.get("groups", []):
+            for layer in group.get("layers", []):
+                if (group.get("lighting") == "combined"
+                        and "fill" not in layer
+                        and "fill-specializations" not in layer
+                        and _is_monochrome_svg(package_path, layer.get("image-name"))):
+                    layer["fill-specializations"] = [
+                        {"value": copy.deepcopy(source_fill)},
+                        {"appearance": "dark", "value": copy.deepcopy(source_fill)},
+                    ]
+
+    selected = copy.deepcopy(source_fill) if mode == "light" else "system-dark"
+    icon["fill-specializations"] = [
+        {"value": copy.deepcopy(selected)},
+        {"appearance": "dark", "value": copy.deepcopy(selected)},
+    ]
 
 
 def _build_static_icon_packages(source_packages):
@@ -461,6 +521,7 @@ def _build_static_icon_packages(source_packages):
             descriptor = os.path.join(destination, "icon.json")
             with open(descriptor, "r") as fp:
                 icon = json.load(fp)
+            _pin_root_fill(icon, mode, destination)
             _pin_icon_appearance(icon, mode)
             with open(descriptor, "w") as fp:
                 json.dump(icon, fp, indent=2)
