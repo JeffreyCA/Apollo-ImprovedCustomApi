@@ -71,6 +71,11 @@ SYMBOL_ASSETS      = set()   # asset names that have SVG glyph variants
 VECTOR_PRESERVED   = set()   # asset names whose original rasters carry Preserved Vector Representation
 
 PREVIEW_VARIANTS  = ["default", "dark", "clear-light", "clear-dark"]
+STATIC_ICON_DIR   = os.path.join(REBUILT_ROOT, "static-icon-variants")
+STATIC_ICON_MODES = {
+    "__apollo_light": "light",
+    "__apollo_dark": "dark",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +392,83 @@ def build_xcassets(symbol_variants, raster_groups):
 # Step 5 – compile
 # ---------------------------------------------------------------------------
 
+def _pin_specializations(entries, mode):
+    """Return a specialization list whose Default and Dark values are pinned.
+
+    Icon Composer stores appearance overrides in property-specific
+    ``*-specializations`` arrays. For Light, replace Dark overrides with
+    explicit copies of the Default values; merely dropping Dark entries lets
+    the renderer auto-darken some properties. For Dark, promote each Dark
+    override to the equivalent appearance-neutral slot so Default inherits
+    Dark too. Tinted specializations remain intact in both modes.
+    """
+    kept = [entry for entry in entries
+            if not (isinstance(entry, dict) and entry.get("appearance") == "dark")]
+    if mode == "light":
+        default_entries = [entry for entry in kept if (
+            isinstance(entry, dict) and "appearance" not in entry
+        )]
+        for default_entry in default_entries:
+            dark_copy = dict(default_entry)
+            dark_copy["appearance"] = "dark"
+            kept.append(dark_copy)
+        return kept
+
+    dark_entries = [entry for entry in entries
+                    if isinstance(entry, dict) and entry.get("appearance") == "dark"]
+    for dark_entry in dark_entries:
+        promoted = dict(dark_entry)
+        promoted.pop("appearance", None)
+        qualifiers = {key: value for key, value in promoted.items() if key != "value"}
+        kept = [entry for entry in kept if not (
+            isinstance(entry, dict)
+            and "appearance" not in entry
+            and {key: value for key, value in entry.items() if key != "value"} == qualifiers
+        )]
+        kept.append(promoted)
+    return kept
+
+
+def _pin_icon_appearance(value, mode):
+    if isinstance(value, dict):
+        for key in list(value):
+            child = value[key]
+            if key.endswith("-specializations") and isinstance(child, list):
+                pinned = _pin_specializations(child, mode)
+                if pinned:
+                    value[key] = pinned
+                else:
+                    del value[key]
+            else:
+                _pin_icon_appearance(child, mode)
+    elif isinstance(value, list):
+        for child in value:
+            _pin_icon_appearance(child, mode)
+    return value
+
+
+def _build_static_icon_packages(source_packages):
+    """Create build-only Light/Dark clones without editing source .icon files."""
+    shutil.rmtree(STATIC_ICON_DIR, ignore_errors=True)
+    os.makedirs(STATIC_ICON_DIR, exist_ok=True)
+    variants = []
+    for source in source_packages:
+        icon_id = os.path.splitext(os.path.basename(source))[0]
+        for suffix, mode in STATIC_ICON_MODES.items():
+            variant_id = icon_id + suffix
+            destination = os.path.join(STATIC_ICON_DIR, variant_id + ".icon")
+            shutil.copytree(source, destination)
+            descriptor = os.path.join(destination, "icon.json")
+            with open(descriptor, "r") as fp:
+                icon = json.load(fp)
+            _pin_icon_appearance(icon, mode)
+            with open(descriptor, "w") as fp:
+                json.dump(icon, fp, indent=2)
+                fp.write("\n")
+            variants.append(destination)
+    return variants
+
+
 def load_icon_packages():
     """Resolve every `.icon` package listed in icons.json.
 
@@ -404,7 +486,7 @@ def load_icon_packages():
             print(f"✗ missing .icon package: {pkg}", file=sys.stderr)
             return None
         packages.append(pkg)
-    return packages
+    return packages + _build_static_icon_packages(packages)
 
 
 def _find_xcode_26_0_1():
