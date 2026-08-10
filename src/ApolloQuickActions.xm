@@ -292,6 +292,43 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
 
 %hook _TtC6Apollo13SceneDelegate
 
+- (void)scene:(UIScene *)scene
+ willConnectToSession:(UISceneSession *)session
+             options:(UISceneConnectionOptions *)connectionOptions {
+    %orig(scene, session, connectionOptions);
+
+    // Native Apollo consumes its own connection options before the pane
+    // installer wraps the tab children. Reborn-owned routes are not known to
+    // Apollo, so claim them here and queue their existing retry-based handler.
+    // The async hop makes this independent of Logos hook ordering: pane
+    // installation will have completed before the first attempt runs.
+    for (UIOpenURLContext *context in connectionOptions.URLContexts) {
+        if (ApolloQuickActionsHandleURL(context.URL)) {
+            ApolloLog(@"[QuickActions] Queued Reborn cold URL route");
+        }
+    }
+
+    UNNotificationResponse *response = connectionOptions.notificationResponse;
+    NSDictionary *userInfo = response.notification.request.content.userInfo;
+    NSString *rawURL = [userInfo[@"apollo_deep_link"] isKindOfClass:[NSString class]]
+        ? userInfo[@"apollo_deep_link"] : nil;
+    if (!rawURL.length && [userInfo[@"url"] isKindOfClass:[NSString class]]) {
+        rawURL = userInfo[@"url"];
+    }
+    if (rawURL.length > 0 && ApolloQuickActionsHandleURL([NSURL URLWithString:rawURL])) {
+        ApolloLog(@"[QuickActions] Queued Reborn cold notification route");
+    }
+
+#if APOLLO_SIM_BUILD
+    NSString *injectedURL =
+        NSProcessInfo.processInfo.environment[@"APOLLO_SIM_COLD_REBORN_URL"];
+    if (injectedURL.length > 0 &&
+        ApolloQuickActionsHandleURL([NSURL URLWithString:injectedURL])) {
+        ApolloLog(@"[QuickActions] Queued simulator-injected Reborn cold route");
+    }
+#endif
+}
+
 - (void)scene:(UIScene *)scene openURLContexts:(NSSet *)URLContexts {
     NSMutableSet *unhandledContexts = [NSMutableSet setWithCapacity:URLContexts.count];
     BOOL handledAny = NO;

@@ -10,6 +10,7 @@
 // background reader ever appears, make this atomic rather than adding a lock
 // around a single BOOL.
 static BOOL sPaneLayoutActive = NO;
+static NSMapTable<UINavigationController *, UISplitViewController *> *sPaneNavigationOwners = nil;
 
 BOOL ApolloPaneLayoutSupported(void) {
     static BOOL supported = NO;
@@ -49,5 +50,35 @@ UISplitViewController *ApolloPaneSplitControllerFor(UIViewController *viewContro
             return (UISplitViewController *)node;
         }
     }
+
+    // UITabBarController may detach every non-selected tab's column hierarchy.
+    // A URL/shortcut selects a tab and pushes synchronously, before UIKit's next
+    // containment update, so the parent walk can still be empty here.
+    if ([viewController isKindOfClass:[UINavigationController class]]) {
+        UISplitViewController *registered =
+            [sPaneNavigationOwners objectForKey:(UINavigationController *)viewController];
+        if ([registered isKindOfClass:[ApolloPaneSplitViewController class]]) return registered;
+    }
     return nil;
+}
+
+void ApolloPaneRegisterNavigationController(UINavigationController *navigationController,
+                                            UISplitViewController *splitViewController) {
+    if (!navigationController || !splitViewController) return;
+    if (!sPaneNavigationOwners) {
+        sPaneNavigationOwners = [NSMapTable weakToWeakObjectsMapTable];
+    }
+    [sPaneNavigationOwners setObject:splitViewController forKey:navigationController];
+}
+
+void ApolloPaneUnregisterNavigationController(UINavigationController *navigationController) {
+    if (!navigationController || !sPaneNavigationOwners) return;
+    [sPaneNavigationOwners removeObjectForKey:navigationController];
+}
+
+BOOL ApolloPaneNavigationControllerIsRegisteredToSplit(
+    UINavigationController *navigationController,
+    UISplitViewController *splitViewController) {
+    if (!navigationController || !splitViewController || !sPaneNavigationOwners) return NO;
+    return [sPaneNavigationOwners objectForKey:navigationController] == splitViewController;
 }

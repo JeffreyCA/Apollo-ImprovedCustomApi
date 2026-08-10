@@ -14,6 +14,7 @@
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "UserDefaultConstants.h"
+#import "ipad/ApolloPaneLayout.h"
 
 #import <WebKit/WebKit.h>
 #import <math.h>
@@ -3276,14 +3277,23 @@ UIViewController *ApolloCreateModernModmailViewControllerForPath(NSString *desti
 - (BOOL)tabBarController:(UITabBarController *)tabBarController
  shouldSelectViewController:(UIViewController *)viewController {
     for (UIViewController *candidate in tabBarController.viewControllers) {
+        // PaneEntry's narrowly-scoped native compatibility adapter may expose
+        // synthetic primary navigation controllers while this hook is chained
+        // around Apollo's same delegate method. Recover the real pane before
+        // enumerating columns so hook/link order cannot hide a preserved
+        // mailbox in detail.
+        UIViewController *actualCandidate =
+            ApolloPaneSplitControllerFor(candidate) ?: candidate;
+        UIViewController *actualSelection =
+            ApolloPaneSplitControllerFor(viewController) ?: viewController;
         // Every column: with the iPad pane layout a tab holds more than one
         // navigation controller, and the return marker can be on any of them.
-        for (UINavigationController *navigationController in ApolloAllNavigationControllersForTabChild(candidate)) {
+        for (UINavigationController *navigationController in ApolloAllNavigationControllersForTabChild(actualCandidate)) {
             ApolloDirectChatWebViewController *mailbox = ApolloMailboxReturnController(navigationController);
             // `viewController` is the tab CHILD being selected — the split view
             // controller under the pane layout — so compare by containment
             // rather than identity against the mailbox's navigation controller.
-            if (!mailbox || !ApolloViewControllerContains(viewController, mailbox.navigationController)) continue;
+            if (!mailbox || !ApolloViewControllerContains(actualSelection, mailbox.navigationController)) continue;
 
             ApolloClearMailboxReturn(navigationController);
             [mailbox apollo_prepareForMailboxReturnAnimated:NO];

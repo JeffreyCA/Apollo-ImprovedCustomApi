@@ -1231,13 +1231,33 @@ UIViewController *ApolloMainTabBarController(void) {
     return ApolloTabBarControllerIvarOn(application.delegate);
 }
 
-// Deliberately implemented with plain UIKit rather than by asking the pane
-// module: ApolloCommon is included by nearly every file, and a dependency on
-// src/ipad/ would drag the iPad layout into translation units that must stay
-// free of it. Class-shape matching is enough — no gate check is needed, because
-// a tab child is only ever a split view controller when the layout installed.
+// ApolloCommon is included by nearly every file, so it must not import the pane
+// module. The pane nevertheless has to be the authority for its real navigation
+// controllers: UIKit wraps our plain secondary host in another navigation
+// controller, and `viewControllerForColumn:` can therefore return either that
+// wrapper or the host rather than Apollo's navigation controller nested inside
+// it. Ask for the pane's public column accessor dynamically first, then retain a
+// plain-UIKit fallback for split controllers that do not belong to this feature.
 static UINavigationController *ApolloNavigationControllerForSplitColumn(UISplitViewController *split,
                                                                         UISplitViewControllerColumn column) {
+    SEL paneAccessor = NSSelectorFromString(@"apollo_navigationControllerForColumn:");
+    if ([split respondsToSelector:paneAccessor]) {
+        @try {
+            // ApolloPaneColumn intentionally uses the same 0/1/2 values as
+            // UISplitViewControllerColumn for primary/supplementary/secondary.
+            // Keep the call scalar so this common module needs no ipad/ import.
+            id result = ((id (*)(id, SEL, NSInteger))objc_msgSend)(split, paneAccessor, (NSInteger)column);
+            if ([result isKindOfClass:[UINavigationController class]]) {
+                return (UINavigationController *)result;
+            }
+            ApolloLog(@"[Common] pane column %ld returned non-navigation controller %@",
+                      (long)column, result ? NSStringFromClass([result class]) : @"nil");
+        } @catch (NSException *exception) {
+            ApolloLog(@"[Common] pane navigation accessor threw on %@ column %ld: %@",
+                      split, (long)column, exception);
+        }
+    }
+
     UIViewController *columnController = nil;
     if ([split respondsToSelector:@selector(viewControllerForColumn:)]) {
         @try {

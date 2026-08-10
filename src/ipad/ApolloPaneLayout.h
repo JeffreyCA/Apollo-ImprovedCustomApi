@@ -71,5 +71,23 @@ void ApolloPaneLayoutSetActive(BOOL active);
 // through parents, so it works from a deeply nested child.
 UISplitViewController *_Nullable ApolloPaneSplitControllerFor(UIViewController *_Nullable viewController);
 
+// Records a stable weak owner for a pane navigation controller. UIKit detaches
+// offscreen tab children from containment, and tab selection is not guaranteed
+// to reattach them before synchronous deep-link pushes begin.
+void ApolloPaneRegisterNavigationController(UINavigationController *navigationController,
+                                            UISplitViewController *splitViewController);
+void ApolloPaneUnregisterNavigationController(UINavigationController *navigationController);
+BOOL ApolloPaneNavigationControllerIsRegisteredToSplit(
+    UINavigationController *navigationController,
+    UISplitViewController *splitViewController);
+
+#if APOLLO_SIM_BUILD
+// Launch-time fault injection for the atomic installer. The implementation is
+// simulator-only, so production builds cannot accidentally acquire a failure
+// path from the test harness.
+void ApolloPaneInstallSimCheckpoint(NSString *phase, NSInteger tabIndex);
+BOOL ApolloPaneInstallSimShouldReturnNil(NSString *phase, NSInteger tabIndex);
+#endif
+
 __END_DECLS
 NS_ASSUME_NONNULL_END

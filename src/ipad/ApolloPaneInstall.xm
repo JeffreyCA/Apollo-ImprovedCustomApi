@@ -34,10 +34,129 @@
 @interface SceneDelegate : UIResponder <UIWindowSceneDelegate>
 @end
 
-// Wraps every navigation-controller child of `tabBarController` in a pane
-// controller. Returns YES only if at least one tab was converted — a total
-// failure leaves the stock hierarchy completely untouched, which is what makes
-// the feature fail safe rather than half-applied.
+@interface ApolloPaneInstallNavigationSnapshot : NSObject
+@property (nonatomic, strong) UINavigationController *navigationController;
+@property (nonatomic, copy) NSArray<UIViewController *> *viewControllers;
+@property (nonatomic, copy) NSArray<NSNumber *> *extendedOpaqueFlags;
+@end
+
+@implementation ApolloPaneInstallNavigationSnapshot
+@end
+
+static char kApolloPaneInstallStateKey;
+static NSString *const kApolloPaneInstallStateInstalling = @"installing";
+static NSString *const kApolloPaneInstallStateInstalled = @"installed";
+static NSString *const kApolloPaneInstallStateFailed = @"failed";
+
+static BOOL ApolloPaneIdentityArraysEqual(NSArray *left, NSArray *right) {
+    if (left.count != right.count) return NO;
+    for (NSUInteger index = 0; index < left.count; index++) {
+        if (left[index] != right[index]) return NO;
+    }
+    return YES;
+}
+
+#if APOLLO_SIM_BUILD
+static BOOL ApolloPaneInstallSimMatches(NSString *phase, NSInteger tabIndex) {
+    NSString *requested = NSProcessInfo.processInfo.environment[@"APOLLO_SIM_PANE_INSTALL_FAIL"];
+    if (requested.length == 0 || phase.length == 0) return NO;
+    NSArray<NSString *> *parts = [requested componentsSeparatedByString:@":"];
+    if (![parts.firstObject isEqualToString:phase]) return NO;
+    if (parts.count == 1) return YES;
+    if (parts.count != 2 || tabIndex < 0) return NO;
+    NSScanner *scanner = [NSScanner scannerWithString:parts[1]];
+    NSInteger requestedIndex = NSNotFound;
+    return [scanner scanInteger:&requestedIndex] && scanner.isAtEnd && requestedIndex == tabIndex;
+}
+
+void ApolloPaneInstallSimCheckpoint(NSString *phase, NSInteger tabIndex) {
+    if (!ApolloPaneInstallSimMatches(phase, tabIndex)) return;
+    ApolloLog(@"[PaneInstallTest] injecting exception phase=%@ tab=%ld", phase, (long)tabIndex);
+    [NSException raise:@"ApolloPaneInstallInjectedFailure"
+                format:@"injected phase=%@ tab=%ld", phase, (long)tabIndex];
+}
+
+BOOL ApolloPaneInstallSimShouldReturnNil(NSString *phase, NSInteger tabIndex) {
+    BOOL matches = ApolloPaneInstallSimMatches(phase, tabIndex);
+    if (matches) {
+        ApolloLog(@"[PaneInstallTest] injecting nil phase=%@ tab=%ld", phase, (long)tabIndex);
+    }
+    return matches;
+}
+
+static void ApolloPaneInstallSimWriteStatus(UITabBarController *tabBarController,
+                                            NSString *result,
+                                            BOOL rollbackExact,
+                                            NSString *reason) {
+    NSMutableArray *children = [NSMutableArray array];
+    NSUInteger paneCount = 0;
+    NSUInteger navigationCount = 0;
+    for (UIViewController *child in tabBarController.viewControllers ?: @[]) {
+        BOOL pane = [child isKindOfClass:[ApolloPaneSplitViewController class]];
+        BOOL navigation = [child isKindOfClass:[UINavigationController class]];
+        if (pane) paneCount++;
+        if (navigation) navigationCount++;
+        [children addObject:@{
+            @"class": NSStringFromClass(child.class) ?: @"",
+            @"pane": @(pane),
+            @"navigation": @(navigation),
+            @"stackDepth": navigation ? @(((UINavigationController *)child).viewControllers.count) : @0,
+        }];
+    }
+    NSDictionary *status = @{
+        @"result": result ?: @"unknown",
+        @"reason": reason ?: @"",
+        @"rollbackExact": @(rollbackExact),
+        @"active": @(ApolloPaneLayoutActive()),
+        @"childCount": @(tabBarController.viewControllers.count),
+        @"paneCount": @(paneCount),
+        @"navigationCount": @(navigationCount),
+        @"selectedIndex": @(tabBarController.selectedIndex),
+        @"children": children,
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:status options:NSJSONWritingPrettyPrinted error:nil];
+    [data writeToFile:@"/tmp/apollo-pane-install-status.json" atomically:YES];
+}
+#endif
+
+static ApolloPaneInstallNavigationSnapshot *ApolloPaneSnapshotNavigationController(
+    UINavigationController *navigationController) {
+    ApolloPaneInstallNavigationSnapshot *snapshot = [ApolloPaneInstallNavigationSnapshot new];
+    snapshot.navigationController = navigationController;
+    snapshot.viewControllers = [navigationController.viewControllers copy] ?: @[];
+    NSMutableArray<NSNumber *> *flags = [NSMutableArray arrayWithCapacity:snapshot.viewControllers.count];
+    for (UIViewController *controller in snapshot.viewControllers) {
+        [flags addObject:@(controller.extendedLayoutIncludesOpaqueBars)];
+    }
+    snapshot.extendedOpaqueFlags = flags;
+    return snapshot;
+}
+
+static BOOL ApolloPaneRestoreMatchesSnapshots(
+    UITabBarController *tabBarController,
+    NSArray<UIViewController *> *originalChildren,
+    NSArray<ApolloPaneInstallNavigationSnapshot *> *navigationSnapshots,
+    UIViewController *originalSelectedController,
+    NSUInteger originalSelectedIndex) {
+    if (!ApolloPaneIdentityArraysEqual(tabBarController.viewControllers, originalChildren)) return NO;
+    NSUInteger expectedSelection = [originalChildren indexOfObjectIdenticalTo:originalSelectedController];
+    if (expectedSelection == NSNotFound) expectedSelection = originalSelectedIndex;
+    if (expectedSelection < originalChildren.count && tabBarController.selectedIndex != expectedSelection) return NO;
+    for (ApolloPaneInstallNavigationSnapshot *snapshot in navigationSnapshots) {
+        if (!ApolloPaneIdentityArraysEqual(snapshot.navigationController.viewControllers,
+                                           snapshot.viewControllers)) return NO;
+        for (NSUInteger index = 0; index < snapshot.viewControllers.count; index++) {
+            if (snapshot.viewControllers[index].extendedLayoutIncludesOpaqueBars !=
+                snapshot.extendedOpaqueFlags[index].boolValue) return NO;
+        }
+    }
+    return YES;
+}
+
+// Wraps every navigation-controller child of `tabBarController` in one atomic
+// transaction. Returns YES only after the complete staged hierarchy passes its
+// identity/containment postconditions; every exception restores the exact stock
+// children, stacks, flags and selection before returning to Apollo.
 static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarController) {
     if (![tabBarController isKindOfClass:[UITabBarController class]]) {
         ApolloLog(@"[PaneInstall] root is not a UITabBarController (%@); skipping",
@@ -45,51 +164,215 @@ static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarCont
         return NO;
     }
 
-    NSArray<UIViewController *> *children = tabBarController.viewControllers;
+    NSString *existingState = objc_getAssociatedObject(tabBarController, &kApolloPaneInstallStateKey);
+    if ([existingState isEqualToString:kApolloPaneInstallStateInstalled]) {
+        ApolloLog(@"[PaneInstall] transaction already committed on this tab bar controller");
+        return YES;
+    }
+    if ([existingState isEqualToString:kApolloPaneInstallStateInstalling] ||
+        [existingState isEqualToString:kApolloPaneInstallStateFailed]) {
+        ApolloLog(@"[PaneInstall] refusing transaction in terminal state=%@", existingState);
+        return NO;
+    }
+
+    NSArray<UIViewController *> *children = [tabBarController.viewControllers copy];
     if (children.count == 0) {
         ApolloLog(@"[PaneInstall] tab bar controller has no children; skipping");
         return NO;
     }
 
-    NSMutableArray<UIViewController *> *converted = [NSMutableArray arrayWithCapacity:children.count];
-    NSUInteger wrapped = 0;
-
-    for (NSUInteger index = 0; index < children.count; index++) {
-        UIViewController *child = children[index];
-
-        // Anything that is not a navigation controller stays exactly as it is.
-        // Apollo ships five navigation controllers today, but an unexpected
-        // child must not be dropped from the tab bar.
-        if (![child isKindOfClass:[UINavigationController class]]) {
-            ApolloLog(@"[PaneInstall] tab %lu is %@, not a navigation controller; left as-is",
-                      (unsigned long)index, NSStringFromClass([child class]));
-            [converted addObject:child];
-            continue;
-        }
-
-        ApolloPaneSplitViewController *pane =
-            [ApolloPaneSplitViewController paneControllerWithRootNavigationController:(UINavigationController *)child
-                                                                            tabIndex:(NSInteger)index];
-        if (!pane) {
-            ApolloLog(@"[PaneInstall] tab %lu pane construction failed; left as-is", (unsigned long)index);
-            [converted addObject:child];
-            continue;
-        }
-
-        [converted addObject:pane];
-        wrapped++;
+    NSUInteger existingPaneCount = 0;
+    NSUInteger existingNavigationCount = 0;
+    for (UIViewController *child in children) {
+        if ([child isKindOfClass:[ApolloPaneSplitViewController class]]) existingPaneCount++;
+        if ([child isKindOfClass:[UINavigationController class]]) existingNavigationCount++;
     }
-
-    if (wrapped == 0) {
-        ApolloLog(@"[PaneInstall] no tabs converted; leaving stock hierarchy untouched");
+    if (existingPaneCount > 0) {
+        if (existingNavigationCount == 0) {
+            objc_setAssociatedObject(tabBarController, &kApolloPaneInstallStateKey,
+                                     kApolloPaneInstallStateInstalled, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            ApolloLog(@"[PaneInstall] complete pane hierarchy already present; adopting it");
+            return YES;
+        }
+        objc_setAssociatedObject(tabBarController, &kApolloPaneInstallStateKey,
+                                 kApolloPaneInstallStateFailed, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[PaneInstall] mixed pane/navigation hierarchy rejected; refusing to wrap again");
         return NO;
     }
 
-    // Reassigning `viewControllers` resets the selection, so restore it. Read
-    // the index before the write: the setter clamps/zeroes it as a side effect.
-    NSUInteger selected = tabBarController.selectedIndex;
-    tabBarController.viewControllers = converted;
-    if (selected < converted.count) tabBarController.selectedIndex = selected;
+    objc_setAssociatedObject(tabBarController, &kApolloPaneInstallStateKey,
+                             kApolloPaneInstallStateInstalling, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSUInteger originalSelectedIndex = tabBarController.selectedIndex;
+    UIViewController *originalSelectedController = tabBarController.selectedViewController;
+    NSMutableArray<ApolloPaneInstallNavigationSnapshot *> *navigationSnapshots = [NSMutableArray array];
+    for (UIViewController *child in children) {
+        if ([child isKindOfClass:[UINavigationController class]]) {
+            [navigationSnapshots addObject:ApolloPaneSnapshotNavigationController(
+                (UINavigationController *)child)];
+        }
+    }
+    if (navigationSnapshots.count == 0) {
+        objc_setAssociatedObject(tabBarController, &kApolloPaneInstallStateKey,
+                                 kApolloPaneInstallStateFailed, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[PaneInstall] no eligible navigation-controller tabs; leaving stock hierarchy intact");
+        return NO;
+    }
+
+    NSMutableArray<UIViewController *> *converted = [NSMutableArray arrayWithCapacity:children.count];
+    NSMutableArray<ApolloPaneSplitViewController *> *stagedPanes = [NSMutableArray array];
+#if APOLLO_SIM_BUILD
+    NSString *failureReason = nil;
+#endif
+
+    @try {
+#if APOLLO_SIM_BUILD
+        ApolloPaneInstallSimCheckpoint(@"preflight", -1);
+#endif
+        // Construction reparents the original navigation controllers. Detach
+        // the entire stock array first so UIKit never sees one controller with
+        // two parents. This is a staged mutation covered by the exact rollback
+        // snapshot below; no partially converted array is ever published.
+        tabBarController.viewControllers = @[];
+#if APOLLO_SIM_BUILD
+        ApolloPaneInstallSimCheckpoint(@"after-detach", -1);
+#endif
+
+        for (NSUInteger index = 0; index < children.count; index++) {
+            UIViewController *child = children[index];
+
+            // Anything that is not a navigation controller stays exactly as it
+            // is, at the same identity and index.
+            if (![child isKindOfClass:[UINavigationController class]]) {
+                ApolloLog(@"[PaneInstall] tab %lu is %@, not a navigation controller; left as-is",
+                          (unsigned long)index, NSStringFromClass([child class]));
+                [converted addObject:child];
+                continue;
+            }
+#if APOLLO_SIM_BUILD
+            ApolloPaneInstallSimCheckpoint(@"construct-begin", (NSInteger)index);
+            if (ApolloPaneInstallSimShouldReturnNil(@"construct-nil", (NSInteger)index)) {
+                [NSException raise:@"ApolloPaneInstallInjectedNil"
+                            format:@"injected nil pane at tab %lu", (unsigned long)index];
+            }
+#endif
+
+            ApolloPaneSplitViewController *pane =
+                [ApolloPaneSplitViewController paneControllerWithRootNavigationController:
+                    (UINavigationController *)child tabIndex:(NSInteger)index];
+            if (!pane) {
+                [NSException raise:@"ApolloPaneInstallationException"
+                            format:@"tab %lu pane construction returned nil", (unsigned long)index];
+            }
+            [stagedPanes addObject:pane];
+            [converted addObject:pane];
+#if APOLLO_SIM_BUILD
+            ApolloPaneInstallSimCheckpoint(@"construct-complete", (NSInteger)index);
+#endif
+        }
+
+        if (converted.count != children.count || stagedPanes.count != navigationSnapshots.count) {
+            [NSException raise:@"ApolloPaneInstallationException"
+                        format:@"staged child count mismatch"];
+        }
+#if APOLLO_SIM_BUILD
+        ApolloPaneInstallSimCheckpoint(@"validate", -1);
+#endif
+        NSUInteger snapshotIndex = 0;
+        for (NSUInteger index = 0; index < children.count; index++) {
+            UIViewController *original = children[index];
+            UIViewController *replacement = converted[index];
+            if (![original isKindOfClass:[UINavigationController class]]) {
+                if (replacement != original) {
+                    [NSException raise:@"ApolloPaneInstallationException"
+                                format:@"passthrough tab %lu changed identity", (unsigned long)index];
+                }
+                continue;
+            }
+            ApolloPaneInstallNavigationSnapshot *snapshot = navigationSnapshots[snapshotIndex++];
+            ApolloPaneSplitViewController *pane = (ApolloPaneSplitViewController *)replacement;
+            if (![pane isKindOfClass:[ApolloPaneSplitViewController class]] ||
+                ![pane apollo_validateInstallationWithOriginalNavigationController:
+                    snapshot.navigationController originalStack:snapshot.viewControllers] ||
+                pane.tabBarItem != original.tabBarItem) {
+                [NSException raise:@"ApolloPaneInstallationException"
+                            format:@"tab %lu failed staging postconditions", (unsigned long)index];
+            }
+        }
+
+        tabBarController.viewControllers = converted;
+#if APOLLO_SIM_BUILD
+        ApolloPaneInstallSimCheckpoint(@"commit-children", -1);
+#endif
+        NSUInteger selectedIndex = [children indexOfObjectIdenticalTo:originalSelectedController];
+        if (selectedIndex == NSNotFound) selectedIndex = originalSelectedIndex;
+        if (selectedIndex < converted.count) tabBarController.selectedIndex = selectedIndex;
+#if APOLLO_SIM_BUILD
+        ApolloPaneInstallSimCheckpoint(@"commit-selection", -1);
+#endif
+        if (!ApolloPaneIdentityArraysEqual(tabBarController.viewControllers, converted) ||
+            (selectedIndex < converted.count && tabBarController.selectedViewController != converted[selectedIndex])) {
+            [NSException raise:@"ApolloPaneInstallationException"
+                        format:@"committed tab hierarchy failed exact postconditions"];
+        }
+#if APOLLO_SIM_BUILD
+        ApolloPaneInstallSimCheckpoint(@"postcondition", -1);
+#endif
+    } @catch (NSException *exception) {
+#if APOLLO_SIM_BUILD
+        failureReason = exception.reason ?: exception.name;
+#endif
+        ApolloLog(@"[PaneInstall] transaction failed safely: %@; restoring stock hierarchy", exception);
+        for (ApolloPaneSplitViewController *pane in stagedPanes.reverseObjectEnumerator) {
+            @try {
+                [pane apollo_prepareForInstallationRollback];
+            } @catch (NSException *cleanupException) {
+                ApolloLog(@"[PaneInstall] staged pane cleanup threw: %@", cleanupException);
+            }
+        }
+        for (ApolloPaneInstallNavigationSnapshot *snapshot in navigationSnapshots) {
+            @try {
+                [snapshot.navigationController setViewControllers:snapshot.viewControllers animated:NO];
+                for (NSUInteger index = 0; index < snapshot.viewControllers.count; index++) {
+                    snapshot.viewControllers[index].extendedLayoutIncludesOpaqueBars =
+                        snapshot.extendedOpaqueFlags[index].boolValue;
+                }
+            } @catch (NSException *restoreException) {
+                ApolloLog(@"[PaneInstall] navigation snapshot restore threw: %@", restoreException);
+            }
+        }
+        @try {
+            tabBarController.viewControllers = children;
+            NSUInteger selectedIndex = [children indexOfObjectIdenticalTo:originalSelectedController];
+            if (selectedIndex == NSNotFound) selectedIndex = originalSelectedIndex;
+            if (selectedIndex < children.count) tabBarController.selectedIndex = selectedIndex;
+        } @catch (NSException *restoreException) {
+            ApolloLog(@"[PaneInstall] stock tab hierarchy restore threw: %@", restoreException);
+        }
+        BOOL rollbackExact = ApolloPaneRestoreMatchesSnapshots(
+            tabBarController, children, navigationSnapshots,
+            originalSelectedController, originalSelectedIndex);
+        for (ApolloPaneInstallNavigationSnapshot *snapshot in navigationSnapshots) {
+            for (ApolloPaneSplitViewController *pane in stagedPanes) {
+                if (ApolloPaneNavigationControllerIsRegisteredToSplit(
+                        snapshot.navigationController, pane)) {
+                    rollbackExact = NO;
+                    ApolloLog(@"[PaneInstall] rollback left a stale navigation-owner registration");
+                }
+            }
+        }
+        objc_setAssociatedObject(tabBarController, &kApolloPaneInstallStateKey,
+                                 kApolloPaneInstallStateFailed, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[PaneInstall] rollback exact=%d children=%lu selected=%lu",
+                  rollbackExact, (unsigned long)tabBarController.viewControllers.count,
+                  (unsigned long)tabBarController.selectedIndex);
+#if APOLLO_SIM_BUILD
+        ApolloPaneInstallSimWriteStatus(tabBarController, @"rolled-back", rollbackExact, failureReason);
+#endif
+        return NO;
+    }
+
+    objc_setAssociatedObject(tabBarController, &kApolloPaneInstallStateKey,
+                             kApolloPaneInstallStateInstalled, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // THE FIXED SIDEBAR.
     //
@@ -117,11 +400,27 @@ static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarCont
     // beside the two-column panes, which is a coherent, if less native, layout —
     // the feature degrades rather than becoming unavailable.
     if (@available(iOS 18.0, *)) {
-        tabBarController.mode = UITabBarControllerModeTabSidebar;
-        ApolloLog(@"[PaneInstall] tab sidebar on: mode=%ld sidebar=%@ hidden=%d",
-                  (long)tabBarController.mode,
-                  tabBarController.sidebar,
-                  tabBarController.sidebar ? tabBarController.sidebar.isHidden : -1);
+        UITabBarControllerMode originalMode = tabBarController.mode;
+        @try {
+#if APOLLO_SIM_BUILD
+            ApolloPaneInstallSimCheckpoint(@"sidebar-before", -1);
+#endif
+            tabBarController.mode = UITabBarControllerModeTabSidebar;
+#if APOLLO_SIM_BUILD
+            ApolloPaneInstallSimCheckpoint(@"sidebar-after", -1);
+#endif
+            ApolloLog(@"[PaneInstall] tab sidebar on: mode=%ld sidebar=%@ hidden=%d",
+                      (long)tabBarController.mode,
+                      tabBarController.sidebar,
+                      tabBarController.sidebar ? tabBarController.sidebar.isHidden : -1);
+        } @catch (NSException *exception) {
+            // Sidebar mode is enhancement, not a structural prerequisite. A
+            // failure falls back to the coherent iOS-17-style tab bar while the
+            // already validated panes remain installed and active.
+            @try { tabBarController.mode = originalMode; } @catch (__unused NSException *ignored) {}
+            ApolloLog(@"[PaneInstall] tab sidebar setup failed safely: %@; keeping panes with mode=%ld",
+                      exception, (long)tabBarController.mode);
+        }
 
         // NOT ATTEMPTED AGAIN: `sidebar.preferredLayout`.
         // -[UITabBarControllerSidebar _resolvedLayout] maps preferredLayout 0
@@ -135,7 +434,8 @@ static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarCont
     }
 
     ApolloLog(@"[PaneInstall] installed panes on %lu/%lu tabs (selected=%lu)",
-              (unsigned long)wrapped, (unsigned long)children.count, (unsigned long)selected);
+              (unsigned long)stagedPanes.count, (unsigned long)children.count,
+              (unsigned long)tabBarController.selectedIndex);
     return YES;
 }
 
@@ -145,6 +445,21 @@ static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarCont
 
 - (void)scene:(UIScene *)scene willConnectToSession:(id)session options:(id)options {
     %orig;
+
+#if APOLLO_SIM_BUILD
+    // Deterministic cold-entry harness for Xcode 27, whose URL dispatcher does
+    // not deliver custom-scheme callbacks to this re-signed simulator app.
+    // Calling before pane installation gives Apollo the exact stock hierarchy
+    // its real cold connection-options handler sees; the constructor below
+    // must then normalize the resulting stack.
+    NSString *coldURLString = NSProcessInfo.processInfo.environment[@"APOLLO_SIM_COLD_URL"];
+    NSURL *coldURL = coldURLString.length > 0 ? [NSURL URLWithString:coldURLString] : nil;
+    if (coldURL) {
+        BOOL routed = ApolloRouteURLThroughApp(coldURL);
+        ApolloLog(@"[PaneInstall] simulator cold URL injection routed=%d scheme=%@",
+                  routed, coldURL.scheme.lowercaseString);
+    }
+#endif
 
     // Re-check the gate here rather than trusting the %ctor decision alone: a
     // second scene (Stage Manager, an external display) connects later, and the
@@ -176,15 +491,11 @@ static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarCont
         return;
     }
 
-    // Idempotence: if this controller's children are already panes, a second
-    // pass would wrap the panes themselves.
-    if ([tabBarController.viewControllers.firstObject isKindOfClass:[ApolloPaneSplitViewController class]]) {
-        ApolloLog(@"[PaneInstall] panes already installed on this tab bar controller; skipping");
-        return;
-    }
-
     if (ApolloPaneInstallIntoTabBarController(tabBarController)) {
         ApolloPaneLayoutSetActive(YES);
+#if APOLLO_SIM_BUILD
+        ApolloPaneInstallSimWriteStatus(tabBarController, @"installed", YES, nil);
+#endif
     }
 }
 
