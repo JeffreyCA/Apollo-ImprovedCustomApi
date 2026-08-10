@@ -1063,13 +1063,13 @@ static void LGPromptForIconAppearance(UIView *hostView, const LGIconRow *row,
     if (!hostView || !row) return;
     UIAlertController *chooser = [UIAlertController
         alertControllerWithTitle:row->displayName
-                         message:@"Choose how this icon responds to appearance changes."
+                         message:@"Choose an appearance for this icon."
                   preferredStyle:UIAlertControllerStyleAlert];
 
     NSArray<NSDictionary *> *choices = @[
         @{ @"title": @"Light",   @"mode": @(LGIconAppearanceModeLight) },
         @{ @"title": @"Dark",    @"mode": @(LGIconAppearanceModeDark) },
-        @{ @"title": @"Dynamic", @"mode": @(LGIconAppearanceModeDynamic) },
+        @{ @"title": @"System",  @"mode": @(LGIconAppearanceModeDynamic) },
     ];
     __weak UIView *weakHost = hostView;
     for (NSDictionary *choice in choices) {
