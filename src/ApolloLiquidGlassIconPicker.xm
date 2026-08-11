@@ -1090,8 +1090,7 @@ static void LGApplyAlternateIcon(UIView *hostView, NSString *iconID, void (^comp
     });
 }
 
-static UISelectionFeedbackGenerator *LGPreparedSelectionFeedback(BOOL enabled) {
-    if (!enabled) return nil;
+static UISelectionFeedbackGenerator *LGPreparedSelectionFeedback(void) {
     UISelectionFeedbackGenerator *feedback = [[UISelectionFeedbackGenerator alloc] init];
     [feedback prepare];
     return feedback;
@@ -1101,9 +1100,7 @@ static void LGApplyIconUsingPreferredAppearance(UIView *hostView, const LGIconRo
                                                 void (^completion)(BOOL success)) {
     if (!hostView || !row) return;
     NSString *alternateName = LGAlternateIconNameForMode(row->iconID, LGPreferredAppearanceMode());
-    UISelectionFeedbackGenerator *feedback = LGPreparedSelectionFeedback(
-        ![LGActiveIconID() isEqualToString:row->iconID]
-    );
+    UISelectionFeedbackGenerator *feedback = LGPreparedSelectionFeedback();
     if (!LGAlternateIconRegisteredInInfoPlist(alternateName)) {
         ApolloLog(@"[LGIconPicker] appearance asset is not registered: %@", alternateName);
     }
@@ -1126,8 +1123,8 @@ static void LGSelectPreferredAppearance(UIView *hostView, LGIconAppearanceMode m
         return;
     }
 
-    BOOL appearanceChanged = LGAppearanceModeFromAlternateIconName(LGActiveAlternateIconName()) != mode;
-    UISelectionFeedbackGenerator *feedback = LGPreparedSelectionFeedback(appearanceChanged);
+    BOOL appearanceChanged = LGPreferredAppearanceMode() != mode;
+    UISelectionFeedbackGenerator *feedback = appearanceChanged ? LGPreparedSelectionFeedback() : nil;
     NSString *alternateName = LGAlternateIconNameForMode(activeRow->iconID, mode);
     LGApplyAlternateIcon(hostView, alternateName, ^(BOOL success) {
         if (success) {
