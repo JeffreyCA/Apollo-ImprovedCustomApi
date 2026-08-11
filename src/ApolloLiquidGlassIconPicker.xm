@@ -288,6 +288,15 @@ static NSString *LGAppearanceModeTitle(LGIconAppearanceMode mode) {
     return @"System";
 }
 
+static UIImage *LGAppearanceModeImage(LGIconAppearanceMode mode) {
+    switch (mode) {
+        case LGIconAppearanceModeLight:   return [UIImage systemImageNamed:@"sun.max"];
+        case LGIconAppearanceModeDark:    return [UIImage systemImageNamed:@"moon"];
+        case LGIconAppearanceModeDynamic: return [UIImage systemImageNamed:@"circle.lefthalf.filled"];
+    }
+    return nil;
+}
+
 #pragma mark - Runtime icon model
 
 typedef struct {
@@ -1153,7 +1162,7 @@ static void LGInstallAppearanceMenu(UIViewController *controller, UIView *hostVi
     for (NSNumber *modeNumber in modes) {
         LGIconAppearanceMode mode = (LGIconAppearanceMode)modeNumber.integerValue;
         UIAction *action = [UIAction actionWithTitle:LGAppearanceModeTitle(mode)
-                                              image:nil
+                                              image:LGAppearanceModeImage(mode)
                                          identifier:nil
                                             handler:^(__kindof UIAction *menuAction) {
             UIViewController *strongController = weakController;
