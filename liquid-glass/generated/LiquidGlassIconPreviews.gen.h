@@ -21,7 +21,7 @@ typedef struct {
 
 static const LGIconRowEntry kLGGroupEntries_original[] = {
     { "apollo", "Apollo", "IllIIllIllIllII" },
-    { "apollo-glass", "Apollo Glass", "IllIIllIllIllII" },
+    { "AppIcon", "Apollo Glass", "IllIIllIllIllII" },
     { "halo", "Halo", "IllIIllIllIllII" },
     { "halo-glass", "Halo Glass", "IllIIllIllIllII" },
     { "igerman00", "Canon", "iGerman00" },
@@ -33,50 +33,52 @@ static const LGIconRowEntry kLGGroupEntries_original[] = {
 };
 
 static const LGIconRowEntry kLGGroupEntries_classics[] = {
-    { "jryng-morty", "Wubalubadubdub", "jryng" },
-    { "jryng-duck", "Wilson", "jryng" },
-    { "jryng-antenna", "Irradiate", "jryng" },
-    { "jryng-spaceship", "Stanley", "jryng" },
-    { "jryng-burnt-orange", "Nuclear Sunset", "jryng" },
-    { "bajader-sunset", "Sunset", "bajader" },
-    { "jryng-green", "Danger Noodle", "jryng" },
-    { "jryng-dark", "Lumos", "jryng" },
-    { "jryng-orange", "Hugo", "jryng" },
-    { "jryng-purple", "Great Googly Moogly", "jryng" },
-    { "jryng-white", "Dark Link", "jryng" },
-    { "jryng-pink", "Jibbles", "jryng" },
-    { "jryng-gold", "I Love Goooold", "jryng" },
-    { "jryng-crimson", "Ruby", "jryng" },
-    { "jryng-blueberry", "Blueberry Breath", "jryng" },
-    { "jryng-calico", "Calico", "jryng" },
-    { "jryng-castro", "Beware the Turtles", "jryng" },
-    { "jryng-teal", "Under the Sea", "jryng" },
-    { "jryng-brown", "Tremors", "jryng" },
-    { "jryng-sunset", "Crimson", "jryng" },
-    { "jryng-gravel-juice", "Gravel Juice", "jryng" },
-    { "jryng-gray", "Deep Space", "jryng" },
-    { "jryng-chosen-one", "Chosen One", "jryng" },
-    { "jryng-enter-the-state", "Enter the State", "jryng" },
-    { "jryng-rule-of-two", "Rule of Two", "jryng" },
-    { "jryng-galactic-zoomer", "Galactic Zoomer", "jryng" },
-    { "jryng-six-colors", "Six Colors", "jryng" },
-    { "jryng-clearly-combustion", "Clearly Combustion", "jryng" },
-    { "jryng-dino-spoon", "Dino Spoon", "jryng" },
-    { "jryng-apollos6", "ApollOS 6", "jryng" },
-    { "jryng-atp", "ATP", "jryng" },
-    { "jryng-canada", "Canada D'Eh", "jryng" },
-    { "jryng-ernest", "Ernest", "jryng" },
-    { "jryng-dave2d", "Teal All the Things", "jryng" },
-    { "jryng-red-black-white", "Apollo: First App in 8K?", "jryng" },
-    { "jryng-camera-pool", "Wrapping Paper", "jryng" },
-    { "jryng-peachy", "Peachy", "jryng" },
-    { "jryng-tld", "Yo. Jonathan Here.", "jryng" },
-    { "jryng-snazzy", "Margaret", "jryng" },
-    { "jryng-andru", "Pro Wrestler", "jryng" },
-    { "jryng-eap", "EAP", "jryng" },
-    { "lilacvibes-trans", "Trans", "lilacvibes" },
-    { "lilacvibes-pride", "Pride", "lilacvibes" },
-    { "lilacvibes-progress", "Progress Pride", "lilacvibes" },
+    { "morty", "Wubalubadubdub", "IllIIllIllIllII" },
+    { "duck", "Wilson", "IllIIllIllIllII" },
+    { "antenna", "Irradiate", "jryng" },
+    { "spaceship", "Stanley", "jryng" },
+    { "burnt-orange", "Nuclear Sunset", "IllIIllIllIllII" },
+    { "green", "Danger Noodle", "IllIIllIllIllII" },
+    { "dark", "Lumos", "IllIIllIllIllII" },
+    { "orange", "Hugo", "IllIIllIllIllII" },
+    { "purple", "Great Googly Moogly", "IllIIllIllIllII" },
+    { "white", "Dark Link", "IllIIllIllIllII" },
+    { "pink", "Jibbles", "IllIIllIllIllII" },
+    { "gold", "I Love Goooold", "IllIIllIllIllII" },
+    { "crimson", "Ruby", "IllIIllIllIllII" },
+    { "blueberry", "Blueberry Breath", "IllIIllIllIllII" },
+    { "calico", "Calico", "IllIIllIllIllII" },
+    { "castro", "Beware the Turtles", "IllIIllIllIllII" },
+    { "teal", "Under the Sea", "IllIIllIllIllII" },
+    { "brown", "Tremors", "IllIIllIllIllII" },
+    { "sunset", "Crimson", "IllIIllIllIllII" },
+    { "gravel-juice", "Gravel Juice", "IllIIllIllIllII" },
+    { "gray", "Deep Space", "IllIIllIllIllII" },
+    { "chosen-one", "Chosen One", "IllIIllIllIllII" },
+    { "enter-the-state", "Enter the State", "IllIIllIllIllII" },
+    { "rule-of-two", "Rule of Two", "IllIIllIllIllII" },
+    { "galactic-zoomer", "Galactic Zoomer", "IllIIllIllIllII" },
+    { "six-colors", "Six Colors", "IllIIllIllIllII" },
+    { "stonewall", "Stonewall", "IllIIllIllIllII" },
+    { "trans", "Helms", "IllIIllIllIllII" },
+    { "pride", "Pride", "IllIIllIllIllII" },
+    { "clearly-combustion", "Clearly Combustion", "IllIIllIllIllII" },
+    { "dino-spoon", "Dino Spoon", "jryng" },
+    { "apollos6", "ApollOS 6", "IllIIllIllIllII" },
+    { "atp", "ATP", "IllIIllIllIllII" },
+    { "canada", "Canada D'Eh", "IllIIllIllIllII" },
+    { "ernest", "Ernest", "jryng" },
+    { "slothkun", "Sloth-Kun", "IllIIllIllIllII" },
+    { "dave2d", "Teal All the Things", "IllIIllIllIllII" },
+    { "red-black-white", "Apollo: First App in 8K?", "IllIIllIllIllII" },
+    { "camera-pool", "Wrapping Paper", "IllIIllIllIllII" },
+    { "peachy", "Peachy", "IllIIllIllIllII" },
+    { "sandals", "Sandals 'n Socks", "IllIIllIllIllII" },
+    { "andru", "Pro Wrestler", "IllIIllIllIllII" },
+    { "rene", "A+ Intontaion", "IllIIllIllIllII" },
+    { "tld", "Yo. Jonathan Here.", "IllIIllIllIllII" },
+    { "snazzy", "Margaret", "IllIIllIllIllII" },
+    { "eap", "Icons Drop Test", "IllIIllIllIllII" },
 };
 
 static const LGIconRowEntry kLGGroupEntries_helios[] = {
@@ -97,27 +99,28 @@ static const LGIconRowEntry kLGGroupEntries_concepts[] = {
     { "bajader-aperture-science", "Aperture Science", "bajader" },
     { "bajader-apollos", "ApollOS", "bajader" },
     { "bajader-glitched", "Glitched", "bajader" },
+    { "bajader-sunset", "Sunset", "bajader" },
     { "paulo1manso-modern", "Modern", "paulo1manso" },
     { "paulo1manso-modern-alt", "Modern Alt", "paulo1manso" },
-    { "jryng-red", "Red", "jryng" },
     { "synthwave", "Synthwave", "IllIIllIllIllII" },
+    { "jryng-red", "Red", "jryng" },
 };
 
 static const char *const kLGGroupCover_original[] = {
     "harunatsu",
     "halo-glass",
-    "apollo-glass",
+    "AppIcon",
 };
 
 static const char *const kLGGroupCover_classics[] = {
-    "lilacvibes-pride",
-    "bajader-sunset",
-    "jryng-antenna",
+    "white",
+    "crimson",
+    "galactic-zoomer",
 };
 
 static const char *const kLGGroupCover_helios[] = {
-    "helios-cryo-halo",
-    "helios-pixel",
+    "helios-legacy",
+    "helios-cryo",
     "helios",
 };
 
@@ -129,19 +132,19 @@ static const char *const kLGGroupCover_concepts[] = {
 
 static const LGIconGroupDef kLGIconGroups[] = {
     { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 10, kLGGroupCover_original, 3 },
-    { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", "jryng, bajader, lilacvibes", kLGGroupEntries_classics, 44, kLGGroupCover_classics, 3 },
+    { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", "jryng, IllIIllIllIllII", kLGGroupEntries_classics, 46, kLGGroupCover_classics, 3 },
     { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 11, kLGGroupCover_helios, 3 },
-    { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "", kLGGroupEntries_concepts, 7, kLGGroupCover_concepts, 3 },
+    { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "bajader, paulo1manso, jryng", kLGGroupEntries_concepts, 8, kLGGroupCover_concepts, 3 },
 };
 
 static const size_t kLGIconGroupCount = 4;
 
 static const LGIconRowEntry kLGFeaturedEntries[] = {
-    { "halo", "Halo", "IllIIllIllIllII" },
+    { "halo-glass", "Halo Glass", "IllIIllIllIllII" },
     { "helios-pixel", "Pixels", "IllIIllIllIllII" },
     { "bajader-aperture-science", "Aperture Science", "bajader" },
     { "paulo1manso-modern", "Modern", "paulo1manso" },
-    { "lilacvibes-progress", "Progress Pride", "lilacvibes" },
+    { "pride", "Pride", "IllIIllIllIllII" },
 };
 
 static const size_t kLGFeaturedEntryCount = 5;
