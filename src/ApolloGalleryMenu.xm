@@ -34,9 +34,12 @@
 // "..." menu. The claim is recorded on the controller so repeat builds of the
 // same sheet re-inject, and no later, unrelated sheet can pick it up.
 //
-// Popular/All, profile feeds and search results never get the row: subreddit
+// Popular/All, special feeds and search results never get the row: subreddit
 // slugs and canonical multireddit paths are resolved by ApolloSubredditHeaders,
-// whose helpers gate on Apollo's own PostsType tag.
+// whose helpers gate on Apollo's own PostsType tag. User profiles DO get it
+// (their "..." arms on ProfileViewController below, resolved to "u/<name>");
+// the signed-in user's own profile tab has no native "..." at all, so
+// ApolloProfileMoreMenu.xm builds one with Gallery View built in.
 
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
@@ -52,6 +55,9 @@
 // profile/special feeds).
 extern NSString *ApolloSubredditNameFromViewController(UIViewController *viewController);
 extern NSString *ApolloMultiredditPathFromViewController(UIViewController *viewController);
+// Defined in ApolloUserAvatars.xm — the username a profile screen is showing,
+// nil while it can't be determined yet.
+extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController);
 
 static NSString *const kApolloGalleryMenuTitle = @"Gallery View";
 static NSString *const kApolloGalleryMenuSymbol = @"square.grid.2x2";
@@ -96,15 +102,34 @@ static UIViewController *ApolloGalleryMenuOwnerForController(id actionController
     return armed;
 }
 
-// Bare subreddit slug or canonical multireddit path for a claimed controller.
-// Nil keeps Popular/All, profile sections, and every unrelated sheet untouched.
+// "u/<name>" when the owner is a profile screen showing a resolvable user,
+// else nil. The prefix keeps the identifier unambiguous next to bare subreddit
+// slugs and "/user/x/m/y" multireddit paths in the shared plumbing below, and
+// presentGalleryForSubreddit: routes it to the username presenter.
+static NSString *ApolloGalleryMenuProfileIdentifierForOwner(UIViewController *owner) {
+    static Class profileClass = Nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        profileClass = objc_getClass("_TtC6Apollo21ProfileViewController");
+    });
+    if (!profileClass || ![owner isKindOfClass:profileClass]) return nil;
+    NSString *username = ApolloUsernameFromProfileViewController(owner);
+    return username.length > 0 ? [@"u/" stringByAppendingString:username] : nil;
+}
+
+// Bare subreddit slug, canonical multireddit path, or "u/<name>" profile
+// identifier for a claimed controller. Nil keeps Popular/All, special feeds,
+// and every unrelated sheet untouched.
 static NSString *ApolloGalleryMenuListingIdentifierForController(id actionController) {
     UIViewController *owner = ApolloGalleryMenuOwnerForController(actionController);
     if (!owner) return nil;
-    return ApolloSubredditNameFromViewController(owner) ?: ApolloMultiredditPathFromViewController(owner);
+    return ApolloSubredditNameFromViewController(owner)
+        ?: ApolloMultiredditPathFromViewController(owner)
+        ?: ApolloGalleryMenuProfileIdentifierForOwner(owner);
 }
 
 static NSString *ApolloGalleryMenuSourceDescription(NSString *listingIdentifier) {
+    if ([listingIdentifier hasPrefix:@"u/"]) return listingIdentifier;
     if ([listingIdentifier hasPrefix:@"/user/"]) {
         NSString *name = [listingIdentifier pathComponents].lastObject ?: @"multireddit";
         return [@"m/" stringByAppendingString:name];
@@ -118,11 +143,13 @@ static void ApolloGalleryMenuOpenForController(id actionController) {
     if (subreddit.length == 0 && owner) {
         // Keep the established presentation call below: PR #767 wraps that
         // exact call in the Liquid Glass dismissal completion, so a canonical
-        // multireddit path automatically receives the same crash fix.
-        subreddit = ApolloMultiredditPathFromViewController(owner);
+        // multireddit path (and the "u/<name>" profile identifier)
+        // automatically receives the same crash fix.
+        subreddit = ApolloMultiredditPathFromViewController(owner)
+            ?: ApolloGalleryMenuProfileIdentifierForOwner(owner);
     }
     if (subreddit.length == 0 || !owner) {
-        ApolloLog(@"[GalleryMenu] Gallery View tapped but the subreddit could not be resolved");
+        ApolloLog(@"[GalleryMenu] Gallery View tapped but the listing could not be resolved");
         return;
     }
 
@@ -131,8 +158,8 @@ static void ApolloGalleryMenuOpenForController(id actionController) {
                                              fromViewController:owner];
     };
     if (ApolloNativeActionMenuPerformAfterDismissal(actionController, openGallery)) {
-        ApolloLog(@"[GalleryMenu] Waiting for the glass menu to dismiss before opening r/%@",
-                  subreddit);
+        ApolloLog(@"[GalleryMenu] Waiting for the glass menu to dismiss before opening %@",
+                  ApolloGalleryMenuSourceDescription(subreddit));
         return;
     }
     openGallery();
@@ -210,6 +237,25 @@ void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString 
     NSString *listingIdentifier = ApolloSubredditNameFromViewController(viewController)
         ?: ApolloMultiredditPathFromViewController(viewController);
     if (listingIdentifier.length > 0) {
+        sApolloGalleryArmedVC = (UIViewController *)self;
+        sApolloGalleryArmedAt = CACurrentMediaTime();
+    } else {
+        sApolloGalleryArmedVC = nil;
+    }
+    %orig;
+}
+
+%end
+
+// Someone else's profile: Apollo's own "..." presents the Private Message /
+// Follow / Block sheet, which flows through the same ActionController (and, on
+// Liquid Glass, the same UIMenu conversion) as the subreddit menu — so the
+// identical arm-and-claim adds Gallery View there. The signed-in user's own
+// profile tab never shows this button; ApolloProfileMoreMenu.xm owns that side.
+%hook _TtC6Apollo21ProfileViewController
+
+- (void)moreOptionsBarButtonItemTappedWithSender:(id)sender {
+    if (ApolloGalleryMenuProfileIdentifierForOwner((UIViewController *)self).length > 0) {
         sApolloGalleryArmedVC = (UIViewController *)self;
         sApolloGalleryArmedAt = CACurrentMediaTime();
     } else {

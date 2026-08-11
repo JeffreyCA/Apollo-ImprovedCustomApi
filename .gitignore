@@ -31,7 +31,10 @@ widgets/build-*/
 widgets/*.xcodeproj/
 widgets/Info.plist
 
-# Local iOS Simulator working dir (scripts/run-in-sim.sh)
+# Local iOS Simulator working dirs (scripts/run-in-sim.sh; sessions use
+# .sim-<name> variants so parallel runs don't clobber each other)
 .sim/
+.sim-*/
+.sim[0-9]/
 widgets/build/
 /.agents

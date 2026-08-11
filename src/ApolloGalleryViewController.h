@@ -19,6 +19,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)initWithSubreddit:(NSString *)subreddit NS_DESIGNATED_INITIALIZER;
 // `multiredditPath` is the canonical `/user/<owner>/m/<name>` path.
 - (instancetype)initWithMultiredditPath:(NSString *)multiredditPath NS_DESIGNATED_INITIALIZER;
+// `username` is the bare name, no "u/" prefix. Shows the media that user has
+// posted anywhere on Reddit (their submitted listing).
+- (instancetype)initWithUsername:(NSString *)username NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithNibName:(nullable NSString *)nibName bundle:(nullable NSBundle *)bundle NS_UNAVAILABLE;
 - (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
@@ -37,6 +40,12 @@ NS_ASSUME_NONNULL_BEGIN
 // being incorrectly rebuilt under the active account.
 + (BOOL)presentGalleryForMultiredditPath:(NSString *)multiredditPath
                       fromViewController:(UIViewController *)sourceViewController;
+
+// `username` may carry a "u/" prefix or surrounding whitespace; both are
+// stripped. Returns NO (and does nothing) when no usable name remains or
+// there's no navigation controller to push onto.
++ (BOOL)presentGalleryForUsername:(NSString *)username
+               fromViewController:(UIViewController *)sourceViewController;
 
 @end
 

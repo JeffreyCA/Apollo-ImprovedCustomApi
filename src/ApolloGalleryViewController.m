@@ -312,6 +312,29 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     return self;
 }
 
+- (instancetype)initWithUsername:(NSString *)username {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _subreddit = @"";
+        _sourceDescription = [@"u/" stringByAppendingString:(username ?: @"")];
+        _feed = [[ApolloGalleryFeed alloc] initWithUsername:username];
+        _prefetchRequests = [NSMutableDictionary dictionary];
+    }
+    return self;
+}
+
+// Bare username out of "u/name", "/u/name", "@name", or plain "name"; nil when
+// nothing usable remains. Usernames never contain slashes or spaces.
+static NSString *ApolloGalleryNormalizedUsername(NSString *value) {
+    NSString *name = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    while ([name hasPrefix:@"/"] || [name hasPrefix:@"@"]) name = [name substringFromIndex:1];
+    if ([name.lowercaseString hasPrefix:@"u/"] || [name.lowercaseString hasPrefix:@"user/"]) {
+        name = [name substringFromIndex:[name rangeOfString:@"/"].location + 1];
+    }
+    if (name.length == 0 || [name containsString:@"/"] || [name containsString:@" "]) return nil;
+    return name;
+}
+
 static NSString *ApolloGalleryNormalizedMultiredditPath(NSString *value) {
     NSString *path = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     NSMutableArray<NSString *> *components = [NSMutableArray array];
@@ -346,12 +369,19 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
 + (BOOL)presentGalleryForSubreddit:(NSString *)subreddit fromViewController:(UIViewController *)sourceViewController {
     // GalleryMenu deliberately keeps its established call site so open PRs
     // that defer this presentation until a Liquid Glass menu has dismissed
-    // continue to cover both feed types. A canonical multireddit path is the
-    // only non-subreddit value accepted here.
+    // continue to cover every feed type. A canonical multireddit path and an
+    // explicitly "u/"-prefixed username are the only non-subreddit values
+    // accepted here (a bare name with no prefix is always a subreddit slug).
     NSString *multiredditPath = ApolloGalleryNormalizedMultiredditPath(subreddit);
     if (multiredditPath.length > 0) {
         return [self presentGalleryForMultiredditPath:multiredditPath
                                    fromViewController:sourceViewController];
+    }
+    NSString *prefixCheck = [subreddit stringByTrimmingCharactersInSet:
+                             [NSCharacterSet characterSetWithCharactersInString:@" \t/"]].lowercaseString;
+    if ([prefixCheck hasPrefix:@"u/"] || [prefixCheck hasPrefix:@"user/"]) {
+        return [self presentGalleryForUsername:subreddit
+                            fromViewController:sourceViewController];
     }
 
     NSString *slug = [subreddit stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" \t/"]];
@@ -377,6 +407,21 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     }
 
     ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithMultiredditPath:path];
+    if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
+    ApolloLog(@"[Gallery] opened for %@", gallery.sourceDescription);
+    return YES;
+}
+
++ (BOOL)presentGalleryForUsername:(NSString *)username
+               fromViewController:(UIViewController *)sourceViewController {
+    NSString *name = ApolloGalleryNormalizedUsername(username);
+    if (name.length == 0 || !sourceViewController) {
+        ApolloLog(@"[Gallery] refusing to open: username=%@ source=%@",
+                  username, sourceViewController);
+        return NO;
+    }
+
+    ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithUsername:name];
     if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
     ApolloLog(@"[Gallery] opened for %@", gallery.sourceDescription);
     return YES;
@@ -698,12 +743,16 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     ];
     UIMenu *topMenu = [UIMenu menuWithTitle:@"Top" image:nil identifier:nil options:0 children:topWindows];
 
-    return [UIMenu menuWithTitle:@"Sort" children:@[
+    NSMutableArray<UIMenuElement *> *sorts = [NSMutableArray arrayWithObjects:
         makeSort(@"Hot", ApolloGallerySortHot),
         makeSort(@"New", ApolloGallerySortNew),
-        makeSort(@"Rising", ApolloGallerySortRising),
-        topMenu,
-    ]];
+        nil];
+    // User-profile listings don't accept rising, so don't offer it there.
+    if (self.feed.supportsRisingSort) {
+        [sorts addObject:makeSort(@"Rising", ApolloGallerySortRising)];
+    }
+    [sorts addObject:topMenu];
+    return [UIMenu menuWithTitle:@"Sort" children:sorts];
 }
 
 - (UIAction *)apollo_topWindowActionWithTitle:(NSString *)title window:(ApolloGalleryTopWindow)window {

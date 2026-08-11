@@ -198,7 +198,7 @@ static NSString *ApolloAvatarNormalizedUsername(NSString *username);
 static BOOL ApolloAvatarUsernameMatches(NSString *left, NSString *right);
 static BOOL ApolloProfileUsernameIsLoggedInAccount(NSString *username);
 
-static void ApolloProfileOpenRedditProfileEditor(void);
+void ApolloProfileOpenRedditProfileEditor(void);
 static void ApolloProfileSetSnoovatarMode(ApolloProfileHeaderView *header, BOOL showSnoovatar);
 static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *username, BOOL forceRefresh);
 static void ApolloProfileRemoveHeader(id viewControllerObject, UITableView *tableView);
@@ -495,6 +495,9 @@ static const void *kApolloProfileGlassAccentKey = &kApolloProfileGlassAccentKey;
         _editProfileButton.titleLabel.font = ApolloProfileEditButtonFont();
         _editProfileButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _editProfileButton.layer.cornerCurve = kCACornerCurveContinuous;
+        // Retired in favour of "Edit Profile" in the profile tab's "..." menu
+        // (ApolloProfileMoreMenu.xm); stays permanently hidden.
+        _editProfileButton.hidden = YES;
         [_editProfileButton addTarget:self action:@selector(apollo_editProfileTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_editProfileButton];
 
@@ -1351,8 +1354,11 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     }
     self.aboutLabel.text = aboutText;
     BOOL isLoggedInAccount = ApolloProfileUsernameIsLoggedInAccount(username);
-    ApolloLog(@"[UserAvatars] Edit button username=%@ isLoggedIn=%@", username ?: @"nil", isLoggedInAccount ? @"YES" : @"NO");
-    self.editProfileButton.hidden = !isLoggedInAccount;
+    ApolloLog(@"[UserAvatars] Profile username=%@ isLoggedIn=%@", username ?: @"nil", isLoggedInAccount ? @"YES" : @"NO");
+    // The Edit pill is retired: editing moved into the profile tab's "..."
+    // menu (ApolloProfileMoreMenu.xm), so the header stays clean. The pill and
+    // its layout reserve stay dormant behind this hidden flag.
+    self.editProfileButton.hidden = YES;
 
     // Follow / Message row: shown on someone else's real profile only — never on
     // your own account (that gets Edit) and never for the [deleted] placeholder, and
@@ -3774,7 +3780,9 @@ static void ApolloProfileOpenURL(NSURL *url) {
     [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
 }
 
-static void ApolloProfileOpenRedditProfileEditor(void) {
+// Non-static: also the "Edit Profile" action in the profile tab's "..." menu
+// (ApolloProfileMoreMenu.xm), which replaced the header's Edit pill.
+void ApolloProfileOpenRedditProfileEditor(void) {
     // reddit.com/settings/profile opens the official Reddit app via Universal Links
     // when installed, and otherwise falls back to Reddit's web profile editor.
     ApolloProfileOpenURL([NSURL URLWithString:@"https://www.reddit.com/settings/profile"]);
