@@ -1,3 +1,5 @@
+#import <objc/runtime.h>
+
 #import "ApolloCommon.h"
 #import "ApolloHiddenContentViewController.h"
 
@@ -5,28 +7,37 @@
 // directly, which can be nil for the signed-in user's own profile.
 extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController);
 
-// Nav bar button rather than the native 3-dot menu: that menu doesn't render on
-// your own profile, and this needs to work there too. Hooks the mangled class
-// name -- the bare "ProfileViewController" can resolve to nil at hook-install
-// time under the simulator's internal Logos generator, since it's a lazily-
-// realized Swift class.
-%hook _TtC6Apollo21ProfileViewController
+// The eye lives in the nav bar rather than the native 3-dot menu: that menu
+// doesn't render on your own profile, and this needs to work there too.
+//
+// The button itself is only BUILT here. Placement is owned by
+// ApolloProfileMoreMenu.xm's nav-item normalizer: a plain viewDidLoad append
+// only survives on the signed-in tab — on a pushed profile Apollo rewrites
+// rightBarButtonItems once the user's data arrives (installing its own "...")
+// and the appended eye was silently wiped. The normalizer re-asserts it after
+// every such rewrite instead.
+static char kApolloHiddenContentItemKey;
 
-- (void)viewDidLoad {
-    %orig;
-
-    UIBarButtonItem *hiddenContentItem = [[UIBarButtonItem alloc]
-        initWithImage:[UIImage systemImageNamed:@"eye.slash"]
-        style:UIBarButtonItemStylePlain
-        target:self
-        action:@selector(apollo_showHiddenContent)];
-    hiddenContentItem.accessibilityLabel = @"Hidden & Deleted Posts/Comments";
-
-    UIViewController *vc = (UIViewController *)self;
-    NSMutableArray *items = [NSMutableArray arrayWithArray:vc.navigationItem.rightBarButtonItems ?: @[]];
-    [items addObject:hiddenContentItem];
-    vc.navigationItem.rightBarButtonItems = items;
+UIBarButtonItem *ApolloHiddenContentBarButtonItemForProfile(UIViewController *profileViewController) {
+    if (!profileViewController) return nil;
+    UIBarButtonItem *item = objc_getAssociatedObject(profileViewController, &kApolloHiddenContentItemKey);
+    if (![item isKindOfClass:[UIBarButtonItem class]]) {
+        item = [[UIBarButtonItem alloc]
+            initWithImage:[UIImage systemImageNamed:@"eye.slash"]
+            style:UIBarButtonItemStylePlain
+            target:profileViewController
+            action:@selector(apollo_showHiddenContent)];
+        item.accessibilityLabel = @"Hidden & Deleted Posts/Comments";
+        objc_setAssociatedObject(profileViewController, &kApolloHiddenContentItemKey, item,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return item;
 }
+
+// Hooks the mangled class name -- the bare "ProfileViewController" can resolve
+// to nil at hook-install time under the simulator's internal Logos generator,
+// since it's a lazily-realized Swift class.
+%hook _TtC6Apollo21ProfileViewController
 
 // Re-presents the Hidden & Deleted sheet after backing out of a live post
 // opened from it -- see ApolloHiddenContentConsumePendingResume. -viewDidAppear:

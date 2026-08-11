@@ -24,14 +24,22 @@
 // as a standard pull-down on the legacy chrome — no ActionController involved,
 // since this menu is entirely ours.
 //
-// Install rules, re-checked at viewDidLoad / viewDidAppear / account changes:
+// This module is also the single owner of a profile screen's right-bar
+// LAYOUT (see ApolloProfileMoreMenuNormalize): Apollo rewrites a pushed
+// profile's rightBarButtonItems when the user's data arrives, which used to
+// wipe any tweak button appended at viewDidLoad — so placement is enforced
+// through UINavigationItem setter hooks instead of one-shot appends. The
+// normalizer places our "..." (own tab only, trailing slot) and the Hidden &
+// Deleted eye from ApolloHiddenContentMenu.xm (every profile, leading slot).
+//
+// Rules, re-checked on every normalization pass:
 //   • Apollo's own moreOptionsBarButtonItem installed → someone else's
 //     profile; keep our button out (ApolloGalleryMenu.xm handles injecting
 //     Gallery View into Apollo's menu there).
 //   • The screen clearly shows a different user than the active account →
 //     leave it alone even if Apollo's "..." hasn't landed yet, so ours never
 //     flashes on a pushed profile.
-//   • Signed out → nothing to edit or share; stay away.
+//   • Signed out → nothing to edit or share; no "..." (the eye still rides).
 // Menu handlers re-resolve the username at tap time, so a menu built before
 // the profile finished loading still acts on the right user.
 
@@ -48,9 +56,19 @@ extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewC
 extern void ApolloProfileOpenRedditProfileEditor(void);
 // Defined in ApolloRecentlyRead.xm.
 extern void ApolloRecentlyReadPresentFromViewController(UIViewController *fromViewController);
+// Defined in ApolloHiddenContentMenu.xm — the per-profile Hidden & Deleted
+// "eye", built there, placed here.
+extern UIBarButtonItem *ApolloHiddenContentBarButtonItemForProfile(UIViewController *profileViewController);
 
 // Our bar button, associated to the profile view controller that owns it.
 static char kApolloProfileMoreMenuItemKey;
+// Set on a profile view controller's UINavigationItem: an NSHashTable holding
+// the view controller weakly, so the setter hooks below can find their way
+// back without retaining it.
+static char kApolloProfileMoreMenuNavOwnerKey;
+// YES while the normalizer itself is writing rightBarButtonItems, so the
+// setter hooks pass its own write through untouched.
+static BOOL sApolloProfileMoreMenuNormalizing = NO;
 
 #pragma mark - Resolution helpers
 
@@ -160,68 +178,97 @@ static UIMenu *ApolloProfileMoreMenuBuild(UIViewController *viewController) {
     return [UIMenu menuWithTitle:@"" children:@[gallerySection, actionsSection]];
 }
 
-#pragma mark - Install / remove
+#pragma mark - Nav-item normalization
 
-static void ApolloProfileMoreMenuRemove(UIViewController *viewController) {
-    UIBarButtonItem *ours = objc_getAssociatedObject(viewController, &kApolloProfileMoreMenuItemKey);
-    if (!ours) return;
-    NSMutableArray<UIBarButtonItem *> *items =
-        [viewController.navigationItem.rightBarButtonItems mutableCopy];
-    if ([items containsObject:ours]) {
-        [items removeObject:ours];
-        viewController.navigationItem.rightBarButtonItems = items;
-        ApolloLog(@"[ProfileMoreMenu] Removed own-profile '...' (Apollo's is back, or no own profile)");
-    }
-}
-
-static void ApolloProfileMoreMenuInstallIfNeeded(UIViewController *viewController) {
-    if (!viewController) return;
+// The single owner of a profile screen's rightBarButtonItems layout. Takes
+// whatever is currently installed (Apollo's own "..." included) and enforces:
+//
+//   • our own-profile "..." at index 0 (the trailing slot) — only on the
+//     signed-in tab, where Apollo shows no menu of its own
+//   • the Hidden & Deleted eye appended at the end (the leading slot) — on
+//     every profile, which is where a plain viewDidLoad append used to put it
+//     before Apollo's own post-load rewrite started wiping it on pushed
+//     profiles
+//
+// Runs from the lifecycle hooks below AND from the UINavigationItem setter
+// hooks, so Apollo rewriting the items (it does when a pushed profile's user
+// data arrives, installing its own "...") immediately gets re-normalized
+// instead of silently shedding the tweak's buttons.
+static void ApolloProfileMoreMenuNormalize(UIViewController *viewController) {
+    if (!viewController || sApolloProfileMoreMenuNormalizing) return;
 
     UIBarButtonItem *apolloItem = ApolloProfileMoreMenuApolloItem(viewController);
     NSArray<UIBarButtonItem *> *currentItems = viewController.navigationItem.rightBarButtonItems ?: @[];
+    NSMutableArray<UIBarButtonItem *> *desired = [currentItems mutableCopy];
 
-    // Someone else's profile (Apollo's "..." is up) → ours stays out.
-    if (apolloItem && [currentItems containsObject:apolloItem]) {
-        ApolloProfileMoreMenuRemove(viewController);
-        return;
-    }
+    UIBarButtonItem *ours = objc_getAssociatedObject(viewController, &kApolloProfileMoreMenuItemKey);
 
     NSString *active = ApolloActiveAccountUsername();
     NSString *resolved = ApolloUsernameFromProfileViewController(viewController);
     BOOL clearlySomeoneElse = resolved.length > 0 && active.length > 0 &&
         ![resolved.lowercaseString isEqualToString:active.lowercaseString];
-    if (active.length == 0 || clearlySomeoneElse) {
-        // Signed out, or a pushed profile whose "..." simply hasn't landed
-        // yet — either way this isn't the signed-in tab.
-        ApolloProfileMoreMenuRemove(viewController);
-        return;
+    BOOL apolloMenuInstalled = apolloItem && [currentItems containsObject:apolloItem];
+    // The signed-in tab: an account is active, the screen isn't clearly
+    // showing someone else, and Apollo hasn't put up its own "...".
+    BOOL wantOurs = active.length > 0 && !clearlySomeoneElse && !apolloMenuInstalled;
+
+    if (wantOurs) {
+        if (!ours) {
+            // Borrow Apollo's own glyph so the button is pixel-identical to
+            // the "..." on other profiles, on both the glass and legacy
+            // chromes.
+            UIImage *image = apolloItem.image ?: [UIImage systemImageNamed:@"ellipsis"];
+            ours = [[UIBarButtonItem alloc] initWithImage:image menu:nil];
+            ours.accessibilityLabel = @"More Options";
+            objc_setAssociatedObject(viewController, &kApolloProfileMoreMenuItemKey, ours,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            ApolloLog(@"[ProfileMoreMenu] Built own-profile '...' for u/%@ (glyph=%@)",
+                      active, apolloItem.image ? @"Apollo's" : @"SF ellipsis");
+        }
+        // Rebuilt on every pass so the actions track the current account.
+        ours.menu = ApolloProfileMoreMenuBuild(viewController);
+        if (![desired containsObject:ours]) {
+            // Index 0 = the trailing (rightmost) slot, exactly where Apollo
+            // puts its "..." on other profiles.
+            [desired insertObject:ours atIndex:0];
+        }
+    } else if (ours && [desired containsObject:ours]) {
+        [desired removeObject:ours];
     }
 
-    UIBarButtonItem *ours = objc_getAssociatedObject(viewController, &kApolloProfileMoreMenuItemKey);
-    if (!ours) {
-        // Borrow Apollo's own glyph so the button is pixel-identical to the
-        // "..." on other profiles, on both the glass and legacy chromes.
-        UIImage *image = apolloItem.image ?: [UIImage systemImageNamed:@"ellipsis"];
-        ours = [[UIBarButtonItem alloc] initWithImage:image menu:nil];
-        ours.accessibilityLabel = @"More Options";
-        objc_setAssociatedObject(viewController, &kApolloProfileMoreMenuItemKey, ours,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        ApolloLog(@"[ProfileMoreMenu] Built own-profile '...' for u/%@ (glyph=%@)",
-                  active, apolloItem.image ? @"Apollo's" : @"SF ellipsis");
+    // The eye rides along on every profile, own and pushed alike, at the end
+    // of the array (the leading slot) — to the left of whichever "..." is up.
+    UIBarButtonItem *eye = ApolloHiddenContentBarButtonItemForProfile(viewController);
+    if (eye && ![desired containsObject:eye]) {
+        [desired addObject:eye];
     }
-    // Rebuilt on every pass so the actions track the current account.
-    ours.menu = ApolloProfileMoreMenuBuild(viewController);
 
-    if (![currentItems containsObject:ours]) {
-        // Index 0 = the trailing (rightmost) slot, exactly where Apollo puts
-        // its "..." on other profiles; the Hidden Content eye lands to its
-        // left, matching the other-profile arrangement.
-        NSMutableArray<UIBarButtonItem *> *items = [currentItems mutableCopy];
-        [items insertObject:ours atIndex:0];
-        viewController.navigationItem.rightBarButtonItems = items;
-        ApolloLog(@"[ProfileMoreMenu] Installed own-profile '...' (%lu items now)",
-                  (unsigned long)items.count);
-    }
+    if ([desired isEqualToArray:currentItems]) return;
+
+    sApolloProfileMoreMenuNormalizing = YES;
+    viewController.navigationItem.rightBarButtonItems = desired;
+    sApolloProfileMoreMenuNormalizing = NO;
+    ApolloLog(@"[ProfileMoreMenu] Normalized profile nav items (%lu → %lu; ours=%@ apollo=%@)",
+              (unsigned long)currentItems.count, (unsigned long)desired.count,
+              wantOurs ? @"YES" : @"NO", apolloMenuInstalled ? @"YES" : @"NO");
+}
+
+// The profile view controller a navigation item belongs to, recorded at
+// viewDidLoad so the setter hooks can re-normalize after any rewrite. Held
+// weakly: the navigation item is owned by the view controller, so a strong
+// back-reference would cycle.
+static UIViewController *ApolloProfileMoreMenuOwnerForNavigationItem(UINavigationItem *navigationItem) {
+    NSHashTable *holder = objc_getAssociatedObject(navigationItem, &kApolloProfileMoreMenuNavOwnerKey);
+    return holder.anyObject;
+}
+
+static void ApolloProfileMoreMenuAdoptNavigationItem(UIViewController *viewController) {
+    UINavigationItem *navigationItem = viewController.navigationItem;
+    if (!navigationItem) return;
+    NSHashTable *holder = [NSHashTable weakObjectsHashTable];
+    [holder addObject:viewController];
+    objc_setAssociatedObject(navigationItem, &kApolloProfileMoreMenuNavOwnerKey, holder,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 #pragma mark - Hooks
@@ -230,7 +277,9 @@ static void ApolloProfileMoreMenuInstallIfNeeded(UIViewController *viewControlle
 
 - (void)viewDidLoad {
     %orig;
-    ApolloProfileMoreMenuInstallIfNeeded((UIViewController *)self);
+    UIViewController *viewController = (UIViewController *)self;
+    ApolloProfileMoreMenuAdoptNavigationItem(viewController);
+    ApolloProfileMoreMenuNormalize(viewController);
 }
 
 // Re-assert once the screen settles: userInfo may only resolve after the first
@@ -238,7 +287,7 @@ static void ApolloProfileMoreMenuInstallIfNeeded(UIViewController *viewControlle
 // presentation time.
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    ApolloProfileMoreMenuInstallIfNeeded((UIViewController *)self);
+    ApolloProfileMoreMenuNormalize((UIViewController *)self);
 }
 
 // Account switches repoint the tab at a different user (or none): rebuild.
@@ -246,8 +295,42 @@ static void ApolloProfileMoreMenuInstallIfNeeded(UIViewController *viewControlle
     %orig;
     UIViewController *viewController = (UIViewController *)self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloProfileMoreMenuInstallIfNeeded(viewController);
+        ApolloProfileMoreMenuNormalize(viewController);
     });
+}
+
+%end
+
+// Apollo replaces a pushed profile's rightBarButtonItems outright once the
+// user's data arrives (that write is what installs its own "..."), which used
+// to wipe any button the tweak had appended at viewDidLoad — the Hidden &
+// Deleted eye simply vanished on other people's profiles. Catching the setters
+// re-normalizes after every rewrite, whoever makes it and whenever it lands.
+// Non-profile navigation items carry no owner association and fall straight
+// through to %orig.
+%hook UINavigationItem
+
+- (void)setRightBarButtonItems:(NSArray *)items {
+    %orig;
+    if (sApolloProfileMoreMenuNormalizing) return;
+    UIViewController *owner = ApolloProfileMoreMenuOwnerForNavigationItem(self);
+    if (owner) ApolloProfileMoreMenuNormalize(owner);
+}
+
+- (void)setRightBarButtonItems:(NSArray *)items animated:(BOOL)animated {
+    %orig;
+    if (sApolloProfileMoreMenuNormalizing) return;
+    UIViewController *owner = ApolloProfileMoreMenuOwnerForNavigationItem(self);
+    if (owner) ApolloProfileMoreMenuNormalize(owner);
+}
+
+// The singular form doesn't necessarily funnel through the plural public
+// setter, so it gets its own hook.
+- (void)setRightBarButtonItem:(UIBarButtonItem *)item {
+    %orig;
+    if (sApolloProfileMoreMenuNormalizing) return;
+    UIViewController *owner = ApolloProfileMoreMenuOwnerForNavigationItem(self);
+    if (owner) ApolloProfileMoreMenuNormalize(owner);
 }
 
 %end
