@@ -10,14 +10,22 @@
 // hid behind an Edit pill floating over the header art. This module gives the
 // own profile the same "..." affordance, holding everything self-directed:
 //
-//   • Gallery View    — the same grid the subreddit/profile menus open,
-//                       pointed at your own submissions
-//   • Edit Profile    — what the header's Edit pill used to do (the pill is
-//                       retired in ApolloUserAvatars.xm)
-//   • Recently Read   — what the standalone clock button used to do (the
-//                       button is retired in ApolloRecentlyRead.xm)
-//   • Share Profile   — share sheet for your reddit.com/user/<name> URL,
-//                       mirroring the Share row on other people's menus
+//   • Gallery View                — the same grid the subreddit/profile
+//                                   menus open, pointed at your own posts
+//   • View Hidden/Deleted Content — the Hidden & Deleted browser (#633),
+//                                   which used to be its own eye-slash bar
+//                                   button (retired in
+//                                   ApolloHiddenContentMenu.xm; other
+//                                   profiles get this row via
+//                                   ApolloGalleryMenu.xm's injection)
+//   • Edit Profile                — what the header's Edit pill used to do
+//                                   (the pill is retired in
+//                                   ApolloUserAvatars.xm)
+//   • Recently Read               — what the standalone clock button used to
+//                                   do (retired in ApolloRecentlyRead.xm)
+//   • Share Profile               — share sheet for your
+//                                   reddit.com/user/<name> URL, mirroring the
+//                                   Share row on other people's menus
 //
 // The button is a plain UIBarButtonItem with a UIMenu (iOS 14+), which renders
 // as the same pull-down Apollo's converted "..." menus use on Liquid Glass and
@@ -26,20 +34,18 @@
 //
 // This module is also the single owner of a profile screen's right-bar
 // LAYOUT (see ApolloProfileMoreMenuNormalize): Apollo rewrites a pushed
-// profile's rightBarButtonItems when the user's data arrives, which used to
-// wipe any tweak button appended at viewDidLoad — so placement is enforced
-// through UINavigationItem setter hooks instead of one-shot appends. The
-// normalizer places our "..." (own tab only, trailing slot) and the Hidden &
-// Deleted eye from ApolloHiddenContentMenu.xm (every profile, leading slot).
+// profile's rightBarButtonItems when the user's data arrives, which would
+// wipe any tweak button appended at viewDidLoad — so our "..." is enforced
+// through UINavigationItem setter hooks instead of one-shot appends.
 //
 // Rules, re-checked on every normalization pass:
 //   • Apollo's own moreOptionsBarButtonItem installed → someone else's
 //     profile; keep our button out (ApolloGalleryMenu.xm handles injecting
-//     Gallery View into Apollo's menu there).
+//     Gallery View and Hidden/Deleted into Apollo's menu there).
 //   • The screen clearly shows a different user than the active account →
 //     leave it alone even if Apollo's "..." hasn't landed yet, so ours never
 //     flashes on a pushed profile.
-//   • Signed out → nothing to edit or share; no "..." (the eye still rides).
+//   • Signed out → nothing to edit or share; no "...".
 // Menu handlers re-resolve the username at tap time, so a menu built before
 // the profile finished loading still acts on the right user.
 
@@ -56,9 +62,9 @@ extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewC
 extern void ApolloProfileOpenRedditProfileEditor(void);
 // Defined in ApolloRecentlyRead.xm.
 extern void ApolloRecentlyReadPresentFromViewController(UIViewController *fromViewController);
-// Defined in ApolloHiddenContentMenu.xm — the per-profile Hidden & Deleted
-// "eye", built there, placed here.
-extern UIBarButtonItem *ApolloHiddenContentBarButtonItemForProfile(UIViewController *profileViewController);
+// Defined in ApolloHiddenContentMenu.xm — presents the Hidden & Deleted
+// browser for whichever user the profile screen is showing.
+extern void ApolloHiddenContentPresentFromProfile(UIViewController *profileViewController);
 
 // Our bar button, associated to the profile view controller that owns it.
 static char kApolloProfileMoreMenuItemKey;
@@ -143,11 +149,23 @@ static UIMenu *ApolloProfileMoreMenuBuild(UIViewController *viewController) {
         UIViewController *vc = weakVC;
         if (vc) ApolloProfileMoreMenuOpenGallery(vc);
     }];
-    // Its own separated group, mirroring where the injected row sits in other
+
+    // Hidden & Deleted (#633) rides with Gallery View — it used to be its own
+    // eye-slash bar button, but it's a browse action like the gallery and
+    // doesn't need a permanent spot in the bar.
+    UIAction *hiddenContent = [UIAction actionWithTitle:@"View Hidden/Deleted Content"
+                                                  image:[UIImage systemImageNamed:@"eye.slash"]
+                                             identifier:nil
+                                                handler:^(__unused __kindof UIAction *action) {
+        UIViewController *vc = weakVC;
+        if (vc) ApolloHiddenContentPresentFromProfile(vc);
+    }];
+
+    // Their own separated group, mirroring the injected section in other
     // profiles' menus.
     UIMenu *gallerySection = [UIMenu menuWithTitle:@"" image:nil identifier:nil
                                            options:UIMenuOptionsDisplayInline
-                                          children:@[gallery]];
+                                          children:@[gallery, hiddenContent]];
 
     UIAction *edit = [UIAction actionWithTitle:@"Edit Profile"
                                          image:[UIImage systemImageNamed:@"pencil"]
@@ -181,19 +199,15 @@ static UIMenu *ApolloProfileMoreMenuBuild(UIViewController *viewController) {
 #pragma mark - Nav-item normalization
 
 // The single owner of a profile screen's rightBarButtonItems layout. Takes
-// whatever is currently installed (Apollo's own "..." included) and enforces:
-//
-//   • our own-profile "..." at index 0 (the trailing slot) — only on the
-//     signed-in tab, where Apollo shows no menu of its own
-//   • the Hidden & Deleted eye appended at the end (the leading slot) — on
-//     every profile, which is where a plain viewDidLoad append used to put it
-//     before Apollo's own post-load rewrite started wiping it on pushed
-//     profiles
+// whatever is currently installed (Apollo's own "..." included) and enforces
+// our own-profile "..." at index 0 (the trailing slot) — only on the
+// signed-in tab, where Apollo shows no menu of its own.
 //
 // Runs from the lifecycle hooks below AND from the UINavigationItem setter
-// hooks, so Apollo rewriting the items (it does when a pushed profile's user
-// data arrives, installing its own "...") immediately gets re-normalized
-// instead of silently shedding the tweak's buttons.
+// hooks: Apollo rewrites a pushed profile's items outright when the user's
+// data arrives (that write installs its own "..."), and anything the tweak
+// placed with a one-shot append would be silently shed — normalizing after
+// every write is what makes our button stick.
 static void ApolloProfileMoreMenuNormalize(UIViewController *viewController) {
     if (!viewController || sApolloProfileMoreMenuNormalizing) return;
 
@@ -234,13 +248,6 @@ static void ApolloProfileMoreMenuNormalize(UIViewController *viewController) {
         }
     } else if (ours && [desired containsObject:ours]) {
         [desired removeObject:ours];
-    }
-
-    // The eye rides along on every profile, own and pushed alike, at the end
-    // of the array (the leading slot) — to the left of whichever "..." is up.
-    UIBarButtonItem *eye = ApolloHiddenContentBarButtonItemForProfile(viewController);
-    if (eye && ![desired containsObject:eye]) {
-        [desired addObject:eye];
     }
 
     if ([desired isEqualToArray:currentItems]) return;

@@ -1,5 +1,3 @@
-#import <objc/runtime.h>
-
 #import "ApolloCommon.h"
 #import "ApolloHiddenContentViewController.h"
 
@@ -7,31 +5,26 @@
 // directly, which can be nil for the signed-in user's own profile.
 extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController);
 
-// The eye lives in the nav bar rather than the native 3-dot menu: that menu
-// doesn't render on your own profile, and this needs to work there too.
-//
-// The button itself is only BUILT here. Placement is owned by
-// ApolloProfileMoreMenu.xm's nav-item normalizer: a plain viewDidLoad append
-// only survives on the signed-in tab — on a pushed profile Apollo rewrites
-// rightBarButtonItems once the user's data arrives (installing its own "...")
-// and the appended eye was silently wiped. The normalizer re-asserts it after
-// every such rewrite instead.
-static char kApolloHiddenContentItemKey;
+// Hidden & Deleted used to be its own eye-slash button in the profile's
+// navigation bar; it now lives inside every profile's "..." menu instead
+// ("View Hidden/Deleted Content" — ApolloProfileMoreMenu.xm places it in the
+// signed-in tab's menu, ApolloGalleryMenu.xm injects it into Apollo's menu on
+// other people's profiles). Both call this to run it.
+void ApolloHiddenContentPresentFromProfile(UIViewController *profileViewController) {
+    if (!profileViewController) return;
+    NSString *profileUsername = ApolloUsernameFromProfileViewController(profileViewController);
 
-UIBarButtonItem *ApolloHiddenContentBarButtonItemForProfile(UIViewController *profileViewController) {
-    if (!profileViewController) return nil;
-    UIBarButtonItem *item = objc_getAssociatedObject(profileViewController, &kApolloHiddenContentItemKey);
-    if (![item isKindOfClass:[UIBarButtonItem class]]) {
-        item = [[UIBarButtonItem alloc]
-            initWithImage:[UIImage systemImageNamed:@"eye.slash"]
-            style:UIBarButtonItemStylePlain
-            target:profileViewController
-            action:@selector(apollo_showHiddenContent)];
-        item.accessibilityLabel = @"Hidden & Deleted Posts/Comments";
-        objc_setAssociatedObject(profileViewController, &kApolloHiddenContentItemKey, item,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (profileUsername.length == 0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Hidden & Deleted"
+                                                                         message:@"Couldn't confirm this profile's username yet. Try again once the profile has finished loading."
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [profileViewController presentViewController:alert animated:YES completion:nil];
+        return;
     }
-    return item;
+
+    [ApolloHiddenContentViewController presentForUsername:profileUsername
+                                       fromViewController:profileViewController];
 }
 
 // Hooks the mangled class name -- the bare "ProfileViewController" can resolve
@@ -52,23 +45,6 @@ UIBarButtonItem *ApolloHiddenContentBarButtonItemForProfile(UIViewController *pr
             [ApolloHiddenContentViewController presentForUsername:profileUsername fromViewController:vc];
         }
     }
-}
-
-%new
-- (void)apollo_showHiddenContent {
-    UIViewController *vc = (UIViewController *)self;
-    NSString *profileUsername = ApolloUsernameFromProfileViewController(vc);
-
-    if (profileUsername.length == 0) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Hidden & Deleted"
-                                                                         message:@"Couldn't confirm this profile's username yet. Try again once the profile has finished loading."
-                                                                  preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [vc presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-
-    [ApolloHiddenContentViewController presentForUsername:profileUsername fromViewController:vc];
 }
 
 %end

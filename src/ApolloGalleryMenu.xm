@@ -58,9 +58,17 @@ extern NSString *ApolloMultiredditPathFromViewController(UIViewController *viewC
 // Defined in ApolloUserAvatars.xm — the username a profile screen is showing,
 // nil while it can't be determined yet.
 extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController);
+// Defined in ApolloHiddenContentMenu.xm — presents the Hidden & Deleted
+// browser for whichever user the profile screen is showing.
+extern void ApolloHiddenContentPresentFromProfile(UIViewController *profileViewController);
 
 static NSString *const kApolloGalleryMenuTitle = @"Gallery View";
 static NSString *const kApolloGalleryMenuSymbol = @"square.grid.2x2";
+// Profile menus carry a second injected row: the Hidden & Deleted browser
+// (#633), which used to be its own eye-slash bar button in the profile's
+// navigation bar.
+static NSString *const kApolloGalleryMenuHiddenTitle = @"View Hidden/Deleted Content";
+static NSString *const kApolloGalleryMenuHiddenSymbol = @"eye.slash";
 
 // How long after the "..." tap an ActionController may still claim the arm.
 static const CFTimeInterval kApolloGalleryMenuArmGraceSeconds = 1.5;
@@ -137,6 +145,13 @@ static NSString *ApolloGalleryMenuSourceDescription(NSString *listingIdentifier)
     return listingIdentifier.length > 0 ? [@"r/" stringByAppendingString:listingIdentifier] : @"feed";
 }
 
+// How many rows this module injects for a claimed menu: subreddits and
+// multireddits get Gallery View alone; profiles also get Hidden/Deleted.
+static NSInteger ApolloGalleryMenuInjectedRowCountForIdentifier(NSString *listingIdentifier) {
+    if (listingIdentifier.length == 0) return 0;
+    return [listingIdentifier hasPrefix:@"u/"] ? 2 : 1;
+}
+
 static void ApolloGalleryMenuOpenForController(id actionController) {
     UIViewController *owner = ApolloGalleryMenuOwnerForController(actionController);
     NSString *subreddit = owner ? ApolloSubredditNameFromViewController(owner) : nil;
@@ -163,6 +178,26 @@ static void ApolloGalleryMenuOpenForController(id actionController) {
         return;
     }
     openGallery();
+}
+
+// The Hidden/Deleted row only exists on profile menus, so the owner here is
+// always a ProfileViewController; the presenter re-resolves the username at
+// open time and shows its own "not loaded yet" alert if that somehow fails.
+static void ApolloGalleryMenuOpenHiddenContentForController(id actionController) {
+    UIViewController *owner = ApolloGalleryMenuOwnerForController(actionController);
+    if (!owner) {
+        ApolloLog(@"[GalleryMenu] Hidden/Deleted tapped but the profile could not be resolved");
+        return;
+    }
+
+    dispatch_block_t openHidden = ^{
+        ApolloHiddenContentPresentFromProfile(owner);
+    };
+    if (ApolloNativeActionMenuPerformAfterDismissal(actionController, openHidden)) {
+        ApolloLog(@"[GalleryMenu] Waiting for the glass menu to dismiss before opening Hidden/Deleted");
+        return;
+    }
+    openHidden();
 }
 
 #pragma mark - Liquid Glass menu injection
@@ -211,18 +246,31 @@ void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString 
                                          handler:^(__unused __kindof UIAction *sender) {
         ApolloGalleryMenuOpenForController(weakController);
     }];
+    NSMutableArray<UIMenuElement *> *sectionChildren = [NSMutableArray arrayWithObject:action];
 
-    // An inline single-item menu renders as its own separated group rather than
-    // sitting inside the native rows.
+    // Profiles carry the Hidden & Deleted browser in the same group.
+    if ([listingIdentifier hasPrefix:@"u/"]) {
+        UIAction *hidden = [UIAction actionWithTitle:kApolloGalleryMenuHiddenTitle
+                                               image:[UIImage systemImageNamed:kApolloGalleryMenuHiddenSymbol]
+                                          identifier:nil
+                                             handler:^(__unused __kindof UIAction *sender) {
+            ApolloGalleryMenuOpenHiddenContentForController(weakController);
+        }];
+        [sectionChildren addObject:hidden];
+    }
+
+    // An inline menu renders as its own separated group rather than sitting
+    // inside the native rows.
     UIMenu *section = [UIMenu menuWithTitle:@""
                                       image:nil
                                  identifier:nil
                                     options:UIMenuOptionsDisplayInline
-                                   children:@[action]];
+                                   children:sectionChildren];
     NSUInteger index = ApolloGalleryMenuInsertionIndex(children);
     [children insertObject:section atIndex:index];
-    ApolloLog(@"[GalleryMenu] Injected '%@' for %@ at index %lu (glass menu)",
-              kApolloGalleryMenuTitle, ApolloGalleryMenuSourceDescription(listingIdentifier),
+    ApolloLog(@"[GalleryMenu] Injected %lu row(s) for %@ at index %lu (glass menu)",
+              (unsigned long)sectionChildren.count,
+              ApolloGalleryMenuSourceDescription(listingIdentifier),
               (unsigned long)index);
 }
 
@@ -347,16 +395,21 @@ static void ApolloGalleryMenuCaptureRowStyle(UITableViewCell *cell) {
               NSStringFromCGRect(sApolloGalleryRowTitleFrame), NSStringFromCGRect(sApolloGalleryRowIconFrame));
 }
 
-// Our appended row, laid out to match the captured native row.
+// Our appended rows, laid out to match the captured native row.
 @interface ApolloGalleryMenuRowCell : UITableViewCell
 @property (nonatomic, strong) UILabel *rowTitleLabel;
 @property (nonatomic, strong) UIImageView *rowIconView;
+- (instancetype)initWithTitle:(NSString *)title
+                   sfSymbol:(NSString *)sfSymbol
+            reuseIdentifier:(NSString *)reuseIdentifier;
 @end
 
 @implementation ApolloGalleryMenuRowCell
 
-- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
-    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+- (instancetype)initWithTitle:(NSString *)title
+                   sfSymbol:(NSString *)sfSymbol
+            reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseIdentifier];
     if (self) {
         self.backgroundColor = UIColor.clearColor;
         self.contentView.backgroundColor = UIColor.clearColor;
@@ -366,13 +419,13 @@ static void ApolloGalleryMenuCaptureRowStyle(UITableViewCell *cell) {
         // theme accent, so it matches even when the capture came up empty.
         UIColor *tint = sApolloGalleryRowTitleColor ?: ApolloThemeAccentColor() ?: UIColor.labelColor;
 
-        _rowIconView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:kApolloGalleryMenuSymbol]];
+        _rowIconView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:sfSymbol]];
         _rowIconView.contentMode = UIViewContentModeScaleAspectFit;
         _rowIconView.tintColor = sApolloGalleryRowIconTint ?: tint;
         [self.contentView addSubview:_rowIconView];
 
         _rowTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        _rowTitleLabel.text = kApolloGalleryMenuTitle;
+        _rowTitleLabel.text = title;
         _rowTitleLabel.textColor = tint;
         _rowTitleLabel.font = sApolloGalleryRowTitleFont ?: [UIFont systemFontOfSize:17.0];
         _rowTitleLabel.textAlignment = sApolloGalleryRowTitleAlignment;
@@ -413,27 +466,36 @@ static void ApolloGalleryMenuCaptureRowStyle(UITableViewCell *cell) {
     // Only the first section grows; Apollo's "..." sheet is single-section, but
     // being explicit keeps a multi-section sheet from sprouting extra rows.
     if (section != 0) return count;
+    NSInteger injected = ApolloGalleryMenuInjectedRowCountForIdentifier(listingIdentifier);
     if (ApolloGalleryMenuOriginalRowCount(self) != count) {
-        ApolloLog(@"[GalleryMenu] Added '%@' row for %@ (sheet, after %ld native rows)",
-                  kApolloGalleryMenuTitle, ApolloGalleryMenuSourceDescription(listingIdentifier),
+        ApolloLog(@"[GalleryMenu] Added %ld row(s) for %@ (sheet, after %ld native rows)",
+                  (long)injected, ApolloGalleryMenuSourceDescription(listingIdentifier),
                   (long)count);
     }
     objc_setAssociatedObject(self, &kApolloGalleryMenuOrigRowCountKey, @(count), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return count + 1;
+    return count + injected;
 }
 
-// Our row is the LAST row, never inserted in the middle: Apollo's own
+// Our rows are the LAST rows, never inserted in the middle: Apollo's own
 // cellForRow calls -dequeueReusableCellWithIdentifier:forIndexPath: with the
 // index path it was handed, and UIKit asserts if that doesn't match the row the
 // table is currently asking for. So the native rows must keep their own indices
-// and only an appended row is safe.
-static BOOL ApolloGalleryMenuIsOurRow(id actionController, NSIndexPath *indexPath) {
+// and only appended rows are safe.
+//
+// Which of ours a row is: 0 = Gallery View, 1 = Hidden/Deleted (profiles
+// only), -1 = one of Apollo's.
+static NSInteger ApolloGalleryMenuInjectedIndexForRow(id actionController, NSIndexPath *indexPath) {
     NSInteger originalCount = ApolloGalleryMenuOriginalRowCount(actionController);
-    return originalCount >= 0 && indexPath.section == 0 && indexPath.row == originalCount;
+    if (originalCount < 0 || indexPath.section != 0) return -1;
+    NSInteger injected = ApolloGalleryMenuInjectedRowCountForIdentifier(
+        ApolloGalleryMenuListingIdentifierForController(actionController));
+    NSInteger offset = indexPath.row - originalCount;
+    return (offset >= 0 && offset < injected) ? offset : -1;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!ApolloGalleryMenuIsOurRow(self, indexPath)) {
+    NSInteger injectedIndex = ApolloGalleryMenuInjectedIndexForRow(self, indexPath);
+    if (injectedIndex < 0) {
         UITableViewCell *cell = %orig;
         // Apollo's first row is our style reference; re-capture on every sheet
         // build so a theme change mid-session can't leave us on stale colours.
@@ -443,38 +505,50 @@ static BOOL ApolloGalleryMenuIsOurRow(id actionController, NSIndexPath *indexPat
         return cell;
     }
 
-    // Built by hand with its own reuse identifier: dequeuing Apollo's cell class
-    // for an index its data source doesn't know about is what throws.
-    return [[ApolloGalleryMenuRowCell alloc] initWithStyle:UITableViewCellStyleDefault
+    // Built by hand with their own reuse identifiers: dequeuing Apollo's cell
+    // class for an index its data source doesn't know about is what throws.
+    if (injectedIndex == 1) {
+        return [[ApolloGalleryMenuRowCell alloc] initWithTitle:kApolloGalleryMenuHiddenTitle
+                                                      sfSymbol:kApolloGalleryMenuHiddenSymbol
+                                               reuseIdentifier:@"ApolloHiddenContentRow"];
+    }
+    return [[ApolloGalleryMenuRowCell alloc] initWithTitle:kApolloGalleryMenuTitle
+                                                  sfSymbol:kApolloGalleryMenuSymbol
                                            reuseIdentifier:@"ApolloGalleryViewRow"];
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!ApolloGalleryMenuIsOurRow(self, indexPath)) return %orig;
+    if (ApolloGalleryMenuInjectedIndexForRow(self, indexPath) < 0) return %orig;
     // Ask Apollo how tall its own rows are rather than guessing.
     return %orig(tableView, [NSIndexPath indexPathForRow:0 inSection:indexPath.section]);
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!ApolloGalleryMenuIsOurRow(self, indexPath)) {
+    NSInteger injectedIndex = ApolloGalleryMenuInjectedIndexForRow(self, indexPath);
+    if (injectedIndex < 0) {
         %orig;
         return;
     }
 
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     __strong id actionController = self;
-    // The sheet is modal over the subreddit; push only once it's gone.
+    // The sheet is modal over the profile/subreddit; open only once it's gone.
     [(UIViewController *)self dismissViewControllerAnimated:YES completion:^{
-        ApolloGalleryMenuOpenForController(actionController);
+        if (injectedIndex == 1) {
+            ApolloGalleryMenuOpenHiddenContentForController(actionController);
+        } else {
+            ApolloGalleryMenuOpenForController(actionController);
+        }
     }];
 }
 
 %end
 
-// The sheet's height comes from Apollo's own row count, so it has to grow by a
-// row or the extra row is clipped. Only the presentation frame is touched —
-// growing the inner table view as well pushed its last row underneath the
-// Cancel button, where it couldn't be scrolled into view.
+// The sheet's height comes from Apollo's own row count, so it has to grow by
+// however many rows were injected or the extras are clipped. Only the
+// presentation frame is touched — growing the inner table view as well pushed
+// its last row underneath the Cancel button, where it couldn't be scrolled
+// into view.
 %hook _TtC6Apollo38ActionControllerPresentationController
 
 - (CGRect)frameOfPresentedViewInContainerView {
@@ -483,12 +557,15 @@ static BOOL ApolloGalleryMenuIsOurRow(id actionController, NSIndexPath *indexPat
     if (frame.size.height <= 0.0 || !presented) return frame;
     NSInteger originalCount = ApolloGalleryMenuOriginalRowCount(presented);
     if (originalCount < 0) return frame;
+    NSInteger injected = ApolloGalleryMenuInjectedRowCountForIdentifier(
+        ApolloGalleryMenuListingIdentifierForController(presented));
+    if (injected <= 0) return frame;
 
     CGFloat rowHeight = ApolloGalleryMenuRowHeight(presented);
     if (rowHeight <= 0.0) return frame;
 
-    frame.origin.y -= rowHeight;
-    frame.size.height += rowHeight;
+    frame.origin.y -= rowHeight * injected;
+    frame.size.height += rowHeight * injected;
     return frame;
 }
 
