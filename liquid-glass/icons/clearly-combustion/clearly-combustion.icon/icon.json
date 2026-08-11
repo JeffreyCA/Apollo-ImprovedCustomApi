@@ -70,6 +70,12 @@
           "hidden" : false,
           "image-name" : "Face.svg",
           "name" : "Face",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 0
+            }
+          ],
           "position" : {
             "scale" : 1.71,
             "translation-in-points" : [
@@ -112,6 +118,12 @@
           "hidden" : false,
           "image-name" : "stem.svg",
           "name" : "Stem",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 0
+            }
+          ],
           "position" : {
             "scale" : 3.1,
             "translation-in-points" : [
@@ -129,7 +141,7 @@
           "image-name" : "Apollo Helmet Space.svg",
           "name" : "Apollo Helmet Space",
           "position" : {
-            "scale" : 1.3,
+            "scale" : 1.18,
             "translation-in-points" : [
               0,
               120
@@ -154,6 +166,12 @@
           "hidden" : false,
           "image-name" : "Antenna.svg",
           "name" : "Radio_Antenna",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 0
+            }
+          ],
           "position" : {
             "scale" : 1.71,
             "translation-in-points" : [

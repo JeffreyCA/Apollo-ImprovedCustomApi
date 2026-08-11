@@ -100,7 +100,7 @@
           "opacity-specializations" : [
             {
               "appearance" : "dark",
-              "value" : 1
+              "value" : 0
             }
           ],
           "position" : {
@@ -148,7 +148,7 @@
           "opacity-specializations" : [
             {
               "appearance" : "dark",
-              "value" : 1
+              "value" : 0
             }
           ],
           "position" : {
