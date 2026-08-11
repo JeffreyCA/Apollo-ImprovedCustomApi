@@ -1115,15 +1115,13 @@ static void LGApplyIconUsingPreferredAppearance(UIView *hostView, const LGIconRo
 
 static void LGSelectPreferredAppearance(UIView *hostView, LGIconAppearanceMode mode,
                                         void (^completion)(BOOL success)) {
-    LGPersistPreferredAppearanceMode(mode);
-
     // Changing the menu updates the currently-selected Liquid Glass icon
     // immediately. For Default or one of Apollo's native icons, remember the
     // preference and use it on the next Liquid Glass icon tap.
     NSString *activeID = LGActiveIconID();
     const LGIconRow *activeRow = LGRowForIconID(activeID);
     if (!activeRow) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:kLGChangedIconNotification object:nil];
+        LGPersistPreferredAppearanceMode(mode);
         if (completion) completion(YES);
         return;
     }
@@ -1132,7 +1130,10 @@ static void LGSelectPreferredAppearance(UIView *hostView, LGIconAppearanceMode m
     UISelectionFeedbackGenerator *feedback = LGPreparedSelectionFeedback(appearanceChanged);
     NSString *alternateName = LGAlternateIconNameForMode(activeRow->iconID, mode);
     LGApplyAlternateIcon(hostView, alternateName, ^(BOOL success) {
-        if (success && feedback) [feedback selectionChanged];
+        if (success) {
+            LGPersistPreferredAppearanceMode(mode);
+            if (feedback) [feedback selectionChanged];
+        }
         if (completion) completion(success);
     });
 }
@@ -1303,7 +1304,6 @@ static void LGInstallAppearanceMenu(UIViewController *controller, UIView *hostVi
              forSupplementaryViewOfKind:UICollectionElementKindSectionHeader
                     withReuseIdentifier:kLGDescriptionHeaderReuseID];
     [self lg_applyTheme];
-    [self lg_installAppearanceMenu];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
