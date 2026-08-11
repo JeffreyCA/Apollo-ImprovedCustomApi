@@ -44,6 +44,8 @@ static NSString *const kLGFeaturedSectionTitle = @"Featured";
 static NSString *const kLGChangedIconNotification = @"com.christianselig.ChangedAppIcon";
 static NSString *const kLGLightIconSuffix = @"__apollo_light";
 static NSString *const kLGDarkIconSuffix  = @"__apollo_dark";
+static NSString *const kLGAppearancePreferenceDefaultsKey = @"ApolloLGPreferredIconAppearance";
+static const NSInteger kLGAppearanceBarButtonTag = 0x4C474150; // "LGAP"
 
 // Featured row (main screen, above the pack cards).
 static const CGFloat kLGFeaturedRowHeight = 64.0;
@@ -254,6 +256,36 @@ static NSString *LGActiveAlternateIconName(void) {
 
 static NSString *LGActiveIconID(void) {
     return LGBaseIconIDFromAlternateIconName(LGActiveAlternateIconName());
+}
+
+static LGIconAppearanceMode LGPreferredAppearanceMode(void) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSNumber *stored = [defaults objectForKey:kLGAppearancePreferenceDefaultsKey];
+    if ([stored isKindOfClass:[NSNumber class]]) {
+        NSInteger value = stored.integerValue;
+        if (value >= LGIconAppearanceModeLight && value <= LGIconAppearanceModeDynamic) {
+            return (LGIconAppearanceMode)value;
+        }
+    }
+
+    // Until a preference is saved, mirror the active icon's appearance.
+    NSString *activeName = LGActiveAlternateIconName();
+    return activeName.length
+        ? LGAppearanceModeFromAlternateIconName(activeName)
+        : LGIconAppearanceModeDynamic;
+}
+
+static void LGPersistPreferredAppearanceMode(LGIconAppearanceMode mode) {
+    [NSUserDefaults.standardUserDefaults setInteger:mode forKey:kLGAppearancePreferenceDefaultsKey];
+}
+
+static NSString *LGAppearanceModeTitle(LGIconAppearanceMode mode) {
+    switch (mode) {
+        case LGIconAppearanceModeLight:   return @"Light";
+        case LGIconAppearanceModeDark:    return @"Dark";
+        case LGIconAppearanceModeDynamic: return @"System";
+    }
+    return @"System";
 }
 
 #pragma mark - Runtime icon model
@@ -1014,9 +1046,9 @@ static UIViewController *LGTopViewControllerForView(UIView *view) {
 }
 
 // UIKit's public setter always adds its own "You have changed the icon"
-// confirmation after our appearance chooser. Apollo Reborn is already an
-// injected tweak, so prefer UIKit's underlying private setter to avoid that
-// redundant second alert. Keep the public call as a compatibility fallback.
+// confirmation. Apollo Reborn is already an injected tweak, so prefer
+// UIKit's underlying private setter to keep direct icon selection quiet.
+// Keep the public call as a compatibility fallback.
 static void LGSetAlternateIconName(NSString *name, void (^completion)(NSError *error)) {
     UIApplication *application = UIApplication.sharedApplication;
     SEL quietSelector = NSSelectorFromString(@"_setAlternateIconName:completionHandler:");
@@ -1058,34 +1090,98 @@ static void LGApplyAlternateIcon(UIView *hostView, NSString *iconID, void (^comp
     });
 }
 
-static void LGPromptForIconAppearance(UIView *hostView, const LGIconRow *row,
-                                      void (^completion)(BOOL success)) {
-    if (!hostView || !row) return;
-    UIAlertController *chooser = [UIAlertController
-        alertControllerWithTitle:row->displayName
-                         message:@"Choose an appearance for this icon."
-                  preferredStyle:UIAlertControllerStyleAlert];
+static UISelectionFeedbackGenerator *LGPreparedSelectionFeedback(BOOL enabled) {
+    if (!enabled) return nil;
+    UISelectionFeedbackGenerator *feedback = [[UISelectionFeedbackGenerator alloc] init];
+    [feedback prepare];
+    return feedback;
+}
 
-    NSArray<NSDictionary *> *choices = @[
-        @{ @"title": @"Light",   @"mode": @(LGIconAppearanceModeLight) },
-        @{ @"title": @"Dark",    @"mode": @(LGIconAppearanceModeDark) },
-        @{ @"title": @"System",  @"mode": @(LGIconAppearanceModeDynamic) },
-    ];
-    __weak UIView *weakHost = hostView;
-    for (NSDictionary *choice in choices) {
-        NSString *title = choice[@"title"];
-        LGIconAppearanceMode mode = (LGIconAppearanceMode)[choice[@"mode"] integerValue];
-        [chooser addAction:[UIAlertAction actionWithTitle:title
-                                                    style:UIAlertActionStyleDefault
-                                                  handler:^(UIAlertAction *action) {
-            NSString *alternateName = LGAlternateIconNameForMode(row->iconID, mode);
-            if (!LGAlternateIconRegisteredInInfoPlist(alternateName)) {
-                ApolloLog(@"[LGIconPicker] appearance asset is not registered: %@", alternateName);
-            }
-            LGApplyAlternateIcon(weakHost, alternateName, completion);
-        }]];
+static void LGApplyIconUsingPreferredAppearance(UIView *hostView, const LGIconRow *row,
+                                                void (^completion)(BOOL success)) {
+    if (!hostView || !row) return;
+    NSString *alternateName = LGAlternateIconNameForMode(row->iconID, LGPreferredAppearanceMode());
+    UISelectionFeedbackGenerator *feedback = LGPreparedSelectionFeedback(
+        ![LGActiveIconID() isEqualToString:row->iconID]
+    );
+    if (!LGAlternateIconRegisteredInInfoPlist(alternateName)) {
+        ApolloLog(@"[LGIconPicker] appearance asset is not registered: %@", alternateName);
     }
-    [LGTopViewControllerForView(hostView) presentViewController:chooser animated:YES completion:nil];
+    LGApplyAlternateIcon(hostView, alternateName, ^(BOOL success) {
+        if (success && feedback) [feedback selectionChanged];
+        if (completion) completion(success);
+    });
+}
+
+static void LGSelectPreferredAppearance(UIView *hostView, LGIconAppearanceMode mode,
+                                        void (^completion)(BOOL success)) {
+    LGPersistPreferredAppearanceMode(mode);
+
+    // Changing the menu updates the currently-selected Liquid Glass icon
+    // immediately. For Default or one of Apollo's native icons, remember the
+    // preference and use it on the next Liquid Glass icon tap.
+    NSString *activeID = LGActiveIconID();
+    const LGIconRow *activeRow = LGRowForIconID(activeID);
+    if (!activeRow) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:kLGChangedIconNotification object:nil];
+        if (completion) completion(YES);
+        return;
+    }
+
+    BOOL appearanceChanged = LGAppearanceModeFromAlternateIconName(LGActiveAlternateIconName()) != mode;
+    UISelectionFeedbackGenerator *feedback = LGPreparedSelectionFeedback(appearanceChanged);
+    NSString *alternateName = LGAlternateIconNameForMode(activeRow->iconID, mode);
+    LGApplyAlternateIcon(hostView, alternateName, ^(BOOL success) {
+        if (success && feedback) [feedback selectionChanged];
+        if (completion) completion(success);
+    });
+}
+
+static void LGInstallAppearanceMenu(UIViewController *controller, UIView *hostView,
+                                    void (^reloadHandler)(void)) {
+    if (!controller) return;
+
+    LGIconAppearanceMode selectedMode = LGPreferredAppearanceMode();
+    __weak UIViewController *weakController = controller;
+    __weak UIView *weakHost = hostView ?: controller.view;
+    void (^reloadCopy)(void) = [reloadHandler copy];
+
+    NSArray<NSNumber *> *modes = @[
+        @(LGIconAppearanceModeLight),
+        @(LGIconAppearanceModeDark),
+        @(LGIconAppearanceModeDynamic),
+    ];
+    NSMutableArray<UIMenuElement *> *actions = [NSMutableArray arrayWithCapacity:modes.count];
+    for (NSNumber *modeNumber in modes) {
+        LGIconAppearanceMode mode = (LGIconAppearanceMode)modeNumber.integerValue;
+        UIAction *action = [UIAction actionWithTitle:LGAppearanceModeTitle(mode)
+                                              image:nil
+                                         identifier:nil
+                                            handler:^(__kindof UIAction *menuAction) {
+            UIViewController *strongController = weakController;
+            UIView *strongHost = weakHost ?: strongController.view;
+            if (!strongController || !strongHost) return;
+            LGSelectPreferredAppearance(strongHost, mode, ^(BOOL success) {
+                if (reloadCopy) reloadCopy();
+                LGInstallAppearanceMenu(strongController, strongHost, reloadCopy);
+            });
+        }];
+        action.state = mode == selectedMode ? UIMenuElementStateOn : UIMenuElementStateOff;
+        [actions addObject:action];
+    }
+
+    UIMenu *menu = [UIMenu menuWithTitle:@"Icon Appearance" children:actions];
+    NSString *buttonTitle = [NSString stringWithFormat:@"%@ ▾", LGAppearanceModeTitle(selectedMode)];
+    UIBarButtonItem *appearanceItem = [[UIBarButtonItem alloc] initWithTitle:buttonTitle menu:menu];
+    appearanceItem.tag = kLGAppearanceBarButtonTag;
+    appearanceItem.accessibilityLabel = @"Icon appearance";
+
+    NSMutableArray<UIBarButtonItem *> *items = [NSMutableArray array];
+    for (UIBarButtonItem *item in controller.navigationItem.rightBarButtonItems ?: @[]) {
+        if (item.tag != kLGAppearanceBarButtonTag) [items addObject:item];
+    }
+    [items insertObject:appearanceItem atIndex:0];
+    controller.navigationItem.rightBarButtonItems = items;
 }
 
 #pragma mark - Group description header (pack contents screen)
@@ -1207,11 +1303,20 @@ static void LGPromptForIconAppearance(UIView *hostView, const LGIconRow *row,
              forSupplementaryViewOfKind:UICollectionElementKindSectionHeader
                     withReuseIdentifier:kLGDescriptionHeaderReuseID];
     [self lg_applyTheme];
+    [self lg_installAppearanceMenu];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self lg_applyTheme];
+    [self lg_installAppearanceMenu];
+}
+
+- (void)lg_installAppearanceMenu {
+    __weak UICollectionView *weakCollectionView = self.collectionView;
+    LGInstallAppearanceMenu(self, self.collectionView, ^{
+        [weakCollectionView reloadData];
+    });
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
@@ -1266,7 +1371,7 @@ static void LGPromptForIconAppearance(UIView *hostView, const LGIconRow *row,
     const LGRuntimeGroup *g = LGGroupAt(_gi);
     if (!g || indexPath.item >= g->count) return;
     __weak UICollectionView *weakCV = collectionView;
-    LGPromptForIconAppearance(collectionView, &g->rows[indexPath.item], ^(BOOL success) {
+    LGApplyIconUsingPreferredAppearance(collectionView, &g->rows[indexPath.item], ^(BOOL success) {
         if (success) [weakCV reloadData];
     });
 }
@@ -1347,6 +1452,17 @@ static UITableView *LGRememberedTableView(id viewController) {
 #pragma mark - Hooks
 
 %hook _TtC6Apollo29SettingsAppIconViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    if (!LGAlternateIconsAvailable()) return;
+    UIViewController *controller = (UIViewController *)self;
+    UITableView *tableView = LGRememberedTableView(self);
+    __weak UITableView *weakTableView = tableView;
+    LGInstallAppearanceMenu(controller, tableView ?: controller.view, ^{
+        [weakTableView reloadData];
+    });
+}
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     LGRememberTableView(self, tableView);
@@ -1458,7 +1574,7 @@ static UITableView *LGRememberedTableView(id viewController) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
         if (indexPath.row < sFeaturedCount) {
             __weak UITableView *weakTV = tableView;
-            LGPromptForIconAppearance(tableView, &sFeaturedRows[indexPath.row], ^(BOOL success) {
+            LGApplyIconUsingPreferredAppearance(tableView, &sFeaturedRows[indexPath.row], ^(BOOL success) {
                 if (success) [weakTV reloadData];
             });
         }
