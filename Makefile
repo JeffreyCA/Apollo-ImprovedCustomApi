@@ -74,6 +74,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloImmersiveHeaderBackground.m \
     $(SRC_DIR)/ApolloIdentityHeaderLayout.m \
     $(SRC_DIR)/ApolloUserAvatars.xm \
+    $(SRC_DIR)/ApolloScrapeWebView.m \
     $(SRC_DIR)/ApolloProfileSocialLinks.m \
     $(SRC_DIR)/ApolloBadgeBookCatalog.m \
     $(SRC_DIR)/ApolloBadgeBookScraper.m \
