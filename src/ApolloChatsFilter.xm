@@ -260,6 +260,27 @@ static UITableView *ApolloBoxesTableView(id controller) {
     return [value isKindOfClass:[UITableView class]] ? value : nil;
 }
 
+// Our tableView:numberOfRowsInSection: adds +1 to the Messages section while the
+// row state names a messagesSection (ApolloBoxesUsesInsertedDirectChat). A fresh
+// state has messagesSection == -1, so simply swapping the state object out drops
+// that row from the count with no delete to match — and if a table update was
+// already in flight, UIKit's row-count assertion fires inside
+// -[ASTableView rangeController:updateWithChangeSet:updates:]. That is issue #865:
+// switching accounts with the inbox on screen.
+//
+// Reset and reload as one main-queue step instead, so the count only ever changes
+// at a moment the table is being told to re-read it from scratch.
+static void ApolloBoxesResetRowStateAndReload(id controller, NSString *reason) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!controller) return;
+        UITableView *tableView = ApolloBoxesTableView(controller);
+        objc_setAssociatedObject(controller, &kApolloBoxesRowStateKey,
+                                 [ApolloBoxesRowState new], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [tableView reloadData];
+        ChatsFilterLog(@"reset Boxes row state + reloaded (%@)", reason ?: @"unknown");
+    });
+}
+
 static void ApolloRefreshBoxesForModeratorState(NSString *reason) {
     dispatch_async(dispatch_get_main_queue(), ^{
         id controller = sLatestBoxesController;
@@ -1329,9 +1350,9 @@ static void ApolloWarnIfUnhandledRowDelegates(id vc) {
     ApolloCaptureInboxTabBarItem((UIViewController *)self);
     ApolloApplyCombinedInboxBadge();
     // Section membership changes with moderator status. Force a fresh probe so
-    // stale coordinates from the previous account cannot route the wrong row.
-    objc_setAssociatedObject(self, &kApolloBoxesRowStateKey,
-                             [ApolloBoxesRowState new], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // stale coordinates from the previous account cannot route the wrong row —
+    // paired with a reload, never on its own (#865).
+    ApolloBoxesResetRowStateAndReload(self, @"account switch");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (sLatestBoxesController == self) ApolloRefreshBoxesForModeratorState(@"account switch +0.75s");
     });

@@ -818,10 +818,37 @@ static UIView *ApolloFindJumpBar(UIView *root) {
     return nil;
 }
 
+// JumpBar is a Swift class (_TtC6Apollo7JumpBar), so its ivars are NOT all plain
+// strong ObjC object pointers: a `weak var` stores a side-table pointer and a
+// non-class-typed property stores inline value bits. `object_getIvar` is declared
+// to return `id`, so ARC retains whatever it finds — retaining those bits is an
+// immediate EXC_BAD_ACCESS at a nonsense address (issue #893: iPad launch,
+// fault address 0x103ba258720, straight out of objc_retain).
+//
+// Read the slot as raw memory instead, and only hand it back as an object once
+// it looks like one: strong-object type encoding, pointer-aligned, and a class
+// pointer the runtime actually recognizes. Anything else reads as "absent",
+// which is exactly how the callers already treat a nil ivar.
 static id ApolloJumpBarObjectIvar(UIView *jumpBar, const char *name) {
     if (!jumpBar || !name) return nil;
     Ivar ivar = class_getInstanceVariable(jumpBar.class, name);
-    return ivar ? object_getIvar(jumpBar, ivar) : nil;
+    if (!ivar) return nil;
+
+    // Swift weak/unowned and value-typed ivars do not carry a plain '@' encoding.
+    const char *encoding = ivar_getTypeEncoding(ivar);
+    if (!encoding || encoding[0] != '@' || encoding[1] == '?') return nil;
+
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    if (offset <= 0) return nil;
+    void *slot = (__bridge void *)jumpBar;
+    uintptr_t raw = *(uintptr_t *)((uint8_t *)slot + offset);
+    if (raw == 0 || (raw & (sizeof(void *) - 1)) != 0) return nil;
+
+    // Past the encoding gate the slot is a plain strong object pointer, so it is
+    // either nil (handled above) or a live object — no further probing needed.
+    // Deliberately no isa validation here: dereferencing a candidate to check it
+    // is the very thing that would fault if we were wrong.
+    return (__bridge __unsafe_unretained id)(void *)raw;
 }
 
 // Whether the JumpBar is in "type a subreddit name" mode. Apollo swaps the name
@@ -1415,10 +1442,17 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
         objc_setAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
-    __weak UIView *weakTitleControl = (UIView *)self;
+    // Strong capture, deliberately. This used to capture __weak and reload inside
+    // the block, and issue #893 crashed in objc_retain on the reloaded pointer at
+    // ApolloUpdateNavigationTitleGlass's entry — i.e. the weak slot handed back a
+    // dangling _UINavigationBarTitleControl instead of nil on iOS 27. Owning the
+    // view for the one main-queue turn the block takes removes that path entirely
+    // and costs nothing: a nav-bar title control outliving its removal by a single
+    // runloop hop has no observable effect, and the function already no-ops on a
+    // view with no window.
+    UIView *titleControl = (UIView *)self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIView *titleControl = weakTitleControl;
-        if (titleControl) ApolloUpdateNavigationTitleGlass(titleControl);
+        ApolloUpdateNavigationTitleGlass(titleControl);
     });
 }
 
@@ -1433,10 +1467,9 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     if (controller) {
         [controller scheduleTargetRefreshIfNeeded];
     } else {
-        __weak UIView *weakTitleControl = (UIView *)self;
+        UIView *titleControl = (UIView *)self;   // strong — see didMoveToWindow (#893)
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIView *titleControl = weakTitleControl;
-            if (titleControl) ApolloUpdateNavigationTitleGlass(titleControl);
+            ApolloUpdateNavigationTitleGlass(titleControl);
         });
     }
 }

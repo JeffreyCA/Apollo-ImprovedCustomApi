@@ -470,14 +470,24 @@ typedef struct { uint32_t rgb; ApolloThemeToken token; } TextPaletteEntry;
 // which ends in UIColor initWithRed:green:blue:alpha:. We intentionally use the
 // constants only at text render sinks, never as global constructor remaps.
 static const TextPaletteEntry kTextPaletteEntries[] = {
-    // role 0: primary. Read-state primary (0x303030 light / 0xD0D1D6 dark —
-    // the dimmed title Apollo renders once a post is read) routes to secondary
-    // so custom themes keep a visible read/unread distinction (issue #716);
-    // mapping it to Label made read posts identical to unread ones.
+    // role 0: primary. sub_100689abc(role, isRead, isDark) emits three
+    // unread/read pairs, the third gated on "UsePureBlackDarkMode" in the
+    // group.com.christianselig.apollo suite (branch at 0x100689d78):
+    //
+    //     light             #000000 / #999999
+    //     dark              #EEEFF5 / #939499
+    //     dark, pure black  #D0D1D6 / #86868A
+    //
+    // Only the read halves route to SecondaryLabel; that is what keeps a
+    // read/unread distinction under custom themes (issue #716). #D0D1D6 is a
+    // PRIMARY despite being the dimmest of the three — routing it to
+    // SecondaryLabel greys out nearly all text for Pure Black Dark Mode users.
+    // #303030 is emitted nowhere in the binary and is kept only as a defensive
+    // alias of the light primary.
     { 0x000000, ApolloThemeTokenLabel },
-    { 0x303030, ApolloThemeTokenSecondaryLabel },
+    { 0x303030, ApolloThemeTokenLabel },
     { 0xEEEFF5, ApolloThemeTokenLabel },
-    { 0xD0D1D6, ApolloThemeTokenSecondaryLabel },
+    { 0xD0D1D6, ApolloThemeTokenLabel },
     { 0x999999, ApolloThemeTokenSecondaryLabel },
     { 0x939499, ApolloThemeTokenSecondaryLabel },
     { 0x86868A, ApolloThemeTokenSecondaryLabel },
@@ -821,12 +831,8 @@ static void ApplyThemeToNavigationTitleControl(UIView *titleControl) {
 
 // Per-thread text-sink bypass (ASDK builds nodes off the main thread, so a
 // plain global would leak the bypass across concurrently-initializing nodes).
-// Incremented around code whose text must keep its original colors — currently
-// SmallInfoOverlayNode, the GIF/gallery duration pill (issue #710): its text
-// sits on an always-dark blurred pill that never follows the theme, but its
-// near-white color collides with the dark-mode text palette constants, so the
-// remap sank it to the theme's Label token — dark, and therefore unreadable on
-// the pill, whenever a light custom theme was active.
+// Raised around the duration-pill restore below (issue #710) so our own
+// corrective setAttributedText: is not re-themed by the ASTextNode sink.
 static __thread NSInteger sTextSinkBypass;
 
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller) {
@@ -1948,23 +1954,59 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 
 %end
 
-// The GIF/gallery duration pill (issue #710 — see sTextSinkBypass). Its text
-// is set from init and (re)referenced while building the layout spec; bypass
-// the text remap inside both so the pill keeps Apollo's original near-white
-// text on its always-dark backdrop instead of the theme's Label color.
-%hook _TtC6Apollo20SmallInfoOverlayNode
+// The GIF/gallery duration pill (issue #710). Apollo's Swift init
+// (sub_1002d78a4) builds a translucent WHITE capsule with BLACK text in both
+// appearances. #000000 is the light primary in kTextPaletteEntries, so without
+// this the ASTextNode sink swaps it for the theme's dynamic Label colour —
+// near-black in light mode, near-white in dark, i.e. white-on-white. The
+// capsule is never themed, so only the text moves.
+//
+// There is nowhere to raise the bypass around that assignment: -init is a Swift
+// unimplemented-initializer stub that is never called, the designated init
+// reaches ASDisplayNode via objc_msgSendSuper2, -layoutSpecThatFits: runs long
+// after the text is set, and -didLoad never fires — the pill loads no view or
+// layer of its own. So schedule the restore from the layout pass and write on
+// the main thread once it has ended; mutating node state mid-layout is
+// unsupported in ASDK. The flag is set at schedule time so repeated passes
+// queue the work once.
+static const void *kApolloThemePillRestoredKey = &kApolloThemePillRestoredKey;
 
-- (id)init {
+static void ApolloThemeRestoreOverlayPillText(id node) {
+    if (!node || !sEnabled) return;
+    Ivar ivar = class_getInstanceVariable(object_getClass(node), "textNode");
+    id textNode = ivar ? object_getIvar(node, ivar) : nil;
+    if (![textNode respondsToSelector:@selector(attributedText)]) return;
+
+    NSAttributedString *text = [textNode attributedText];
+    if (![text isKindOfClass:[NSAttributedString class]] || text.length == 0) return;
+
+    if (sDebugLogging) {
+        UIColor *was = [text attribute:NSForegroundColorAttributeName atIndex:0 effectiveRange:NULL];
+        ApolloLog(@"ThemeRuntime: pill '%@' restore #%06X -> #000000",
+                  text.string, ApolloThemeRGBFromUIColor(was));
+    }
+    NSMutableAttributedString *stock = [text mutableCopy];
+    [stock addAttribute:NSForegroundColorAttributeName
+                  value:[UIColor blackColor]
+                  range:NSMakeRange(0, stock.length)];
     sTextSinkBypass++;
-    id result = %orig;
+    [textNode setAttributedText:stock];
     sTextSinkBypass--;
-    return result;
 }
 
+%hook _TtC6Apollo20SmallInfoOverlayNode
+
 - (id)layoutSpecThatFits:(struct ApolloThemeSizeRange)fits {
-    sTextSinkBypass++;
     id result = %orig;
-    sTextSinkBypass--;
+    // ASDK lays out off the main thread; schedule, never write, from in here.
+    if (sEnabled && !objc_getAssociatedObject(self, kApolloThemePillRestoredKey)) {
+        objc_setAssociatedObject(self, kApolloThemePillRestoredKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        __weak id weakNode = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloThemeRestoreOverlayPillText(weakNode);
+        });
+    }
     return result;
 }
 

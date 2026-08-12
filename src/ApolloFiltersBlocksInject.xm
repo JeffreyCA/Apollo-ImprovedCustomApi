@@ -70,6 +70,31 @@ enum {
 // we only add a trailing row).
 static const void *kApolloPFBlockedExpandedKey   = &kApolloPFBlockedExpandedKey;   // NSNumber BOOL on the VC
 static const void *kApolloPFBlockedNativeCountKey = &kApolloPFBlockedNativeCountKey; // NSNumber on the VC (rows incl. Add)
+static const void *kApolloPFTableBoxKey           = &kApolloPFTableBoxKey;           // ApolloPFTableBox on the VC
+
+// Zeroing-weak box for the controller's table view. The VC is not a
+// UITableViewController and exposes no -tableView, so the only way to reach the
+// table outside a data-source callback is to remember the one UIKit hands us.
+// Weak (not ASSIGN) so a torn-down table can never be messaged.
+@interface ApolloPFTableBox : NSObject
+@property (nonatomic, weak) UITableView *table;
+@end
+@implementation ApolloPFTableBox
+@end
+
+static void ApolloPFRememberTable(id vc, UITableView *tableView) {
+    if (![tableView isKindOfClass:[UITableView class]]) return;
+    ApolloPFTableBox *box = objc_getAssociatedObject(vc, kApolloPFTableBoxKey);
+    if (!box) {
+        box = [ApolloPFTableBox new];
+        objc_setAssociatedObject(vc, kApolloPFTableBoxKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    box.table = tableView;
+}
+
+static UITableView *ApolloPFTableView(id vc) {
+    return ((ApolloPFTableBox *)objc_getAssociatedObject(vc, kApolloPFTableBoxKey)).table;
+}
 
 // Our "Blocked Users (N)" toggle is row 0 of the blocked section and Apollo's own
 // rows follow at display index 1..nativeCount (so it all reads as ONE rounded group).
@@ -135,6 +160,13 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    // Capture the table here (the first data-source callback, and one that fires on
+    // every reload) so the switch handler and setEditing: below have something to
+    // reload. SettingsFiltersViewController is a plain UIViewController that owns a
+    // table — it has NO -tableView accessor, so asking for one raises
+    // NSInvalidArgumentException (#870 "Enable Tag Filters" toggle, #876 Block list
+    // Edit; both regressions from #728, which dropped this capture).
+    ApolloPFRememberTable(self, tableView);
     return %orig + kApolloPFExtraSections;
 }
 
@@ -463,7 +495,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
     [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:UDKeyTagFilterEnabled];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTagFiltersChangedNotification object:nil];
     // Re-gate the NSFW/Spoiler/Overrides rows' enabled look.
-    UITableView *t = [(UITableViewController *)(id)self tableView];
+    UITableView *t = ApolloPFTableView(self);
     if ([t isKindOfClass:[UITableView class]]) {
         NSInteger section = [self apollo_pfNativeSectionCount:t] + 2;
         @try { [t reloadSections:[NSIndexSet indexSetWithIndex:section] withRowAnimation:UITableViewRowAnimationNone]; } @catch (__unused id e) {}
@@ -586,7 +618,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
 - (void)setEditing:(BOOL)editing animated:(BOOL)animated {
     %orig;
     if (editing && ![objc_getAssociatedObject(self, kApolloPFBlockedExpandedKey) boolValue]) {
-        UITableView *t = [(UITableViewController *)(id)self tableView];
+        UITableView *t = ApolloPFTableView(self);
         if ([t isKindOfClass:[UITableView class]]) [self apollo_pfSetBlockedExpanded:YES table:t];
     }
 }
