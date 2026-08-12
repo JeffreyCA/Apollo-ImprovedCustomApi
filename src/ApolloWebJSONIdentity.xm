@@ -280,6 +280,36 @@ static void ApolloWebJSONFulfillTokenCompletion(id completion) {
     dispatch_async(dispatch_get_main_queue(), ^{ block(nil, nil); });
 }
 
+// Same signature, failure side: error != nil is what every caller checks before
+// touching self.authorizationCredential.
+static void ApolloWebJSONFailTokenCompletion(id completion, NSString *reason) {
+    if (!completion) return;
+    NSError *error = [NSError errorWithDomain:@"ApolloReborn.WebJSON.Identity"
+                                         code:881
+                                     userInfo:@{ NSLocalizedDescriptionKey: reason ?: @"Token refresh unavailable." }];
+    void (^block)(id, NSError *) = [completion copy];
+    dispatch_async(dispatch_get_main_queue(), ^{ block(nil, error); });
+}
+
+// -[RDKClient refreshAccessTokenWithCompletion:] reads
+// authorizationCredential.accessToken.refreshToken and hands it straight to
+// -refreshAccessTokenWithCompletion:completion:, which stuffs it into
+// +[NSDictionary dictionaryWithObjects:forKeys:count:] with no nil check. A
+// credential whose refresh token is missing therefore raises
+// NSInvalidArgumentException from inside RedditKit — issue #881, seen mid-scroll
+// when a token refresh fires on a credential we (or a restore) installed without
+// one. Detect the nil BEFORE %orig; there is nothing to refresh with, so failing
+// the completion is strictly better than the throw.
+static BOOL ApolloWebJSONCredentialHasRefreshToken(RDKClient *client) {
+    if (![client respondsToSelector:@selector(authorizationCredential)]) return YES;
+    id credential = [client authorizationCredential];
+    if (!credential || ![credential respondsToSelector:@selector(accessToken)]) return NO;
+    id accessToken = ((id (*)(id, SEL))objc_msgSend)(credential, @selector(accessToken));
+    if (!accessToken || ![accessToken respondsToSelector:@selector(refreshToken)]) return NO;
+    id refreshToken = ((id (*)(id, SEL))objc_msgSend)(accessToken, @selector(refreshToken));
+    return [refreshToken isKindOfClass:[NSString class]] && ((NSString *)refreshToken).length > 0;
+}
+
 #pragma mark - Signed-in account synthesis (cold-start identity)
 
 // Apollo's account model is two parallel blobs merged by index (verified in
@@ -780,6 +810,14 @@ static id ApolloWebJSONThingProperty(id thing, SEL selector) {
         ApolloLogDebug(@"[WebJSON][identity] Short-circuited token refresh (cookie session) for u/%@",
                        ApolloWebJSONClientUsername(self) ?: @"(anonymous)");
         ApolloWebJSONFulfillTokenCompletion(completion);
+        return nil;
+    }
+    // Runs in EVERY auth mode, not just Web JSON: RedditKit throws on a nil
+    // refresh token regardless of how the credential got there (#881).
+    if (!ApolloWebJSONCredentialHasRefreshToken((RDKClient *)self)) {
+        ApolloLog(@"[WebJSON][identity] Refusing token refresh for u/%@ — credential has no refresh token (would raise in RedditKit)",
+                  ApolloWebJSONClientUsername(self) ?: @"(anonymous)");
+        ApolloWebJSONFailTokenCompletion(completion, @"This account has no refresh token. Sign out and back in to restore it.");
         return nil;
     }
     return %orig;
