@@ -411,12 +411,289 @@ static RDKMultireddit *ApolloMultiEditResolveRowModel(NSString *title, NSString 
 
 // MARK: - Capture Apollo's multireddit fetches
 
+typedef void (^ApolloMultiEditRawResponseCompletion)(NSHTTPURLResponse *response,
+                                                      id responseObject,
+                                                      NSError *error);
+
+static NSString *const kApolloMultiEditMinePath = @"api/multi/mine.json";
+static NSString *const kApolloMultiEditResponseErrorDomain = @"ApolloReborn.MultiredditResponse";
+
+typedef NS_ENUM(NSUInteger, ApolloMultiEditResponseShape) {
+    ApolloMultiEditResponseShapeNone,
+    ApolloMultiEditResponseShapeArray,
+    ApolloMultiEditResponseShapeObject,
+};
+
+static NSString *ApolloMultiEditNormalizedPath(id path) {
+    if (![path isKindOfClass:[NSString class]]) return nil;
+    return [(NSString *)path hasPrefix:@"/"]
+        ? [(NSString *)path substringFromIndex:1]
+        : (NSString *)path;
+}
+
+// Every direct RDKObjectBuilder use in RedditKit's multireddit methods was
+// traced in Apollo 1.15.11. Collection reads return an array of LabeledMulti
+// envelopes. Individual reads and create/update/description writes return a
+// single envelope. DELETE and api/multi/copy use non-model completion shapes,
+// so deliberately leave those untouched.
+static ApolloMultiEditResponseShape ApolloMultiEditResponseShapeForRequest(id method, id path) {
+    NSString *normalizedMethod = [method isKindOfClass:[NSString class]]
+        ? [(NSString *)method uppercaseString] : nil;
+    NSString *normalizedPath = ApolloMultiEditNormalizedPath(path);
+    if (normalizedMethod.length == 0 || normalizedPath.length == 0) {
+        return ApolloMultiEditResponseShapeNone;
+    }
+    if ([normalizedMethod isEqualToString:@"DELETE"] ||
+        [normalizedPath isEqualToString:@"api/multi/copy"]) {
+        return ApolloMultiEditResponseShapeNone;
+    }
+    if ([normalizedMethod isEqualToString:@"GET"] &&
+        [normalizedPath isEqualToString:kApolloMultiEditMinePath]) {
+        return ApolloMultiEditResponseShapeArray;
+    }
+    if ([normalizedMethod isEqualToString:@"GET"] &&
+        [normalizedPath hasPrefix:@"api/multi/user/"]) {
+        NSArray<NSString *> *components = [normalizedPath componentsSeparatedByString:@"/"];
+        if (components.count == 4) return ApolloMultiEditResponseShapeArray;
+    }
+    return [normalizedPath hasPrefix:@"api/multi/"]
+        ? ApolloMultiEditResponseShapeObject
+        : ApolloMultiEditResponseShapeNone;
+}
+
+static NSString *ApolloMultiEditExpectedKindForPath(NSString *path) {
+    return [path hasSuffix:@"/description"]
+        ? @"LabeledMultiDescription"
+        : @"LabeledMulti";
+}
+
+static NSError *ApolloMultiEditMalformedResponseError(NSString *path, id responseObject,
+                                                       NSUInteger invalidCount) {
+    NSString *responseClass = responseObject ? NSStringFromClass([responseObject class]) : @"nil";
+    return [NSError errorWithDomain:kApolloMultiEditResponseErrorDomain
+                               code:858
+                           userInfo:@{
+        NSLocalizedDescriptionKey: @"Reddit returned malformed multireddit data.",
+        @"path": path ?: @"unknown",
+        @"responseClass": responseClass,
+        @"invalidEntryCount": @(invalidCount),
+    }];
+}
+
+static BOOL ApolloMultiEditCanBuildEnvelope(id entry, NSString *expectedKind,
+                                             NSString **reasonOut) {
+    if (reasonOut) *reasonOut = nil;
+    if (![entry isKindOfClass:[NSDictionary class]]) {
+        if (reasonOut) {
+            *reasonOut = [NSString stringWithFormat:@"class:%@",
+                entry ? NSStringFromClass([entry class]) : @"nil"];
+        }
+        return NO;
+    }
+
+    NSDictionary *envelope = (NSDictionary *)entry;
+    id kind = envelope[@"kind"];
+    if (![kind isKindOfClass:[NSString class]]) {
+        if (reasonOut) *reasonOut = @"kind:not-string";
+        return NO;
+    }
+    if (![kind isEqualToString:expectedKind]) {
+        if (reasonOut) *reasonOut = @"kind:unexpected";
+        return NO;
+    }
+    if (![envelope[@"data"] isKindOfClass:[NSDictionary class]]) {
+        if (reasonOut) *reasonOut = @"data:not-dictionary";
+        return NO;
+    }
+
+    // Apollo's array parsers do not nil-check objectFromJSON: before calling
+    // addObject:. Validate the complete Mantle conversion now, under an
+    // exception boundary, so both a thrown transformer and a nil model are
+    // filtered before the private parser sees the envelope.
+    @try {
+        Class builderClass = objc_getClass("RDKObjectBuilder");
+        SEL builderSelector = @selector(objectFromJSON:);
+        if (!builderClass || ![builderClass respondsToSelector:builderSelector]) {
+            if (reasonOut) *reasonOut = @"builder:unavailable";
+            return NO;
+        }
+        id model = ((id (*)(id, SEL, id))objc_msgSend)(builderClass, builderSelector, envelope);
+        Class expectedClass = [expectedKind isEqualToString:@"LabeledMultiDescription"]
+            ? NSClassFromString(@"RDKMultiredditDescription")
+            : NSClassFromString(@"RDKMultireddit");
+        if (model && (!expectedClass || [model isKindOfClass:expectedClass])) return YES;
+        if (reasonOut) *reasonOut = @"builder:nil-or-wrong-class";
+    } @catch (__unused NSException *exception) {
+        if (reasonOut) *reasonOut = @"builder:exception";
+    }
+    return NO;
+}
+
+// Apollo's native -multiredditsWithCompletion: assumes every element returned
+// by /api/multi/mine is a dictionary. Its own RDKObjectBuilder notices a bad
+// type and leaves a breadcrumb, but then continues into json[@"kind"] anyway.
+// Issue #858 captured that exact path: one non-dictionary element reaches
+// -objectForKeyedSubscript: and raises NSInvalidArgumentException at launch.
+//
+// Sanitize the raw endpoint payload before Apollo's private completion block
+// enumerates it. A partly valid response keeps its valid models. A wholly
+// malformed response becomes a failure instead of a successful empty result,
+// so transient server/auth errors cannot make Apollo replace the user's in-
+// memory multireddit list with an empty array.
+static NSArray *ApolloMultiEditSanitizeArrayResponse(NSString *path, id responseObject,
+                                                      NSError **sanitizationError) {
+    if (sanitizationError) *sanitizationError = nil;
+    if (![responseObject isKindOfClass:[NSArray class]]) {
+        ApolloLog(@"[MultiEdit] %@ returned top-level %@ instead of NSArray; rejecting response",
+                  path,
+                  responseObject ? NSStringFromClass([responseObject class]) : @"nil");
+        if (sanitizationError) {
+            *sanitizationError = ApolloMultiEditMalformedResponseError(path, responseObject,
+                                                                       responseObject ? 1 : 0);
+        }
+        return nil;
+    }
+
+    NSArray *responseArray = (NSArray *)responseObject;
+    NSMutableArray *validEntries = [NSMutableArray arrayWithCapacity:responseArray.count];
+    NSMutableDictionary<NSString *, NSNumber *> *invalidReasons = [NSMutableDictionary dictionary];
+    for (id entry in responseArray) {
+        NSString *reason = nil;
+        if (ApolloMultiEditCanBuildEnvelope(entry, @"LabeledMulti", &reason)) {
+            [validEntries addObject:entry];
+        } else {
+            reason = reason ?: @"unknown";
+            invalidReasons[reason] = @([invalidReasons[reason] unsignedIntegerValue] + 1);
+        }
+    }
+
+    if (validEntries.count == responseArray.count) return responseArray;
+
+    NSUInteger invalidCount = responseArray.count - validEntries.count;
+    ApolloLog(@"[MultiEdit] Filtered %lu malformed %@ entr%@ (%@); preserving %lu valid entr%@",
+              (unsigned long)invalidCount,
+              path,
+              invalidCount == 1 ? @"y" : @"ies",
+              invalidReasons,
+              (unsigned long)validEntries.count,
+              validEntries.count == 1 ? @"y" : @"ies");
+
+    if (validEntries.count == 0 && responseArray.count > 0) {
+        if (sanitizationError) {
+            *sanitizationError = ApolloMultiEditMalformedResponseError(path, responseObject,
+                                                                       invalidCount);
+        }
+        return nil;
+    }
+    return validEntries;
+}
+
+static NSDictionary *ApolloMultiEditSanitizeObjectResponse(NSString *path, id responseObject,
+                                                            NSError **sanitizationError) {
+    if (sanitizationError) *sanitizationError = nil;
+    NSString *reason = nil;
+    NSString *expectedKind = ApolloMultiEditExpectedKindForPath(path);
+    if (ApolloMultiEditCanBuildEnvelope(responseObject, expectedKind, &reason)) {
+        return responseObject;
+    }
+
+    ApolloLog(@"[MultiEdit] Rejected malformed %@ response (%@, top-level=%@)",
+              path, reason ?: @"unknown",
+              responseObject ? NSStringFromClass([responseObject class]) : @"nil");
+    if (sanitizationError) {
+        *sanitizationError = ApolloMultiEditMalformedResponseError(path, responseObject,
+                                                                   responseObject ? 1 : 0);
+    }
+    return nil;
+}
+
+#if APOLLO_SIM_BUILD
+// Deterministic issue #858 reproduction, simulator-only. simctl forwards
+// SIMCTL_CHILD_* variables into the launched app after removing the prefix:
+//
+//   SIMCTL_CHILD_APOLLO_SIMULATE_ISSUE_858=filter scripts/run-in-sim.sh --logs
+//       Injects several malformed envelope shapes and proves the sanitizer
+//       keeps only model-buildable entries without crashing.
+//
+//   SIMCTL_CHILD_APOLLO_SIMULATE_ISSUE_858=crash scripts/run-in-sim.sh --logs
+//       Injects the same elements but deliberately bypasses the sanitizer,
+//       recreating Apollo's original NSInvalidArgumentException and stack.
+//
+// This code is compiled out of device/release builds.
+static NSString *ApolloMultiEditIssue858SimulationMode(void) {
+    NSString *mode = [NSProcessInfo processInfo].environment[@"APOLLO_SIMULATE_ISSUE_858"];
+    return [mode isKindOfClass:[NSString class]] ? mode.lowercaseString : nil;
+}
+
+static id ApolloMultiEditIssue858InjectedResponse(id responseObject, NSString *mode) {
+    if (![mode isEqualToString:@"filter"] && ![mode isEqualToString:@"crash"]) {
+        return responseObject;
+    }
+    NSMutableArray *injected = [NSMutableArray array];
+    [injected addObject:@"ApolloReborn issue #858 simulated malformed entry"];
+    [injected addObject:[NSNull null]];
+    [injected addObject:@{ @"kind": [NSNull null], @"data": @{} }];
+    [injected addObject:@{ @"kind": @"Unknown", @"data": @{} }];
+    [injected addObject:@{ @"kind": @"LabeledMulti", @"data": @"not-a-dictionary" }];
+    if ([responseObject isKindOfClass:[NSArray class]]) {
+        [injected addObjectsFromArray:(NSArray *)responseObject];
+    }
+    ApolloLog(@"[MultiEdit][Issue858] Injected five malformed envelopes into %@ response (mode=%@, original=%@)",
+              kApolloMultiEditMinePath, mode,
+              responseObject ? NSStringFromClass([responseObject class]) : @"nil");
+    return injected;
+}
+#endif
+
 // The Subreddits list populates its MULTIREDDITS section from this fetch, so
 // wrapping the completion hands us the exact model objects behind the rows.
 // Apollo issues the same fetch for every signed-in account's client around
 // launch — hence the per-client keying above. Completion arity is
 // (NSArray *collection, NSError *error) (RedditKit's RDKArrayCompletionBlock).
 %hook RDKClient
+
+- (id)taskWithMethod:(NSString *)method
+    path:(NSString *)path
+    parameters:(id)parameters
+    completion:(ApolloMultiEditRawResponseCompletion)completion {
+    ApolloMultiEditResponseShape shape = ApolloMultiEditResponseShapeForRequest(method, path);
+    if (shape == ApolloMultiEditResponseShapeNone || !completion) return %orig;
+    NSString *normalizedPath = ApolloMultiEditNormalizedPath(path);
+
+    ApolloMultiEditRawResponseCompletion wrapped = ^(NSHTTPURLResponse *response,
+                                                       id responseObject,
+                                                       NSError *error) {
+#if APOLLO_SIM_BUILD
+        if ([normalizedPath isEqualToString:kApolloMultiEditMinePath]) {
+            NSString *simulationMode = ApolloMultiEditIssue858SimulationMode();
+            responseObject = ApolloMultiEditIssue858InjectedResponse(responseObject, simulationMode);
+            if ([simulationMode isEqualToString:@"crash"]) {
+                ApolloLog(@"[MultiEdit][Issue858] Deliberately bypassing sanitizer to reproduce the original crash");
+                completion(response, responseObject, error);
+                return;
+            }
+        }
+#endif
+
+        // Preserve RedditKit's normal network/error handling. Shape validation
+        // applies only to a purported successful payload.
+        if (error || !responseObject) {
+            completion(response, responseObject, error);
+            return;
+        }
+
+        NSError *sanitizationError = nil;
+        id sanitized = shape == ApolloMultiEditResponseShapeArray
+            ? ApolloMultiEditSanitizeArrayResponse(normalizedPath, responseObject, &sanitizationError)
+            : ApolloMultiEditSanitizeObjectResponse(normalizedPath, responseObject, &sanitizationError);
+        if (!sanitized) {
+            completion(response, nil, error ?: sanitizationError);
+            return;
+        }
+        completion(response, sanitized, error);
+    };
+    return %orig(method, path, parameters, wrapped);
+}
 
 - (id)multiredditsWithCompletion:(void (^)(NSArray *collection, NSError *error))completion {
     if (!completion) return %orig;
