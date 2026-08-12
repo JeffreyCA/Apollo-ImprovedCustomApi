@@ -225,7 +225,7 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
     NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithDictionary:@{
         @"model": model,
         @"messages": messages,
-        @"max_tokens": @(tokenBudget),
+        @"max_completion_tokens": @(tokenBudget),
         @"stream": @YES,
     }];
     if ([sAISummaryProvider isEqualToString:@"openrouter"]) {
