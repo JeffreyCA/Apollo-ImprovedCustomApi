@@ -82,3 +82,22 @@ BOOL ApolloPaneNavigationControllerIsRegisteredToSplit(
     if (!navigationController || !splitViewController || !sPaneNavigationOwners) return NO;
     return [sPaneNavigationOwners objectForKey:navigationController] == splitViewController;
 }
+
+void ApolloPaneStageMasterTableSelectionIfNeeded(
+    UIViewController *sourceViewController,
+    UITableView *tableView,
+    NSIndexPath *indexPath) {
+    if (!ApolloPaneLayoutActive() || !sourceViewController || !tableView || !indexPath) return;
+    ApolloPaneSplitViewController *pane =
+        (ApolloPaneSplitViewController *)ApolloPaneSplitControllerFor(sourceViewController);
+    UINavigationController *primary =
+        [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary];
+    if (!pane || sourceViewController.navigationController != primary) return;
+
+    id intent = [pane apollo_masterSelectionIntentFromSource:sourceViewController
+                                                     surface:tableView
+                                                   indexPath:indexPath
+                                              itemIdentifier:nil
+                                               identityOwner:nil];
+    [pane apollo_stageMasterSelectionIntent:intent];
+}

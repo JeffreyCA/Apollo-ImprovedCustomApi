@@ -330,19 +330,46 @@ not by the numbering in the review report.
     device build passed; package:
     `com.apollo.reborn_3.5.1-37+debug_iphoneos-arm.deb`.
 
-- [ ] **14 — Preserve master selection semantics.**
+- [x] **14 — Preserve master selection semantics.**
   Keep the row corresponding to visible detail selected in Settings, Inbox, and
   other list/detail sources, including the VoiceOver selected trait.
   - Focused simulator test: selection follows detail replacement, Back, clear,
     tab changes, and compact/expanded transitions.
+  - Evidence: pane-owned selection intents now retain a stable item identity
+    for Texture/ListAdapter sources, re-resolve rows after updates, and keep
+    exactly one visible master row selected while its detail branch remains
+    active. UIKit and Texture cells expose `UIAccessibilityTraitSelected` in
+    regular mode; compact mode retains only the logical selection and restores
+    the visual/accessibility selection on expansion. Real Home, Inbox, native
+    Settings, and the tweak-owned Apollo Reborn Settings row passed replacement,
+    detail continuation/Back, clear, five-tab switching, and compact/regular
+    scenarios. The injected Settings rows now explicitly stage an intent before
+    their early-return push path. A no-build relaunch restored five coherent
+    regular pane trees. `git diff --check`, the simulator build, and the pinned
+    iOS 26 device build passed; package:
+    `com.apollo.reborn_3.5.1-7+debug_iphoneos-arm.deb`.
 
 ### Performance and layout polish
 
-- [ ] **15 — Restore lazy loading for offscreen tabs.**
+- [x] **15 — Restore lazy loading for offscreen tabs.**
   Move view-backed pane configuration into lifecycle methods so all five pane
   hierarchies are not forced to load during scene connection.
   - Focused simulator test: record which pane views load before/after visiting
     each tab; compare cold-launch timing and resident memory.
+  - Evidence: pane theming, grabber creation, layout invalidation, and
+    navigation-gesture observation now begin in `viewDidLoad`; trait and display
+    refresh paths use `viewIfLoaded` and cannot materialize an offscreen pane.
+    A simulator-only `loadstatus` probe showed one loaded/attached pane after
+    cold launch, then loaded counts 2, 3, 4, and 5 only as the four untouched
+    tabs were first selected; exactly one pane remained attached throughout.
+    The comparable cold install interval fell from about 1.39s to 0.62–0.68s,
+    and a single fixed-window RSS sample fell from 563,920KB to 554,608KB
+    (informational simulator measurements, not release-gate performance data).
+    Deferred gesture observers remained functional through detail Back and
+    compact/regular transitions. Injected `configure-secondary:3` failure still
+    rolled back exactly without loading cleanup views. `git diff --check`, the
+    simulator build, and pinned iOS 26 device build passed; package:
+    `com.apollo.reborn_3.5.1-8+debug_iphoneos-arm.deb`.
 
 - [ ] **16 — Remove hot-scroll allocations outside pane mode.**
   Add direct-navigation/allocation-free fast paths for AutoHideTabBar scans.
@@ -530,3 +557,68 @@ entry if a later regression requires reopening and re-verifying a task.
   shared simulator was relaunched in regular two-column mode.
 - Remaining device/external gate: none for visible-controller selection; the
   tested alert/activity presentation APIs are the same on device.
+
+### Task 14 — 2026-08-12 — baseline `18d0f8c` + task working tree
+
+- Implementation: the pane tracks logical master selection independently from
+  UITableView/Texture presentation, uses stable ListAdapter item identities
+  across refreshes, suppresses Apollo's eager deselection while detail owns the
+  route, and applies/removes the selected accessibility trait with the visual
+  state. Added a narrow public staging handoff for screen-specific selection
+  owners; Apollo's two injected root Settings rows use it before their
+  early-return push path.
+- Focused test: selected two different real Home posts, continued and popped the
+  detail stack, cleared detail, and verified every state with
+  `selectionstatus`. Repeated with a real Inbox row, native General Settings,
+  and Apollo Reborn Settings. Every active regular case reported exactly one
+  selected row and `axSelected=1`; clear reported zero; compact reported a
+  retained logical selection with no hidden physical/AX selection; expansion
+  restored the same row with `pass=1`.
+- Standard smoke checks: switched Home → Search → Inbox → Profile → Settings →
+  Home, replaced detail, exercised Back and regular → compact → regular, reset
+  the compact override, and performed a no-build relaunch. The final navigation
+  dump contained exactly two navigation controllers for each of five tabs, and
+  the final 1032x1376 screenshot showed the normal regular two-column state.
+  Recent `apollofix` logs contained no relevant exception, assertion, hierarchy,
+  nested-transition, routing-loop, or dead-gesture diagnostic.
+- Build coverage: Liquid Glass simulator build/launch and `make package` for the
+  pinned iOS 26 device SDK / iOS 14 deployment target passed. Package:
+  `com.apollo.reborn_3.5.1-7+debug_iphoneos-arm.deb`.
+- Remaining device/external gate: the selected accessibility trait is proven in
+  the simulator; spoken VoiceOver output remains part of release gate E.
+
+### Task 15 — 2026-08-12 — baseline `18d0f8c` + task working tree
+
+- Implementation: moved every pane-owned view/gesture side effect out of the
+  five-tab construction transaction and into the pane's `viewDidLoad`.
+  Ground-theme refresh and resolved-layout invalidation now use `viewIfLoaded`,
+  and rollback removes gesture targets only when a pane had actually installed
+  them. Installation validation accepts the detail host's stored navigation
+  ownership while its view is unloaded, then requires concrete containment once
+  loaded. Added the simulator-only `loadstatus` probe, which itself never reads
+  `view` from an unloaded controller.
+- Focused test: a no-build cold launch reported `loadedPaneCount=1`, with Home
+  loaded/attached and tabs 1–4 unloaded/unattached. Visiting Search, Inbox,
+  Profile, and Settings in turn produced counts 2→3→4→5; returning Home retained
+  five loaded panes but exactly one attached pane. A fresh relaunch returned to
+  one loaded pane, proving visited panes are not eagerly recreated next process.
+- Performance sample: in comparable simulator launches, the interval from the
+  pane install hook to the five-pane commit changed from about 1.394s before the
+  change to 0.618–0.679s after it. One roughly fixed-window `ps` RSS comparison
+  changed from 563,920KB to 554,608KB. These are directional simulator samples;
+  the controlled cold-launch/RSS soak remains release gate F.
+- Standard smoke checks: opened a real Home post in detail, pushed and popped a
+  continuation, switched through all five tabs, and exercised regular → compact
+  → regular. Routing, selected-row state, deferred gesture observation, two-nav
+  ownership, and the final regular screenshot were coherent. A no-build
+  relaunch again installed 5/5 panes while loading only Home. Recent logs had no
+  relevant exception, assertion, hierarchy, nested transition, routing loop, or
+  dead-gesture diagnostic.
+- Rollback regression: simulator fault `configure-secondary:3` restored the
+  exact five stock navigation children with `rollbackExact=1`; cleanup did not
+  force unloaded pane views. A following normal relaunch installed all panes.
+- Build coverage: Liquid Glass simulator build/launch and `make package` for the
+  pinned iOS 26 device SDK / iOS 14 deployment target passed. Package:
+  `com.apollo.reborn_3.5.1-8+debug_iphoneos-arm.deb`.
+- Remaining device/external gate: controlled launch/RSS statistics and memory
+  pressure/soak coverage remain part of release gate F.

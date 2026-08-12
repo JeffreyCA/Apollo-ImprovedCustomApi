@@ -564,6 +564,61 @@ static void ApolloSimDebugDumpNavigationControllers(void) {
               (unsigned long)out.length);
 }
 
+// "loadstatus" command: inspect lazy pane materialization without touching any
+// unloaded view. This makes Task 15's cold-launch contract directly observable:
+// construction may wrap all tab stacks, but only a visited tab may load its
+// pane/column hierarchy.
+static void ApolloSimDebugDumpPaneLoadStatus(void) {
+    UIViewController *controller = ApolloMainTabBarController();
+    if (![controller isKindOfClass:[UITabBarController class]]) {
+        ApolloLog(@"[PaneLoadTest] no tab bar controller pass=0");
+        return;
+    }
+
+    UITabBarController *tabBarController = (UITabBarController *)controller;
+    NSMutableString *out = [NSMutableString stringWithFormat:@"selected=%lu tabs=%lu\n",
+        (unsigned long)tabBarController.selectedIndex,
+        (unsigned long)tabBarController.viewControllers.count];
+    __block NSUInteger loadedPaneCount = 0;
+    __block NSUInteger attachedPaneCount = 0;
+    __block BOOL selectedPaneLoaded = NO;
+    [tabBarController.viewControllers enumerateObjectsUsingBlock:
+        ^(UIViewController *child, NSUInteger tabIndex, BOOL *stop) {
+            if (![child isKindOfClass:[ApolloPaneSplitViewController class]]) {
+                [out appendFormat:@"tab=%lu child=%@ pane=0\n", (unsigned long)tabIndex,
+                    NSStringFromClass(child.class)];
+                return;
+            }
+            ApolloPaneSplitViewController *pane = (ApolloPaneSplitViewController *)child;
+            UINavigationController *primary =
+                [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary];
+            UINavigationController *detail =
+                [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary];
+            UIViewController *host =
+                [pane viewControllerForColumn:UISplitViewControllerColumnSecondary];
+            BOOL paneLoaded = pane.isViewLoaded;
+            if (paneLoaded) loadedPaneCount++;
+            BOOL attached = pane.viewIfLoaded.window != nil;
+            if (attached) attachedPaneCount++;
+            if (tabIndex == tabBarController.selectedIndex) selectedPaneLoaded = paneLoaded;
+            [out appendFormat:
+                @"tab=%lu paneLoaded=%d primaryLoaded=%d detailLoaded=%d hostLoaded=%d "
+                 "primaryRootLoaded=%d detailRootLoaded=%d attached=%d\n",
+                (unsigned long)tabIndex, paneLoaded, primary.isViewLoaded,
+                detail.isViewLoaded, host.isViewLoaded,
+                primary.viewControllers.firstObject.isViewLoaded,
+                detail.viewControllers.firstObject.isViewLoaded,
+                attached];
+        }];
+    [out appendFormat:@"loadedPaneCount=%lu attachedPaneCount=%lu pass=%d\n",
+        (unsigned long)loadedPaneCount, (unsigned long)attachedPaneCount,
+        selectedPaneLoaded && attachedPaneCount == 1];
+    [out writeToFile:@"/tmp/apollofix-pane-load-status.txt"
+          atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[PaneLoadTest] load status written loaded=%lu selected=%lu",
+              (unsigned long)loadedPaneCount, (unsigned long)tabBarController.selectedIndex);
+}
+
 static UINavigationController *ApolloSimDebugSelectedNavigationController(NSString *columnName) {
     UIViewController *controller = ApolloMainTabBarController();
     UIViewController *selected = [controller isKindOfClass:[UITabBarController class]]
@@ -1169,6 +1224,12 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         }
         if ([contents hasPrefix:@"navdump"]) {
             ApolloSimDebugDumpNavigationControllers();
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"loadstatus"]) {
+            ApolloSimDebugDumpPaneLoadStatus();
             return;
         }
         if ([contents hasPrefix:@"transitiongate "]) {

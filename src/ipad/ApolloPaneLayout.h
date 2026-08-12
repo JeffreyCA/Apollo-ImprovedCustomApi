@@ -81,6 +81,17 @@ BOOL ApolloPaneNavigationControllerIsRegisteredToSplit(
     UINavigationController *navigationController,
     UISplitViewController *splitViewController);
 
+// Preserve a native UITableView row as the semantic owner of the detail route
+// that its selection is about to push. Most Apollo screens are captured by the
+// pane router's delegate hooks. A screen-specific owner that handles an
+// injected row and returns before calling Apollo's implementation must use this
+// handoff immediately before its push so the router can claim the same intent.
+// This is a no-op unless `sourceViewController` is in a live primary column.
+void ApolloPaneStageMasterTableSelectionIfNeeded(
+    UIViewController *sourceViewController,
+    UITableView *tableView,
+    NSIndexPath *indexPath);
+
 #if APOLLO_SIM_BUILD
 // Launch-time fault injection for the atomic installer. The implementation is
 // simulator-only, so production builds cannot accidentally acquire a failure

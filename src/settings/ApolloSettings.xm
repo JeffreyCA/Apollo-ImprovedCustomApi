@@ -12,6 +12,7 @@
 #import "ApolloSettingsSearch.h"
 #import "ApolloReportViewController.h"
 #import "ApolloThemeRuntime.h"
+#import "ipad/ApolloPaneLayout.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
@@ -259,6 +260,12 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
             %orig;
             return;
         }
+        // These two tweak-owned rows return before Apollo's native Settings
+        // selection handler. Hand their selection to the iPad pane router
+        // before the immediate deselect/push so the still-visible master list
+        // keeps the row corresponding to its new detail controller selected.
+        ApolloPaneStageMasterTableSelectionIfNeeded(
+            (UIViewController *)self, tableView, indexPath);
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
         if (indexPath.row == 0) {
             CustomAPIViewController *vc = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];

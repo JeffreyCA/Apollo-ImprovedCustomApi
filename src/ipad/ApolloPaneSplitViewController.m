@@ -642,6 +642,7 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
 @interface ApolloPaneSplitViewController () <UISplitViewControllerDelegate, UIGestureRecognizerDelegate> {
     BOOL _apollo_loggedResolvedLayout;
     UIView *_apollo_grabber;
+    BOOL _apollo_navigationGestureObserversInstalled;
 
     // Compact-mode chrome. UIKit stacks the secondary column's wrapper onto the
     // primary navigation controller when a double-column split collapses. Left
@@ -769,9 +770,27 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
 - (nullable NSIndexPath *)apollo_resolvedMasterSelectionPath:
     (ApolloPaneMasterSelectionIntent *)intent;
 - (void)apollo_deselectMasterSelectionIntent:(ApolloPaneMasterSelectionIntent *)intent;
+- (void)apollo_installNavigationGestureObservers;
+- (void)apollo_removeNavigationGestureObservers;
 @end
 
 @implementation ApolloPaneSplitViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+
+    // Construction runs for all five tab children during the atomic install,
+    // but UIKit should materialize only the selected tab. Keep every operation
+    // that touches a view or view-owned gesture here so merely wrapping an
+    // offscreen navigation stack does not pre-load its entire pane hierarchy.
+    [self apollo_installNavigationGestureObservers];
+    [self apollo_applyGroundTheme];
+    [self apollo_installColumnGrabber];
+    [self apollo_resolvedDisplayStateMayHaveChanged];
+    ApolloLog(@"[PaneLoad] tab %ld loaded pane hierarchy primaryLoaded=%d detailLoaded=%d",
+              (long)self.apollo_tabIndex, self.apollo_primaryNav.isViewLoaded,
+              self.apollo_detailNav.isViewLoaded);
+}
 
 - (id)apollo_masterSelectionIntentFromSource:(UIViewController *)sourceViewController
                                       surface:(id)surface
@@ -1408,28 +1427,11 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
     ++_apollo_topologyMutationGeneration;
     ++_apollo_compactPrimaryRestoreGeneration;
 
+    [self apollo_removeNavigationGestureObservers];
     NSMutableArray<UINavigationController *> *navigationControllers = [NSMutableArray array];
     if (self.apollo_primaryNav) [navigationControllers addObject:self.apollo_primaryNav];
     if (self.apollo_detailNav) [navigationControllers addObject:self.apollo_detailNav];
     for (UINavigationController *navigationController in navigationControllers) {
-        NSMutableArray<UIGestureRecognizer *> *gestures = [NSMutableArray array];
-        if (navigationController.interactivePopGestureRecognizer) {
-            [gestures addObject:navigationController.interactivePopGestureRecognizer];
-        }
-        static const char *kNavigationGestureNames[] = {
-            "leftScreenEdgePanGestureRecognizer",
-            "rightScreenEdgePanGestureRecognizer",
-        };
-        for (size_t index = 0;
-             index < sizeof(kNavigationGestureNames) / sizeof(kNavigationGestureNames[0]);
-             index++) {
-            UIGestureRecognizer *gesture = ApolloPaneNavigationGesture(
-                navigationController, kNavigationGestureNames[index]);
-            if (gesture && ![gestures containsObject:gesture]) [gestures addObject:gesture];
-        }
-        for (UIGestureRecognizer *gesture in gestures) {
-            [gesture removeTarget:self action:@selector(apollo_navigationGestureStateChanged:)];
-        }
         ApolloPaneUnregisterNavigationController(navigationController);
     }
 
@@ -1464,14 +1466,23 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
         ApolloLog(@"[PaneSplit] tab %ld install validation failed: detail navigation", (long)self.apollo_tabIndex);
         return NO;
     }
-    if (!self.apollo_detailHost ||
-        [self viewControllerForColumn:UISplitViewControllerColumnSecondary] != self.apollo_detailHost ||
-        self.apollo_detailNav.parentViewController != self.apollo_detailHost) {
+    ApolloPaneColumnHostViewController *detailHost =
+        [self.apollo_detailHost isKindOfClass:[ApolloPaneColumnHostViewController class]]
+            ? (ApolloPaneColumnHostViewController *)self.apollo_detailHost : nil;
+    BOOL detailContainmentValid = detailHost &&
+        detailHost.hostedNavigationController == self.apollo_detailNav &&
+        (detailHost.isViewLoaded
+            ? self.apollo_detailNav.parentViewController == detailHost
+            : self.apollo_detailNav.parentViewController == nil);
+    if (!detailHost ||
+        [self viewControllerForColumn:UISplitViewControllerColumnSecondary] != detailHost ||
+        !detailContainmentValid) {
         ApolloLog(@"[PaneSplit] tab %ld install validation failed: detail containment column=%@ "
-                  @"host=%@ navParent=%@",
+                  @"host=%@ hostLoaded=%d storedNav=%@ navParent=%@",
                   (long)self.apollo_tabIndex,
                   [self viewControllerForColumn:UISplitViewControllerColumnSecondary],
-                  self.apollo_detailHost, self.apollo_detailNav.parentViewController);
+                  detailHost, detailHost.isViewLoaded, detailHost.hostedNavigationController,
+                  self.apollo_detailNav.parentViewController);
         return NO;
     }
     if (!ApolloPaneNavigationControllerIsRegisteredToSplit(navigationController, self) ||
@@ -1551,27 +1562,6 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
 #endif
     ApolloPaneRegisterNavigationController(self.apollo_primaryNav, self);
     ApolloPaneRegisterNavigationController(self.apollo_detailNav, self);
-    for (UINavigationController *navigationController in
-            @[ self.apollo_primaryNav, self.apollo_detailNav ]) {
-        NSMutableArray<UIGestureRecognizer *> *gestures = [NSMutableArray array];
-        if (navigationController.interactivePopGestureRecognizer) {
-            [gestures addObject:navigationController.interactivePopGestureRecognizer];
-        }
-        static const char *kNavigationGestureNames[] = {
-            "leftScreenEdgePanGestureRecognizer",
-            "rightScreenEdgePanGestureRecognizer",
-        };
-        for (size_t index = 0;
-             index < sizeof(kNavigationGestureNames) / sizeof(kNavigationGestureNames[0]);
-             index++) {
-            UIGestureRecognizer *gesture = ApolloPaneNavigationGesture(
-                navigationController, kNavigationGestureNames[index]);
-            if (gesture && ![gestures containsObject:gesture]) [gestures addObject:gesture];
-        }
-        for (UIGestureRecognizer *gesture in gestures) {
-            [gesture addTarget:self action:@selector(apollo_navigationGestureStateChanged:)];
-        }
-    }
     self.apollo_emptyMessage = message;
     self.apollo_emptySymbol = symbol;
 
@@ -1686,19 +1676,59 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
     self.tabBarItem = rootNav.tabBarItem;
 
     self.delegate = self;
-    [self apollo_applyGroundTheme];
-
-    // The columns are resizable by dragging the separator, but UIKit only
-    // reveals a grabber on pointer HOVER — with touch there is no hint at all
-    // that the divider does anything, so the capability goes unnoticed.
-    // A permanently visible grabber is the affordance.
-    [self apollo_installColumnGrabber];
-    [self apollo_resolvedDisplayStateMayHaveChanged];
 
     ApolloLog(@"[PaneSplit] tab %ld configured listRoot=%@ depth=%lu",
               (long)self.apollo_tabIndex,
               NSStringFromClass([rootNav.viewControllers.firstObject class]),
               (unsigned long)rootNav.viewControllers.count);
+}
+
+- (NSArray<UIGestureRecognizer *> *)apollo_navigationGesturesForController:
+    (UINavigationController *)navigationController {
+    if (!navigationController) return @[];
+    NSMutableArray<UIGestureRecognizer *> *gestures = [NSMutableArray array];
+    if (navigationController.interactivePopGestureRecognizer) {
+        [gestures addObject:navigationController.interactivePopGestureRecognizer];
+    }
+    static const char *kNavigationGestureNames[] = {
+        "leftScreenEdgePanGestureRecognizer",
+        "rightScreenEdgePanGestureRecognizer",
+    };
+    for (size_t index = 0;
+         index < sizeof(kNavigationGestureNames) / sizeof(kNavigationGestureNames[0]);
+         index++) {
+        UIGestureRecognizer *gesture = ApolloPaneNavigationGesture(
+            navigationController, kNavigationGestureNames[index]);
+        if (gesture && ![gestures containsObject:gesture]) [gestures addObject:gesture];
+    }
+    return gestures;
+}
+
+- (void)apollo_installNavigationGestureObservers {
+    if (_apollo_navigationGestureObserversInstalled) return;
+    for (UINavigationController *navigationController in
+            @[ self.apollo_primaryNav, self.apollo_detailNav ]) {
+        for (UIGestureRecognizer *gesture in
+                [self apollo_navigationGesturesForController:navigationController]) {
+            [gesture addTarget:self action:@selector(apollo_navigationGestureStateChanged:)];
+        }
+    }
+    _apollo_navigationGestureObserversInstalled = YES;
+}
+
+- (void)apollo_removeNavigationGestureObservers {
+    // Do not inspect a navigation controller's gesture properties during an
+    // install rollback unless this pane actually loaded and attached targets;
+    // cleanup itself must not defeat offscreen lazy loading.
+    if (!_apollo_navigationGestureObserversInstalled) return;
+    for (UINavigationController *navigationController in
+            @[ self.apollo_primaryNav, self.apollo_detailNav ]) {
+        for (UIGestureRecognizer *gesture in
+                [self apollo_navigationGesturesForController:navigationController]) {
+            [gesture removeTarget:self action:@selector(apollo_navigationGestureStateChanged:)];
+        }
+    }
+    _apollo_navigationGestureObserversInstalled = NO;
 }
 
 // Splits a stock stack Apollo constructed before pane installation at its first
@@ -1937,7 +1967,7 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
     dispatch_async(dispatch_get_main_queue(), ^{
         [self apollo_refreshMasterSelection];
     });
-    [self.view setNeedsLayout];
+    [self.viewIfLoaded setNeedsLayout];
 }
 
 - (void)apollo_showPrimaryItemActivated:(UIBarButtonItem *)sender {
@@ -2022,7 +2052,9 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
 // as "not themeable" — Apollo's pages were #191926 under the active palette
 // while the ground behind them stayed #000000.
 - (void)apollo_applyGroundTheme {
-    self.view.backgroundColor = ApolloThemePageBackgroundColor() ?: self.view.backgroundColor;
+    UIView *view = self.viewIfLoaded;
+    if (!view) return;
+    view.backgroundColor = ApolloThemePageBackgroundColor() ?: view.backgroundColor;
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
@@ -2051,9 +2083,11 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
         ApolloLog(@"[PaneSplit] tab %ld armed compact primary restore at expansion trait boundary",
                   (long)self.apollo_tabIndex);
     }
-    [self apollo_applyGroundTheme];
-    [self apollo_applyGrabberTheme];
-    [self apollo_scheduleShowPrimaryItemRefresh];
+    if (self.isViewLoaded) {
+        [self apollo_applyGroundTheme];
+        [self apollo_applyGrabberTheme];
+        [self apollo_scheduleShowPrimaryItemRefresh];
+    }
 }
 
 - (void)viewDidLayoutSubviews {
