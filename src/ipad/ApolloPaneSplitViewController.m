@@ -123,6 +123,9 @@ static NSString *ApolloPanePrimaryContextScope(UIViewController *controller) {
 // fallbacks for the stock (no custom theme) case.
 @interface ApolloPaneDetailPlaceholderViewController : UIViewController
 - (instancetype)initWithMessage:(NSString *)message symbolName:(NSString *)symbolName;
+#if APOLLO_SIM_BUILD
+- (UIColor *)apollo_simIconTintColor;
+#endif
 @end
 
 @implementation ApolloPaneDetailPlaceholderViewController {
@@ -222,6 +225,12 @@ static NSString *ApolloPanePrimaryContextScope(UIViewController *controller) {
     _iconView.tintColor = [accent colorWithAlphaComponent:0.45];
     _label.textColor = UIColor.secondaryLabelColor;
 }
+
+#if APOLLO_SIM_BUILD
+- (UIColor *)apollo_simIconTintColor {
+    return _iconView.tintColor;
+}
+#endif
 
 @end
 
@@ -327,11 +336,29 @@ static BOOL ApolloPaneGestureIsTransitioning(UIGestureRecognizer *gesture) {
 @interface ApolloPaneColumnHostViewController : UIViewController
 - (instancetype)initWithNavigationController:(UINavigationController *)navigationController;
 @property (nonatomic, strong, readonly) UINavigationController *hostedNavigationController;
+- (void)apollo_scheduleListColumnGeometryRefresh;
+#if APOLLO_SIM_BUILD
+- (NSString *)apollo_simLayoutPassStateReset:(BOOL)reset;
+#endif
 @end
 
 @implementation ApolloPaneColumnHostViewController {
     NSLayoutConstraint *_topConstraint;
     NSLayoutConstraint *_bottomConstraint;
+    BOOL _geometryRefreshScheduled;
+    BOOL _geometryRefreshWaitingForTransition;
+    BOOL _hasResolvedGeometry;
+    CGFloat _lastResolvedTop;
+    CGFloat _lastResolvedBottom;
+    __weak UIViewController *_readableWidthViewController;
+    CGFloat _readableWidthBaseLeft;
+    CGFloat _readableWidthBaseRight;
+    CGFloat _readableWidthAppliedInset;
+#if APOLLO_SIM_BUILD
+    NSUInteger _simLayoutPassCount;
+    NSUInteger _simGeometryRefreshCount;
+    NSUInteger _simGeometryWriteCount;
+#endif
 }
 
 - (instancetype)initWithNavigationController:(UINavigationController *)navigationController {
@@ -355,8 +382,19 @@ static BOOL ApolloPaneGestureIsTransitioning(UIGestureRecognizer *gesture) {
         // screen with a band of background under it.
         self.edgesForExtendedLayout = UIRectEdgeAll;
         self.extendedLayoutIncludesOpaqueBars = YES;
+
+        [[NSNotificationCenter defaultCenter]
+            addObserver:self
+               selector:@selector(apollo_contentSizeCategoryDidChange:)
+                   name:UIContentSizeCategoryDidChangeNotification
+                 object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self apollo_restoreReadableWidthInsets];
 }
 
 - (void)viewDidLoad {
@@ -447,6 +485,7 @@ static BOOL ApolloPaneGestureIsTransitioning(UIGestureRecognizer *gesture) {
     if (self.navigationController && !self.navigationController.navigationBarHidden) {
         [self.navigationController setNavigationBarHidden:YES animated:NO];
     }
+    [self apollo_scheduleListColumnGeometryRefresh];
 }
 
 // Lines the detail column up with the list column exactly, top and bottom.
@@ -469,19 +508,228 @@ static BOOL ApolloPaneGestureIsTransitioning(UIGestureRecognizer *gesture) {
 // removes it, and matching is more robust than any constant since it tracks
 // whatever inset the platform applies to that column.
 //
-// Both values are read from the real frame every layout pass, and written only
-// when they actually change, so this cannot oscillate.
+// Constraint writes must not originate from viewDidLayoutSubviews: even a
+// value-checked write there can invalidate the same layout transaction during
+// rotation or continuous window resize. Safe-area and transition callbacks
+// coalesce into one post-layout sample instead.
+- (void)viewSafeAreaInsetsDidChange {
+    [super viewSafeAreaInsetsDidChange];
+    [self apollo_scheduleListColumnGeometryRefresh];
+
+    ApolloPaneSplitViewController *pane =
+        [self.splitViewController isKindOfClass:[ApolloPaneSplitViewController class]]
+            ? (ApolloPaneSplitViewController *)self.splitViewController : nil;
+    [pane apollo_resolvedDisplayStateMayHaveChanged];
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    __weak ApolloPaneColumnHostViewController *weakSelf = self;
+    [coordinator animateAlongsideTransition:nil
+        completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+            [weakSelf apollo_scheduleListColumnGeometryRefresh];
+        }];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self apollo_scheduleListColumnGeometryRefresh];
+}
+
+- (void)apollo_contentSizeCategoryDidChange:(NSNotification *)notification {
+    (void)notification;
+    [self apollo_scheduleListColumnGeometryRefresh];
+}
+
+- (UITableView *)apollo_tableInView:(UIView *)view depth:(NSUInteger)depth {
+    if (!view || depth > 10) return nil;
+    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
+    for (UIView *subview in view.subviews) {
+        UITableView *table = [self apollo_tableInView:subview depth:depth + 1];
+        if (table) return table;
+    }
+    return nil;
+}
+
+- (id)apollo_firstCommentsHeaderNode:(UIViewController *)controller {
+    if (!controller.isViewLoaded) return nil;
+    UITableView *table = [self apollo_tableInView:controller.view depth:0];
+    SEL backingNodeSelector = NSSelectorFromString(@"asyncdisplaykit_node");
+    id tableNode = table && [table respondsToSelector:backingNodeSelector]
+        ? ((id (*)(id, SEL))objc_msgSend)(table, backingNodeSelector) : nil;
+    SEL rowNodeSelector = NSSelectorFromString(@"nodeForRowAtIndexPath:");
+    if (!tableNode || ![tableNode respondsToSelector:rowNodeSelector]) return nil;
+    @try {
+        return ((id (*)(id, SEL, id))objc_msgSend)(
+            tableNode, rowNodeSelector, [NSIndexPath indexPathForRow:0 inSection:0]);
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
+
+// Only screens whose primary purpose is reading prose opt into the cap. A
+// blanket secondary-column constraint would also narrow media viewers, web
+// content, profiles, feeds, and every future destination that inherits detail
+// ownership from a thread.
+- (BOOL)apollo_topControllerWantsReadableWidth:(UIViewController *)controller {
+    if (!controller) return NO;
+
+    ApolloPaneSplitViewController *pane =
+        [self.splitViewController isKindOfClass:[ApolloPaneSplitViewController class]]
+            ? (ApolloPaneSplitViewController *)self.splitViewController : nil;
+    UIViewController *primaryRoot =
+        [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary]
+            .viewControllers.firstObject;
+    if ([NSStringFromClass(primaryRoot.class) hasSuffix:@"SettingsViewController"]) {
+        // Settings destinations are predominantly forms and table screens.
+        // Limit the policy to that concrete surface so a future gallery, web
+        // view, or other intentionally full-width child of Settings does not
+        // inherit prose geometry merely because of its tab.
+        return controller.isViewLoaded &&
+            [self apollo_tableInView:controller.view depth:0] != nil;
+    }
+
+    Class commentsClass = objc_getClass("_TtC6Apollo22CommentsViewController");
+    if (!commentsClass || ![controller isKindOfClass:commentsClass]) return NO;
+
+    // A media post's header shares the Comments ASTableView with the prose
+    // rows. Insetting that table would visibly letterbox the image/video too,
+    // so media threads remain full width. Self posts are the text-heavy case
+    // where constraining the whole table is both useful and internally
+    // consistent. Apollo's Swift Optional `link` storage is not reliably
+    // readable through the ObjC runtime, so prefer it when available and then
+    // identify the already-realized first Texture row: CommentsHeaderCellNode
+    // is prose, RichMediaHeaderCellNode is media. Fail open when neither signal
+    // is available rather than guessing that an unknown header is safe to
+    // narrow.
+    Ivar linkIvar = class_getInstanceVariable(controller.class, "link");
+    id link = nil;
+    @try {
+        const char *linkType = linkIvar ? ivar_getTypeEncoding(linkIvar) : NULL;
+        if (linkType && linkType[0] == '@') {
+            link = object_getIvar(controller, linkIvar);
+        }
+    } @catch (__unused NSException *exception) {}
+    SEL isSelfPostSelector = NSSelectorFromString(@"isSelfPost");
+    BOOL isSelfPost = link && [link respondsToSelector:isSelfPostSelector] &&
+        ((BOOL (*)(id, SEL))objc_msgSend)(link, isSelfPostSelector);
+    id headerNode = nil;
+    if (!link) {
+        headerNode = [self apollo_firstCommentsHeaderNode:controller];
+        NSString *headerClass = NSStringFromClass([headerNode class]);
+        if ([headerClass containsString:@"RichMediaHeaderCellNode"]) return NO;
+        if ([headerClass containsString:@"CommentsHeaderCellNode"]) isSelfPost = YES;
+    }
+#if APOLLO_SIM_BUILD
+    ApolloLog(@"[PaneReadableTest] classified comments link=%@ header=%@ selfPost=%d",
+              NSStringFromClass([link class]), NSStringFromClass([headerNode class]), isSelfPost);
+#endif
+    return isSelfPost;
+}
+
+- (void)apollo_restoreReadableWidthInsets {
+    UIViewController *controller = _readableWidthViewController;
+    if (controller) {
+        UIEdgeInsets additional = controller.additionalSafeAreaInsets;
+        additional.left = _readableWidthBaseLeft;
+        additional.right = _readableWidthBaseRight;
+        controller.additionalSafeAreaInsets = additional;
+    }
+    _readableWidthViewController = nil;
+    _readableWidthBaseLeft = 0.0;
+    _readableWidthBaseRight = 0.0;
+    _readableWidthAppliedInset = 0.0;
+}
+
+- (void)apollo_applyReadableWidthIfNeeded {
+    UIViewController *top = self.hostedNavigationController.topViewController;
+    BOOL wantsReadableWidth = _readableWidthViewController == top ||
+        [self apollo_topControllerWantsReadableWidth:top];
+    if (_readableWidthViewController != top || !wantsReadableWidth) {
+        [self apollo_restoreReadableWidthInsets];
+    }
+    if (!wantsReadableWidth || !top.isViewLoaded) return;
+
+    if (_readableWidthViewController != top) {
+        _readableWidthViewController = top;
+        _readableWidthBaseLeft = top.additionalSafeAreaInsets.left;
+        _readableWidthBaseRight = top.additionalSafeAreaInsets.right;
+    }
+
+    CGFloat width = CGRectGetWidth(top.view.bounds);
+    if (width <= 0.0) return;
+
+    // 680pt is close to UIKit's familiar readable measure while still leaving
+    // room for nested comment indentation. At accessibility text sizes the cap
+    // relaxes to 760pt so larger glyphs do not turn every sentence into a tall,
+    // narrow column. The nav bar and table/background remain full width; only
+    // safe-area-following cell content is inset.
+    UIContentSizeCategory category = top.traitCollection.preferredContentSizeCategory;
+    CGFloat maximumWidth = UIContentSizeCategoryIsAccessibilityCategory(category) ? 760.0 : 680.0;
+    UIEdgeInsets current = top.additionalSafeAreaInsets;
+    CGFloat systemLeft = MAX(0.0, top.view.safeAreaInsets.left - current.left);
+    CGFloat systemRight = MAX(0.0, top.view.safeAreaInsets.right - current.right);
+    CGFloat naturalWidth = MAX(0.0, width - systemLeft - systemRight -
+                               _readableWidthBaseLeft - _readableWidthBaseRight);
+    CGFloat inset = MAX(0.0, floor((naturalWidth - maximumWidth) / 2.0));
+    if (fabs(_readableWidthAppliedInset - inset) <= 0.5 &&
+        fabs(current.left - (_readableWidthBaseLeft + inset)) <= 0.5 &&
+        fabs(current.right - (_readableWidthBaseRight + inset)) <= 0.5) return;
+
+    _readableWidthAppliedInset = inset;
+    current.left = _readableWidthBaseLeft + inset;
+    current.right = _readableWidthBaseRight + inset;
+    top.additionalSafeAreaInsets = current;
+    ApolloLog(@"[PaneReadable] %@ width=%.0f max=%.0f inset=%.0f accessibility=%d",
+              NSStringFromClass(top.class), naturalWidth, maximumWidth, inset,
+              UIContentSizeCategoryIsAccessibilityCategory(category));
+}
+
+#if APOLLO_SIM_BUILD
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    [self apollo_matchListColumnGeometry];
+    _simLayoutPassCount++;
+}
+#endif
+
+- (void)apollo_scheduleListColumnGeometryRefresh {
+    if (!self.isViewLoaded || _geometryRefreshScheduled) return;
+
+    id<UIViewControllerTransitionCoordinator> coordinator =
+        self.splitViewController.transitionCoordinator;
+    if (coordinator) {
+        if (_geometryRefreshWaitingForTransition) return;
+        _geometryRefreshWaitingForTransition = YES;
+        __weak ApolloPaneColumnHostViewController *weakSelf = self;
+        [coordinator animateAlongsideTransition:nil
+            completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+                ApolloPaneColumnHostViewController *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                strongSelf->_geometryRefreshWaitingForTransition = NO;
+                [strongSelf apollo_scheduleListColumnGeometryRefresh];
+            }];
+        return;
+    }
+
+    _geometryRefreshScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_geometryRefreshScheduled = NO;
+        [self apollo_matchListColumnGeometry];
+    });
 }
 
 - (void)apollo_matchListColumnGeometry {
     UINavigationController *nav = self.hostedNavigationController;
     if (!nav.isViewLoaded || !_topConstraint || !_bottomConstraint) return;
+#if APOLLO_SIM_BUILD
+    _simGeometryRefreshCount++;
+#endif
 
     CGFloat height = self.view.bounds.size.height;
     if (height <= 0.0) return;
+
+    [self apollo_applyReadableWidthIfNeeded];
 
     // Fall back to the safe area whenever the list column cannot be measured —
     // collapsed, mid-transition, or not yet loaded.
@@ -518,9 +766,46 @@ static BOOL ApolloPaneGestureIsTransitioning(UIGestureRecognizer *gesture) {
         }
     }
 
-    if (fabs(_topConstraint.constant - top) > 0.5) _topConstraint.constant = top;
-    if (fabs(_bottomConstraint.constant - bottom) > 0.5) _bottomConstraint.constant = bottom;
+    BOOL changed = !_hasResolvedGeometry ||
+        fabs(_lastResolvedTop - top) > 0.5 ||
+        fabs(_lastResolvedBottom - bottom) > 0.5;
+    if (!changed) return;
+
+    _hasResolvedGeometry = YES;
+    _lastResolvedTop = top;
+    _lastResolvedBottom = bottom;
+    BOOL wroteConstraint = NO;
+    if (fabs(_topConstraint.constant - top) > 0.5) {
+        _topConstraint.constant = top;
+        wroteConstraint = YES;
+    }
+    if (fabs(_bottomConstraint.constant - bottom) > 0.5) {
+        _bottomConstraint.constant = bottom;
+        wroteConstraint = YES;
+    }
+#if APOLLO_SIM_BUILD
+    if (wroteConstraint) _simGeometryWriteCount++;
+#else
+    (void)wroteConstraint;
+#endif
 }
+
+#if APOLLO_SIM_BUILD
+- (NSString *)apollo_simLayoutPassStateReset:(BOOL)reset {
+    NSString *state = [NSString stringWithFormat:
+        @"hostPasses=%lu hostRefreshes=%lu hostWrites=%lu top=%.1f bottom=%.1f",
+        (unsigned long)_simLayoutPassCount,
+        (unsigned long)_simGeometryRefreshCount,
+        (unsigned long)_simGeometryWriteCount,
+        _topConstraint.constant, _bottomConstraint.constant];
+    if (reset) {
+        _simLayoutPassCount = 0;
+        _simGeometryRefreshCount = 0;
+        _simGeometryWriteCount = 0;
+    }
+    return state;
+}
+#endif
 
 // The hosted navigation controller owns the chrome; forwarding these keeps the
 // host transparent to UIKit rather than having it answer for an empty view.
@@ -639,9 +924,25 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
     }
 }
 
+#pragma mark - Shared divider width
+
+static const CGFloat kApolloPaneMinimumPrimaryWidth = 340.0;
+static const CGFloat kApolloPaneMaximumPrimaryWidth = 480.0;
+static const CGFloat kApolloPaneDefaultPrimaryWidthFraction = 0.42;
+static NSString *const kApolloPanePrimaryWidthsDefaultsKey =
+    @"ApolloRebornIPadPanePrimaryWidthsByScene";
+static char kApolloPaneScenePreferredWidthKey;
+
+@class ApolloPaneDividerControl;
+
 @interface ApolloPaneSplitViewController () <UISplitViewControllerDelegate, UIGestureRecognizerDelegate> {
     BOOL _apollo_loggedResolvedLayout;
-    UIView *_apollo_grabber;
+    ApolloPaneDividerControl *_apollo_grabber;
+    BOOL _apollo_geometryRefreshScheduled;
+    BOOL _apollo_geometryRefreshWaitingForTransition;
+    BOOL _apollo_hasGrabberGeometry;
+    BOOL _apollo_lastGrabberHidden;
+    CGRect _apollo_lastGrabberFrame;
     BOOL _apollo_navigationGestureObserversInstalled;
 
     // Compact-mode chrome. UIKit stacks the secondary column's wrapper onto the
@@ -737,6 +1038,14 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
     __weak UIViewController *_apollo_lastSampledDetailTop;
     BOOL _apollo_hasSampledResolvedDisplayState;
 
+    // One preferred width belongs to the UIWindowScene, not to a tab. UIKit is
+    // still free to resolve a narrower actual column in portrait, Slide Over,
+    // or another constrained window; those resolutions never feed back into
+    // this value. Only the pane-owned divider, keyboard commands, or its
+    // accessibility-adjustable actions publish a new intentional preference.
+    CGFloat _apollo_dividerPanStartWidth;
+    CGFloat _apollo_lastAppliedPreferredPrimaryWidth;
+
     // Pane-owned master selection. The opaque intent retains only copied
     // identity while its controller and list surface references remain weak.
     // This cannot keep an inactive tab's view hierarchy alive.
@@ -748,6 +1057,10 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
     NSUInteger _apollo_stagedMasterSelectionGeneration;
 #if APOLLO_SIM_BUILD
     BOOL _apollo_simCrossColumnNavigationBlocked;
+    NSUInteger _apollo_simLayoutPassCount;
+    NSUInteger _apollo_simGeometryRefreshCount;
+    NSUInteger _apollo_simGeometryWriteCount;
+    NSUInteger _apollo_simThemeNotificationCount;
 #endif
 }
 @property (nonatomic, strong) UINavigationController *apollo_primaryNav;   // the list column
@@ -772,7 +1085,132 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
 - (void)apollo_deselectMasterSelectionIntent:(ApolloPaneMasterSelectionIntent *)intent;
 - (void)apollo_installNavigationGestureObservers;
 - (void)apollo_removeNavigationGestureObservers;
+- (void)apollo_scheduleResolvedGeometryRefresh;
+- (void)apollo_applyResolvedGeometry;
+- (void)apollo_synchronizePreferredPrimaryWidth;
+- (void)apollo_publishPreferredPrimaryWidth:(CGFloat)width persist:(BOOL)persist;
+- (void)apollo_applyScenePreferredPrimaryWidth:(CGFloat)width;
+- (void)apollo_dividerPanChanged:(UIPanGestureRecognizer *)gesture;
+- (void)apollo_nudgePreferredPrimaryWidth:(CGFloat)delta;
+- (NSString *)apollo_primaryWidthAccessibilityValue;
 @end
+
+@interface ApolloPaneDividerControl : UIControl <UIPointerInteractionDelegate>
+- (instancetype)initWithPane:(ApolloPaneSplitViewController *)pane;
+- (void)refreshAccessibilityValue;
+- (UIColor *)markerColor;
+@end
+
+@implementation ApolloPaneDividerControl {
+    __weak ApolloPaneSplitViewController *_pane;
+    UIView *_pill;
+}
+
+- (instancetype)initWithPane:(ApolloPaneSplitViewController *)pane {
+    self = [super initWithFrame:CGRectZero];
+    if (!self) return nil;
+
+    _pane = pane;
+    self.backgroundColor = UIColor.clearColor;
+    self.isAccessibilityElement = YES;
+    self.accessibilityLabel = @"Column Divider";
+    self.accessibilityHint = @"Adjusts the width of the list column";
+    self.accessibilityTraits = UIAccessibilityTraitAdjustable;
+
+    _pill = [[UIView alloc] initWithFrame:CGRectZero];
+    _pill.translatesAutoresizingMaskIntoConstraints = NO;
+    _pill.userInteractionEnabled = NO;
+    _pill.layer.cornerRadius = 2.5;
+    _pill.alpha = 0.55;
+    [self addSubview:_pill];
+    [NSLayoutConstraint activateConstraints:@[
+        [_pill.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+        [_pill.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [_pill.widthAnchor constraintEqualToConstant:5.0],
+        [_pill.heightAnchor constraintEqualToConstant:44.0],
+    ]];
+
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:pane action:@selector(apollo_dividerPanChanged:)];
+    pan.cancelsTouchesInView = NO;
+    pan.delegate = pane;
+    [self addGestureRecognizer:pan];
+
+    if (@available(iOS 13.4, *)) {
+        [self addInteraction:[[UIPointerInteraction alloc] initWithDelegate:self]];
+    }
+    [self refreshAccessibilityValue];
+    return self;
+}
+
+- (void)setBackgroundColor:(UIColor *)backgroundColor {
+    // The control itself must remain transparent so its 44pt hit target does
+    // not look like a bar. Existing pane theming writes the accent here; route
+    // that color to the centred 5pt visual marker instead.
+    if (_pill) {
+        _pill.backgroundColor = backgroundColor;
+        [super setBackgroundColor:UIColor.clearColor];
+    } else {
+        [super setBackgroundColor:backgroundColor];
+    }
+}
+
+- (void)refreshAccessibilityValue {
+    self.accessibilityValue = [_pane apollo_primaryWidthAccessibilityValue];
+}
+
+- (UIColor *)markerColor {
+    return _pill.backgroundColor;
+}
+
+- (void)accessibilityIncrement {
+    [_pane apollo_nudgePreferredPrimaryWidth:20.0];
+}
+
+- (void)accessibilityDecrement {
+    [_pane apollo_nudgePreferredPrimaryWidth:-20.0];
+}
+
+- (UIPointerStyle *)pointerInteraction:(UIPointerInteraction *)interaction
+                         styleForRegion:(UIPointerRegion *)region API_AVAILABLE(ios(13.4)) {
+    UITargetedPreview *preview = [[UITargetedPreview alloc] initWithView:_pill];
+    return [UIPointerStyle styleWithEffect:[UIPointerHighlightEffect effectWithPreview:preview]
+                                     shape:nil];
+}
+
+@end
+
+static CGFloat ApolloPaneClampedPreferredPrimaryWidth(CGFloat width) {
+    if (!isfinite(width)) width = 0.0;
+    return MIN(kApolloPaneMaximumPrimaryWidth,
+               MAX(kApolloPaneMinimumPrimaryWidth, width));
+}
+
+static NSString *ApolloPaneWidthPersistenceSceneKey(UIWindowScene *scene) {
+    NSString *identifier = scene.session.persistentIdentifier;
+    return identifier.length > 0 ? identifier : nil;
+}
+
+static NSNumber *ApolloPanePersistedPrimaryWidth(UIWindowScene *scene) {
+    NSString *sceneKey = ApolloPaneWidthPersistenceSceneKey(scene);
+    if (!sceneKey) return nil;
+    NSDictionary *widths = [NSUserDefaults.standardUserDefaults
+        dictionaryForKey:kApolloPanePrimaryWidthsDefaultsKey];
+    NSNumber *width = [widths[sceneKey] isKindOfClass:[NSNumber class]] ? widths[sceneKey] : nil;
+    CGFloat value = width.doubleValue;
+    return value >= kApolloPaneMinimumPrimaryWidth &&
+        value <= kApolloPaneMaximumPrimaryWidth ? @(value) : nil;
+}
+
+static void ApolloPanePersistPrimaryWidth(CGFloat width, UIWindowScene *scene) {
+    NSString *sceneKey = ApolloPaneWidthPersistenceSceneKey(scene);
+    if (!sceneKey) return;
+    NSMutableDictionary *widths = [[NSUserDefaults.standardUserDefaults
+        dictionaryForKey:kApolloPanePrimaryWidthsDefaultsKey] mutableCopy] ?: [NSMutableDictionary dictionary];
+    widths[sceneKey] = @(ApolloPaneClampedPreferredPrimaryWidth(width));
+    [NSUserDefaults.standardUserDefaults setObject:widths
+                                            forKey:kApolloPanePrimaryWidthsDefaultsKey];
+}
 
 @implementation ApolloPaneSplitViewController
 
@@ -786,10 +1224,18 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
     [self apollo_installNavigationGestureObservers];
     [self apollo_applyGroundTheme];
     [self apollo_installColumnGrabber];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(apollo_activeThemeChanged:)
+                                               name:@"com.christianselig.ApolloSpecificThemeChanged"
+                                             object:nil];
     [self apollo_resolvedDisplayStateMayHaveChanged];
     ApolloLog(@"[PaneLoad] tab %ld loaded pane hierarchy primaryLoaded=%d detailLoaded=%d",
               (long)self.apollo_tabIndex, self.apollo_primaryNav.isViewLoaded,
               self.apollo_detailNav.isViewLoaded);
+}
+
+- (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
 - (id)apollo_masterSelectionIntentFromSource:(UIViewController *)sourceViewController
@@ -1040,7 +1486,9 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    [self apollo_synchronizePreferredPrimaryWidth];
     [self apollo_refreshMasterSelection];
+    [self apollo_scheduleResolvedGeometryRefresh];
 }
 
 - (void)apollo_setPrimaryViewControllers:(NSArray<UIViewController *> *)viewControllers {
@@ -1632,9 +2080,9 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
     // area. On a 13" iPad that is roughly 780pt in portrait and 1115pt in
     // landscape, landing the list near its 340pt floor in portrait and around
     // 470pt in landscape, with the detail column always the larger share.
-    self.preferredPrimaryColumnWidthFraction = 0.42;
-    self.minimumPrimaryColumnWidth = 340.0;
-    self.maximumPrimaryColumnWidth = 480.0;
+    self.preferredPrimaryColumnWidthFraction = kApolloPaneDefaultPrimaryWidthFraction;
+    self.minimumPrimaryColumnWidth = kApolloPaneMinimumPrimaryWidth;
+    self.maximumPrimaryColumnWidth = kApolloPaneMaximumPrimaryWidth;
 
     // Apollo installs its own screen-edge pans on every navigation controller
     // (left = interactive pop, right = "go forward", re-pushing from the per-nav
@@ -1836,17 +2284,18 @@ static void ApolloPaneMasterSelectionSetAccessibilitySelected(UITableViewCell *c
 // the divider so touches pass straight through to the real thing.
 //
 // The divider's own view is private and re-created across layouts, so the
-// grabber is positioned in viewDidLayoutSubviews against the list column's
-// trailing edge instead of being added as its subview.
+// grabber belongs to the pane root. Its geometry is refreshed from stable
+// safe-area/transition callbacks rather than from viewDidLayoutSubviews.
 - (void)apollo_installColumnGrabber {
     if (_apollo_grabber) return;
 
-    UIView *grabber = [[UIView alloc] initWithFrame:CGRectZero];
-    grabber.userInteractionEnabled = NO;
-    grabber.layer.cornerRadius = 2.5;
-    grabber.alpha = 0.55;
+    ApolloPaneDividerControl *grabber =
+        [[ApolloPaneDividerControl alloc] initWithPane:self];
+    grabber.layer.zPosition = 1000.0;
+    grabber.hidden = YES;
     [self.view addSubview:grabber];
     _apollo_grabber = grabber;
+    _apollo_lastGrabberHidden = YES;
     [self apollo_applyGrabberTheme];
 }
 
@@ -1967,7 +2416,7 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
     dispatch_async(dispatch_get_main_queue(), ^{
         [self apollo_refreshMasterSelection];
     });
-    [self.viewIfLoaded setNeedsLayout];
+    [self apollo_scheduleResolvedGeometryRefresh];
 }
 
 - (void)apollo_showPrimaryItemActivated:(UIBarButtonItem *)sender {
@@ -2016,12 +2465,12 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
 - (void)apollo_layoutColumnGrabber {
     UIViewController *list = [self viewControllerForColumn:UISplitViewControllerColumnPrimary];
     UIView *detailView = self.apollo_detailNav.viewIfLoaded;
-    if (!_apollo_grabber || !list.isViewLoaded || !list.view.superview ||
+    BOOL hidden = !_apollo_grabber || !list.isViewLoaded || !list.view.superview ||
         !detailView.superview ||
-        !ApolloPaneSplitShowsTiledPrimary(self)) {
-        _apollo_grabber.hidden = YES;
-        return;
-    }
+        !ApolloPaneSplitShowsTiledPrimary(self);
+    CGRect resolvedFrame = CGRectZero;
+    if (hidden) goto apply;
+
     CGRect listFrame = [list.view.superview convertRect:list.view.frame toView:self.view];
     CGRect detailFrame = [detailView.superview convertRect:detailView.frame toView:self.view];
     CGRect visibleBounds = self.view.bounds;
@@ -2032,16 +2481,177 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
     CGFloat detailBoundary = primaryOnLeadingEdge ? CGRectGetMinX(detailFrame) : CGRectGetMaxX(detailFrame);
     if (CGRectIsEmpty(listFrame) || CGRectIsEmpty(detailFrame) ||
         !listIntersects || !detailIntersects || fabs(listBoundary - detailBoundary) > 32.0) {
-        _apollo_grabber.hidden = YES;
-        return;
+        hidden = YES;
+        goto apply;
     }
 
-    static const CGFloat kWidth = 5.0, kHeight = 44.0;
-    _apollo_grabber.hidden = NO;
-    _apollo_grabber.frame = CGRectMake(listBoundary - kWidth / 2.0,
-                                       CGRectGetMidY(listFrame) - kHeight / 2.0,
-                                       kWidth, kHeight);
-    [self.view bringSubviewToFront:_apollo_grabber];
+    // The visible pill remains 5x44pt, but its real control is 44x64pt so touch,
+    // pointer, and Switch Control users do not have to hit a decorative sliver.
+    static const CGFloat kWidth = 44.0, kHeight = 64.0;
+    resolvedFrame = CGRectMake(listBoundary - kWidth / 2.0,
+                               CGRectGetMidY(listFrame) - kHeight / 2.0,
+                               kWidth, kHeight);
+
+apply:
+    if (_apollo_grabber.hidden != hidden) {
+        _apollo_grabber.hidden = hidden;
+#if APOLLO_SIM_BUILD
+        _apollo_simGeometryWriteCount++;
+#endif
+    }
+    if (!hidden && (!_apollo_hasGrabberGeometry ||
+        fabs(_apollo_lastGrabberFrame.origin.x - resolvedFrame.origin.x) > 0.5 ||
+        fabs(_apollo_lastGrabberFrame.origin.y - resolvedFrame.origin.y) > 0.5 ||
+        fabs(_apollo_lastGrabberFrame.size.width - resolvedFrame.size.width) > 0.5 ||
+        fabs(_apollo_lastGrabberFrame.size.height - resolvedFrame.size.height) > 0.5)) {
+        if (!CGRectEqualToRect(_apollo_grabber.frame, resolvedFrame)) {
+            _apollo_grabber.frame = resolvedFrame;
+#if APOLLO_SIM_BUILD
+            _apollo_simGeometryWriteCount++;
+#endif
+        }
+    }
+    _apollo_hasGrabberGeometry = YES;
+    _apollo_lastGrabberHidden = hidden;
+    _apollo_lastGrabberFrame = resolvedFrame;
+    [_apollo_grabber refreshAccessibilityValue];
+}
+
+#pragma mark - Shared divider width
+
+- (void)apollo_applyScenePreferredPrimaryWidth:(CGFloat)width {
+    CGFloat clamped = ApolloPaneClampedPreferredPrimaryWidth(width);
+    if (fabs(_apollo_lastAppliedPreferredPrimaryWidth - clamped) <= 0.5 &&
+        fabs(self.preferredPrimaryColumnWidth - clamped) <= 0.5) return;
+    _apollo_lastAppliedPreferredPrimaryWidth = clamped;
+    // A non-automatic absolute value takes precedence over the configured
+    // fraction. minimum/maximum remain requests to UIKit, which may still
+    // resolve narrower when the window cannot fit both columns.
+    self.preferredPrimaryColumnWidth = clamped;
+    [_apollo_grabber refreshAccessibilityValue];
+    [self apollo_scheduleResolvedGeometryRefresh];
+}
+
+- (void)apollo_synchronizePreferredPrimaryWidth {
+    UIWindowScene *scene = self.viewIfLoaded.window.windowScene;
+    if (!scene) return;
+
+    NSNumber *sceneWidth = objc_getAssociatedObject(scene, &kApolloPaneScenePreferredWidthKey);
+    if (!sceneWidth) {
+        sceneWidth = ApolloPanePersistedPrimaryWidth(scene);
+        if (!sceneWidth) {
+            CGFloat availableWidth = CGRectGetWidth(self.viewIfLoaded.bounds);
+            CGFloat defaultWidth = availableWidth > 0.0
+                ? availableWidth * kApolloPaneDefaultPrimaryWidthFraction : 420.0;
+            sceneWidth = @(ApolloPaneClampedPreferredPrimaryWidth(defaultWidth));
+        }
+        objc_setAssociatedObject(scene, &kApolloPaneScenePreferredWidthKey, sceneWidth,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[PaneWidth] scene initialized preferred=%.0f persisted=%d",
+                  sceneWidth.doubleValue, ApolloPanePersistedPrimaryWidth(scene) != nil);
+    }
+
+    UITabBarController *tabs = self.tabBarController;
+    BOOL appliedSibling = NO;
+    for (UIViewController *child in tabs.viewControllers) {
+        if (![child isKindOfClass:[ApolloPaneSplitViewController class]]) continue;
+        [(ApolloPaneSplitViewController *)child
+            apollo_applyScenePreferredPrimaryWidth:sceneWidth.doubleValue];
+        appliedSibling = YES;
+    }
+    if (!appliedSibling) [self apollo_applyScenePreferredPrimaryWidth:sceneWidth.doubleValue];
+}
+
+- (void)apollo_publishPreferredPrimaryWidth:(CGFloat)width persist:(BOOL)persist {
+    CGFloat clamped = ApolloPaneClampedPreferredPrimaryWidth(width);
+    UIWindowScene *scene = self.viewIfLoaded.window.windowScene;
+    if (scene) {
+        objc_setAssociatedObject(scene, &kApolloPaneScenePreferredWidthKey, @(clamped),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (persist) ApolloPanePersistPrimaryWidth(clamped, scene);
+    }
+
+    UITabBarController *tabs = self.tabBarController;
+    BOOL appliedSibling = NO;
+    for (UIViewController *child in tabs.viewControllers) {
+        if (![child isKindOfClass:[ApolloPaneSplitViewController class]]) continue;
+        [(ApolloPaneSplitViewController *)child apollo_applyScenePreferredPrimaryWidth:clamped];
+        appliedSibling = YES;
+    }
+    if (!appliedSibling) [self apollo_applyScenePreferredPrimaryWidth:clamped];
+    if (persist) {
+        ApolloLog(@"[PaneWidth] tab %ld committed scene preference %.0f (resolved %.0f)",
+                  (long)self.apollo_tabIndex, clamped, self.primaryColumnWidth);
+    }
+}
+
+- (void)apollo_dividerPanChanged:(UIPanGestureRecognizer *)gesture {
+    CGFloat direction = self.primaryEdge == UISplitViewControllerPrimaryEdgeLeading ? 1.0 : -1.0;
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        _apollo_dividerPanStartWidth = ApolloPaneClampedPreferredPrimaryWidth(
+            self.primaryColumnWidth > 0.0 ? self.primaryColumnWidth
+                                          : self.preferredPrimaryColumnWidth);
+    }
+    CGFloat translation = [gesture translationInView:self.view].x * direction;
+    CGFloat target = ApolloPaneClampedPreferredPrimaryWidth(
+        _apollo_dividerPanStartWidth + translation);
+    switch (gesture.state) {
+        case UIGestureRecognizerStateBegan:
+        case UIGestureRecognizerStateChanged:
+            [self apollo_publishPreferredPrimaryWidth:target persist:NO];
+            break;
+        case UIGestureRecognizerStateEnded:
+            [self apollo_publishPreferredPrimaryWidth:target persist:YES];
+            break;
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed:
+            [self apollo_publishPreferredPrimaryWidth:_apollo_dividerPanStartWidth persist:NO];
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)apollo_nudgePreferredPrimaryWidth:(CGFloat)delta {
+    if (!ApolloPaneSplitShowsTiledPrimary(self)) return;
+    CGFloat current = _apollo_lastAppliedPreferredPrimaryWidth > 0.0
+        ? _apollo_lastAppliedPreferredPrimaryWidth : self.preferredPrimaryColumnWidth;
+    [self apollo_publishPreferredPrimaryWidth:current + delta persist:YES];
+    [_apollo_grabber refreshAccessibilityValue];
+}
+
+- (NSString *)apollo_primaryWidthAccessibilityValue {
+    CGFloat preferred = _apollo_lastAppliedPreferredPrimaryWidth > 0.0
+        ? _apollo_lastAppliedPreferredPrimaryWidth : self.preferredPrimaryColumnWidth;
+    CGFloat resolved = self.primaryColumnWidth;
+    if (preferred <= 0.0 || preferred == UISplitViewControllerAutomaticDimension) return @"Automatic";
+    if (resolved > 0.0 && fabs(preferred - resolved) > 1.0) {
+        return [NSString stringWithFormat:@"Preferred %.0f points, currently %.0f points",
+                                          preferred, resolved];
+    }
+    return [NSString stringWithFormat:@"%.0f points", preferred];
+}
+
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    NSMutableArray<UIKeyCommand *> *commands = [[super keyCommands] mutableCopy] ?: [NSMutableArray array];
+    UIKeyCommand *narrow = [UIKeyCommand keyCommandWithInput:UIKeyInputLeftArrow
+                                              modifierFlags:UIKeyModifierAlternate
+                                                     action:@selector(apollo_narrowPrimaryColumn:)];
+    narrow.discoverabilityTitle = @"Narrow List Column";
+    UIKeyCommand *widen = [UIKeyCommand keyCommandWithInput:UIKeyInputRightArrow
+                                             modifierFlags:UIKeyModifierAlternate
+                                                    action:@selector(apollo_widenPrimaryColumn:)];
+    widen.discoverabilityTitle = @"Widen List Column";
+    [commands addObjectsFromArray:@[ narrow, widen ]];
+    return commands;
+}
+
+- (void)apollo_narrowPrimaryColumn:(UIKeyCommand *)command {
+    [self apollo_nudgePreferredPrimaryWidth:-20.0];
+}
+
+- (void)apollo_widenPrimaryColumn:(UIKeyCommand *)command {
+    [self apollo_nudgePreferredPrimaryWidth:20.0];
 }
 
 // The ground the floating columns sit on.
@@ -2055,6 +2665,23 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
     UIView *view = self.viewIfLoaded;
     if (!view) return;
     view.backgroundColor = ApolloThemePageBackgroundColor() ?: view.backgroundColor;
+}
+
+- (void)apollo_activeThemeChanged:(NSNotification *)notification {
+    (void)notification;
+#if APOLLO_SIM_BUILD
+    _apollo_simThemeNotificationCount++;
+#endif
+    // Apollo's canonical theme notification arrives for both stock-theme
+    // selection and custom-theme invalidation. Repaint every surface owned by
+    // the pane itself; Apollo continues to repaint the hosted app controllers.
+    [self apollo_applyGroundTheme];
+    [self apollo_applyGrabberTheme];
+    for (UIViewController *controller in self.apollo_detailNav.viewControllers) {
+        if ([controller isKindOfClass:[ApolloPaneDetailPlaceholderViewController class]]) {
+            [(ApolloPaneDetailPlaceholderViewController *)controller apollo_applyTheme];
+        }
+    }
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
@@ -2087,12 +2714,66 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
         [self apollo_applyGroundTheme];
         [self apollo_applyGrabberTheme];
         [self apollo_scheduleShowPrimaryItemRefresh];
+        [self apollo_scheduleResolvedGeometryRefresh];
     }
 }
 
+- (void)viewSafeAreaInsetsDidChange {
+    [super viewSafeAreaInsetsDidChange];
+    [self apollo_scheduleResolvedGeometryRefresh];
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    __weak ApolloPaneSplitViewController *weakSelf = self;
+    [coordinator animateAlongsideTransition:nil
+        completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+            [weakSelf apollo_scheduleResolvedGeometryRefresh];
+        }];
+}
+
+#if APOLLO_SIM_BUILD
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    _apollo_simLayoutPassCount++;
+}
+#endif
+
+- (void)apollo_scheduleResolvedGeometryRefresh {
+    if (!self.isViewLoaded || _apollo_geometryRefreshScheduled) return;
+
+    id<UIViewControllerTransitionCoordinator> coordinator = self.transitionCoordinator;
+    if (coordinator) {
+        if (_apollo_geometryRefreshWaitingForTransition) return;
+        _apollo_geometryRefreshWaitingForTransition = YES;
+        __weak ApolloPaneSplitViewController *weakSelf = self;
+        [coordinator animateAlongsideTransition:nil
+            completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+                ApolloPaneSplitViewController *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                strongSelf->_apollo_geometryRefreshWaitingForTransition = NO;
+                [strongSelf apollo_scheduleResolvedGeometryRefresh];
+            }];
+        return;
+    }
+
+    _apollo_geometryRefreshScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_apollo_geometryRefreshScheduled = NO;
+        [self apollo_applyResolvedGeometry];
+    });
+}
+
+- (void)apollo_applyResolvedGeometry {
+#if APOLLO_SIM_BUILD
+    _apollo_simGeometryRefreshCount++;
+#endif
+    [self apollo_synchronizePreferredPrimaryWidth];
+    [(ApolloPaneColumnHostViewController *)self.apollo_detailHost
+        apollo_scheduleListColumnGeometryRefresh];
     [self apollo_layoutColumnGrabber];
+
     UIViewController *detailTop = self.apollo_detailNav.topViewController;
     BOOL resolvedStateChanged = !_apollo_hasSampledResolvedDisplayState ||
         _apollo_lastSampledDisplayMode != self.displayMode ||
@@ -2111,8 +2792,8 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
                   (long)self.splitBehavior, self.isCollapsed,
                   ApolloPaneSplitShowsPrimary(self), ApolloPaneSplitShowsTiledPrimary(self),
                   NSStringFromClass(detailTop.class));
-        // Bar-item writes from layoutSubviews can recursively invalidate
-        // navigation layout. Defer the identity-based reconciliation instead.
+        // Navigation-item reconciliation remains deferred so this geometry
+        // transaction cannot synchronously invalidate navigation layout.
         [self apollo_scheduleShowPrimaryItemRefresh];
     }
     if (_apollo_loggedResolvedLayout) return;
@@ -2478,6 +3159,82 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
 }
 
 #if APOLLO_SIM_BUILD
+static NSString *ApolloPaneSimColorDescription(UIColor *color, UITraitCollection *traits) {
+    UIColor *resolved = [color resolvedColorWithTraitCollection:traits];
+    CGFloat red = 0.0, green = 0.0, blue = 0.0, alpha = 0.0;
+    if (![resolved getRed:&red green:&green blue:&blue alpha:&alpha]) return @"unresolved";
+    return [NSString stringWithFormat:@"#%02X%02X%02X/%02X",
+        (unsigned)lrint(red * 255.0), (unsigned)lrint(green * 255.0),
+        (unsigned)lrint(blue * 255.0), (unsigned)lrint(alpha * 255.0)];
+}
+
+- (NSString *)apollo_simThemeState {
+    ApolloPaneDetailPlaceholderViewController *placeholder = nil;
+    for (UIViewController *controller in self.apollo_detailNav.viewControllers) {
+        if ([controller isKindOfClass:[ApolloPaneDetailPlaceholderViewController class]]) {
+            placeholder = (ApolloPaneDetailPlaceholderViewController *)controller;
+            break;
+        }
+    }
+    UITraitCollection *traits = self.traitCollection;
+    return [NSString stringWithFormat:
+        @"tab=%ld loaded=%d attached=%d style=%ld notifications=%lu ground=%@ marker=%@ "
+         "placeholderLoaded=%d placeholder=%@ icon=%@",
+        (long)self.apollo_tabIndex, self.isViewLoaded, self.viewIfLoaded.window != nil,
+        (long)traits.userInterfaceStyle, (unsigned long)_apollo_simThemeNotificationCount,
+        ApolloPaneSimColorDescription(self.viewIfLoaded.backgroundColor, traits),
+        ApolloPaneSimColorDescription([_apollo_grabber markerColor], traits),
+        placeholder.isViewLoaded,
+        ApolloPaneSimColorDescription(placeholder.viewIfLoaded.backgroundColor, traits),
+        ApolloPaneSimColorDescription([placeholder apollo_simIconTintColor], traits)];
+}
+
+- (void)apollo_simSetPreferredPrimaryColumnWidth:(CGFloat)width {
+    [self apollo_synchronizePreferredPrimaryWidth];
+    [self apollo_publishPreferredPrimaryWidth:width persist:YES];
+}
+
+- (NSString *)apollo_simPreferredPrimaryColumnWidthState {
+    UIWindowScene *scene = self.viewIfLoaded.window.windowScene;
+    NSNumber *sceneWidth = scene
+        ? objc_getAssociatedObject(scene, &kApolloPaneScenePreferredWidthKey) : nil;
+    return [NSString stringWithFormat:
+        @"tab=%ld loaded=%d attached=%d hSize=%ld collapsed=%d tiled=%d "
+         "scenePreferred=%.0f requested=%.0f resolved=%.0f grabberHidden=%d "
+         "grabberFrame=%@ pointerInteractions=%lu keyCommands=%lu "
+         "accessibilityLabel=%@ accessibilityValue=%@",
+        (long)self.apollo_tabIndex, self.isViewLoaded, self.viewIfLoaded.window != nil,
+        (long)self.traitCollection.horizontalSizeClass, self.isCollapsed,
+        ApolloPaneSplitShowsTiledPrimary(self), sceneWidth.doubleValue,
+        self.preferredPrimaryColumnWidth, self.primaryColumnWidth,
+        _apollo_grabber.hidden, NSStringFromCGRect(_apollo_grabber.frame),
+        (unsigned long)_apollo_grabber.interactions.count,
+        (unsigned long)self.keyCommands.count,
+        _apollo_grabber.accessibilityLabel ?: @"(nil)",
+        _apollo_grabber.accessibilityValue ?: @"(nil)"];
+}
+
+- (BOOL)apollo_simAdjustDivider:(NSString *)operation {
+    if (!_apollo_grabber || _apollo_grabber.hidden) return NO;
+    if ([operation isEqualToString:@"increment"]) {
+        [_apollo_grabber accessibilityIncrement];
+        return YES;
+    }
+    if ([operation isEqualToString:@"decrement"]) {
+        [_apollo_grabber accessibilityDecrement];
+        return YES;
+    }
+    if ([operation isEqualToString:@"keyboard-widen"]) {
+        [self apollo_widenPrimaryColumn:nil];
+        return YES;
+    }
+    if ([operation isEqualToString:@"keyboard-narrow"]) {
+        [self apollo_narrowPrimaryColumn:nil];
+        return YES;
+    }
+    return NO;
+}
+
 - (void)apollo_simSetCrossColumnNavigationBlocked:(BOOL)blocked {
     _apollo_simCrossColumnNavigationBlocked = blocked;
     ApolloLog(@"[PaneTransition] tab %ld simulator gate=%d",
@@ -2572,6 +3329,27 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
     if (!_apollo_showPrimaryOwner || !_apollo_showPrimaryItem.enabled) return NO;
     [self apollo_showPrimaryItemActivated:_apollo_showPrimaryItem];
     return YES;
+}
+
+- (NSString *)apollo_simLayoutPassStateReset:(BOOL)reset {
+    ApolloPaneColumnHostViewController *host =
+        [self.apollo_detailHost isKindOfClass:[ApolloPaneColumnHostViewController class]]
+            ? (ApolloPaneColumnHostViewController *)self.apollo_detailHost : nil;
+    NSString *hostState = [host apollo_simLayoutPassStateReset:reset] ?: @"host unavailable";
+    NSString *state = [NSString stringWithFormat:
+        @"panePasses=%lu paneRefreshes=%lu paneWrites=%lu grabberHidden=%d "
+         "grabberFrame=%@ %@ pass=%d",
+        (unsigned long)_apollo_simLayoutPassCount,
+        (unsigned long)_apollo_simGeometryRefreshCount,
+        (unsigned long)_apollo_simGeometryWriteCount,
+        _apollo_grabber.hidden, NSStringFromCGRect(_apollo_grabber.frame), hostState,
+        !_apollo_geometryRefreshScheduled && !_apollo_geometryRefreshWaitingForTransition];
+    if (reset) {
+        _apollo_simLayoutPassCount = 0;
+        _apollo_simGeometryRefreshCount = 0;
+        _apollo_simGeometryWriteCount = 0;
+    }
+    return state;
 }
 
 - (NSString *)apollo_simMasterSelectionState {
@@ -3281,6 +4059,12 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer.view == _apollo_grabber &&
+        [gestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]]) {
+        if (!ApolloPaneSplitShowsTiledPrimary(self)) return NO;
+        CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self.view];
+        return fabs(velocity.x) > fabs(velocity.y);
+    }
     if (gestureRecognizer != _apollo_compactBackEdgeGesture) return YES;
     if (!_apollo_compactDetailChromeActive || !self.isCollapsed ||
         self.apollo_detailNav.viewControllers.count != 1) return NO;
@@ -3297,6 +4081,15 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
     ApolloLog(@"[PaneSplit] tab %ld compact edge Back begin=%d initialX=%.0f velocity=(%.0f,%.0f)",
               (long)self.apollo_tabIndex, shouldBegin, initialX, velocity.x, velocity.y);
     return shouldBegin;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+        shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    // UIKit may keep its private separator recognizer beneath our 44pt control.
+    // Let both observe the same drag; our absolute preferred-width write is the
+    // authoritative result and this avoids disabling UIKit's own transition
+    // bookkeeping on releases where the separator still participates.
+    return gestureRecognizer.view == _apollo_grabber || other.view == _apollo_grabber;
 }
 
 - (void)apollo_compactBackEdgeGestureChanged:(UIPanGestureRecognizer *)gesture {
@@ -3369,7 +4162,7 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
                 });
             }];
     } else {
-        [self apollo_scheduleShowPrimaryItemRefresh];
+        [self apollo_resolvedDisplayStateMayHaveChanged];
     }
 }
 
@@ -3508,6 +4301,7 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
     } @finally {
         _apollo_topologyMutationInProgress = NO;
         [self apollo_scheduleShowPrimaryItemRefresh];
+        [self apollo_scheduleResolvedGeometryRefresh];
         [self apollo_navigationTransitionDidSettle];
     }
 }
@@ -3600,6 +4394,7 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
         _apollo_postCollapsePrimaryBridgeStack = nil;
         _apollo_topologyMutationInProgress = NO;
         [self apollo_scheduleShowPrimaryItemRefresh];
+        [self apollo_scheduleResolvedGeometryRefresh];
         if (settlesPendingCompactRestore) {
             [self apollo_scheduleCompactPrimaryRestoreReconciliation:
                 expansionRestoreGeneration observations:0];

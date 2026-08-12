@@ -16,6 +16,7 @@
 #if APOLLO_SIM_BUILD
 
 #import "ApolloAccountCredentials.h"
+#import "ApolloAutoHideTabBar.h"
 #import "ApolloCommentVoteInsights.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
@@ -619,6 +620,24 @@ static void ApolloSimDebugDumpPaneLoadStatus(void) {
               (unsigned long)loadedPaneCount, (unsigned long)tabBarController.selectedIndex);
 }
 
+static void ApolloSimDebugRunAutoHideScan(NSString *contents) {
+    NSArray<NSString *> *tokens = [contents componentsSeparatedByCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSUInteger iterations = tokens.count > 1 ? MAX(tokens[1].integerValue, 1) : 10000;
+    NSString *status = ApolloAutoHideTabBarSimScanStatus(iterations);
+    [status writeToFile:@"/tmp/apollofix-autohide-scan.txt"
+             atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[AutoHideTabBarPerf] %@", status);
+}
+
+static void ApolloSimDebugSetAutoHidePolicy(NSString *contents) {
+    BOOL enabled = [contents rangeOfString:@" on"].location != NSNotFound;
+    NSString *status = ApolloAutoHideTabBarSimSetPolicy(enabled);
+    [status writeToFile:@"/tmp/apollofix-autohide-policy.txt"
+             atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[AutoHideTabBarPerf] policy %@", status);
+}
+
 static UINavigationController *ApolloSimDebugSelectedNavigationController(NSString *columnName) {
     UIViewController *controller = ApolloMainTabBarController();
     UIViewController *selected = [controller isKindOfClass:[UITabBarController class]]
@@ -640,6 +659,303 @@ static ApolloPaneSplitViewController *ApolloSimDebugSelectedPane(void) {
         ? ((UITabBarController *)controller).selectedViewController : nil;
     return [selected isKindOfClass:[ApolloPaneSplitViewController class]]
         ? (ApolloPaneSplitViewController *)selected : nil;
+}
+
+// Task 18 width-stability harness. Detail presentation used to hide UIKit's
+// global tab sidebar, instantly handing roughly 270pt back to the content and
+// forcing every visible Texture node through a constrained-width remeasure.
+// Production no longer owns sidebar visibility (Task 7), so sample the actual
+// resolved geometry across first and repeated detail loads and prove that the
+// old trigger stays absent. Newly appearing detail tables establish a baseline;
+// only a later width change on the same live ASTableView counts as churn.
+static NSUInteger sApolloSimReflowGeneration;
+static BOOL sApolloSimReflowActive;
+static NSUInteger sApolloSimReflowSamples;
+static BOOL sApolloSimReflowSidebarAvailable;
+static BOOL sApolloSimReflowInitialSidebarHidden;
+static BOOL sApolloSimReflowLastSidebarHidden;
+static NSUInteger sApolloSimReflowSidebarChanges;
+static CGFloat sApolloSimReflowInitialPrimaryColumnWidth;
+static CGFloat sApolloSimReflowLastPrimaryColumnWidth;
+static CGFloat sApolloSimReflowMinPrimaryColumnWidth;
+static CGFloat sApolloSimReflowMaxPrimaryColumnWidth;
+static CGFloat sApolloSimReflowInitialPrimaryNavigationWidth;
+static CGFloat sApolloSimReflowLastPrimaryNavigationWidth;
+static CGFloat sApolloSimReflowMinPrimaryNavigationWidth;
+static CGFloat sApolloSimReflowMaxPrimaryNavigationWidth;
+static NSMapTable<UIView *, NSNumber *> *sApolloSimReflowPrimaryTableWidths;
+static NSMapTable<UIView *, NSNumber *> *sApolloSimReflowDetailTableWidths;
+static NSUInteger sApolloSimReflowPrimaryTableWidthChanges;
+static NSUInteger sApolloSimReflowDetailTableWidthChanges;
+static CGFloat sApolloSimReflowLargestTextureWidthJump;
+
+static void ApolloSimDebugCollectVisibleTextureTables(UIView *view,
+                                                       NSMutableArray<UIView *> *tables) {
+    if (!view || !view.window) return;
+    Class tableClass = objc_getClass("ASTableView");
+    if (tableClass && [view isKindOfClass:tableClass] && !view.hidden && view.alpha > 0.01) {
+        [tables addObject:view];
+    }
+    for (UIView *subview in view.subviews) {
+        ApolloSimDebugCollectVisibleTextureTables(subview, tables);
+    }
+}
+
+static void ApolloSimDebugRecordTextureWidths(
+        UIView *root,
+        NSMapTable<UIView *, NSNumber *> *widths,
+        NSUInteger *changeCount) {
+    if (!root || !widths || !changeCount) return;
+    NSMutableArray<UIView *> *tables = [NSMutableArray array];
+    ApolloSimDebugCollectVisibleTextureTables(root, tables);
+    for (UIView *table in tables) {
+        CGFloat width = CGRectGetWidth(table.bounds);
+        NSNumber *previousNumber = [widths objectForKey:table];
+        if (previousNumber) {
+            CGFloat jump = fabs(width - previousNumber.doubleValue);
+            if (jump > 0.5) {
+                (*changeCount)++;
+                sApolloSimReflowLargestTextureWidthJump =
+                    MAX(sApolloSimReflowLargestTextureWidthJump, jump);
+            }
+        }
+        [widths setObject:@(width) forKey:table];
+    }
+}
+
+static NSString *ApolloSimDebugReflowStatus(void) {
+    CGFloat primaryColumnRange = sApolloSimReflowSamples > 0
+        ? sApolloSimReflowMaxPrimaryColumnWidth - sApolloSimReflowMinPrimaryColumnWidth : 0.0;
+    CGFloat primaryNavigationRange = sApolloSimReflowSamples > 0
+        ? sApolloSimReflowMaxPrimaryNavigationWidth - sApolloSimReflowMinPrimaryNavigationWidth : 0.0;
+    NSUInteger primaryTables = sApolloSimReflowPrimaryTableWidths.count;
+    NSUInteger detailTables = sApolloSimReflowDetailTableWidths.count;
+    BOOL pass = sApolloSimReflowSamples >= 10 && sApolloSimReflowSidebarAvailable &&
+        sApolloSimReflowSidebarChanges == 0 && primaryColumnRange <= 1.0 &&
+        primaryNavigationRange <= 1.0 && sApolloSimReflowPrimaryTableWidthChanges == 0 &&
+        sApolloSimReflowDetailTableWidthChanges == 0 && detailTables > 0;
+    return [NSString stringWithFormat:
+        @"active=%d samples=%lu sidebarInitialHidden=%d sidebarFinalHidden=%d sidebarChanges=%lu "
+         "primaryColumnInitial=%.1f primaryColumnFinal=%.1f primaryColumnRange=%.1f "
+         "primaryNavInitial=%.1f primaryNavFinal=%.1f primaryNavRange=%.1f "
+         "primaryTextureTables=%lu primaryTextureWidthChanges=%lu detailTextureTables=%lu "
+         "detailTextureWidthChanges=%lu largestTextureWidthJump=%.1f pass=%d",
+        sApolloSimReflowActive, (unsigned long)sApolloSimReflowSamples,
+        sApolloSimReflowInitialSidebarHidden, sApolloSimReflowLastSidebarHidden,
+        (unsigned long)sApolloSimReflowSidebarChanges,
+        sApolloSimReflowInitialPrimaryColumnWidth, sApolloSimReflowLastPrimaryColumnWidth,
+        primaryColumnRange, sApolloSimReflowInitialPrimaryNavigationWidth,
+        sApolloSimReflowLastPrimaryNavigationWidth, primaryNavigationRange,
+        (unsigned long)primaryTables, (unsigned long)sApolloSimReflowPrimaryTableWidthChanges,
+        (unsigned long)detailTables, (unsigned long)sApolloSimReflowDetailTableWidthChanges,
+        sApolloSimReflowLargestTextureWidthJump, pass];
+}
+
+static void ApolloSimDebugWriteReflowStatus(void) {
+    NSString *status = ApolloSimDebugReflowStatus();
+    [status writeToFile:@"/tmp/apollofix-reflow-status.txt"
+             atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[PaneReflowTest] %@", status);
+}
+
+static void ApolloSimDebugAppendReadableViews(UIView *view, NSMutableArray<NSString *> *lines,
+                                              NSUInteger depth) {
+    if (!view || depth > 12) return;
+    BOOL interesting = [view isKindOfClass:[UITableView class]] ||
+        [view isKindOfClass:[UITableViewCell class]] ||
+        [NSStringFromClass(view.class) containsString:@"CellContentView"] ||
+        [NSStringFromClass(view.class) containsString:@"ASTable"];
+    if (interesting) {
+        SEL nodeSelector = NSSelectorFromString(@"asyncdisplaykit_node");
+        id node = [view respondsToSelector:nodeSelector]
+            ? ((id (*)(id, SEL))objc_msgSend)(view, nodeSelector) : nil;
+        CGRect safe = [view convertRect:view.safeAreaLayoutGuide.layoutFrame fromView:view];
+        CGRect readable = [view convertRect:view.readableContentGuide.layoutFrame fromView:view];
+        [lines addObject:[NSString stringWithFormat:
+            @"depth=%lu class=%@ node=%@ frame=%@ bounds=%@ safe=%@ readable=%@ margins=%@",
+            (unsigned long)depth, NSStringFromClass(view.class),
+            NSStringFromClass([node class]),
+            NSStringFromCGRect(view.frame), NSStringFromCGRect(view.bounds),
+            NSStringFromCGRect(safe), NSStringFromCGRect(readable),
+            NSStringFromUIEdgeInsets(view.layoutMargins)]];
+    }
+    for (UIView *subview in view.subviews) {
+        ApolloSimDebugAppendReadableViews(subview, lines, depth + 1);
+    }
+}
+
+static void ApolloSimDebugWriteReadableStatus(void) {
+    ApolloPaneSplitViewController *pane = ApolloSimDebugSelectedPane();
+    UINavigationController *detail =
+        [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary];
+    UIViewController *top = detail.topViewController;
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    if (top.isViewLoaded) {
+        [lines addObject:[NSString stringWithFormat:
+            @"top=%@ bounds=%@ safeInsets=%@ safe=%@ readable=%@ additional=%@",
+            NSStringFromClass(top.class), NSStringFromCGRect(top.view.bounds),
+            NSStringFromUIEdgeInsets(top.view.safeAreaInsets),
+            NSStringFromCGRect(top.view.safeAreaLayoutGuide.layoutFrame),
+            NSStringFromCGRect(top.view.readableContentGuide.layoutFrame),
+            NSStringFromUIEdgeInsets(top.additionalSafeAreaInsets)]];
+        ApolloSimDebugAppendReadableViews(top.view, lines, 0);
+    } else {
+        [lines addObject:[NSString stringWithFormat:@"top=%@ unloaded=1",
+            NSStringFromClass(top.class)]];
+    }
+    NSString *status = [lines componentsJoinedByString:@"\n"];
+    [status writeToFile:@"/tmp/apollofix-readable-status.txt"
+             atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[PaneReadableTest] %@", status);
+}
+
+static void ApolloSimDebugWritePaneWidthStatus(void) {
+    UIViewController *controller = ApolloMainTabBarController();
+    UITabBarController *tabs = [controller isKindOfClass:[UITabBarController class]]
+        ? (UITabBarController *)controller : nil;
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (UIViewController *child in tabs.viewControllers) {
+        if (![child isKindOfClass:[ApolloPaneSplitViewController class]]) continue;
+        [lines addObject:[(ApolloPaneSplitViewController *)child
+            apollo_simPreferredPrimaryColumnWidthState]];
+    }
+    NSString *status = lines.count > 0
+        ? [lines componentsJoinedByString:@"\n"] : @"no panes";
+    [status writeToFile:@"/tmp/apollofix-pane-width-status.txt"
+             atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[PaneWidthTest] %@", status);
+}
+
+static void ApolloSimDebugSetPaneWidth(CGFloat width) {
+    ApolloPaneSplitViewController *pane = ApolloSimDebugSelectedPane();
+    [pane apollo_simSetPreferredPrimaryColumnWidth:width];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloSimDebugWritePaneWidthStatus();
+    });
+}
+
+static void ApolloSimDebugAdjustPaneDivider(NSString *operation) {
+    ApolloPaneSplitViewController *pane = ApolloSimDebugSelectedPane();
+    BOOL adjusted = [pane apollo_simAdjustDivider:operation];
+    ApolloLog(@"[PaneWidthTest] adjust=%@ accepted=%d", operation, adjusted);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloSimDebugWritePaneWidthStatus();
+    });
+}
+
+static void ApolloSimDebugWritePaneThemeStatus(void) {
+    UIViewController *controller = ApolloMainTabBarController();
+    UITabBarController *tabs = [controller isKindOfClass:[UITabBarController class]]
+        ? (UITabBarController *)controller : nil;
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (UIViewController *child in tabs.viewControllers) {
+        if (![child isKindOfClass:[ApolloPaneSplitViewController class]]) continue;
+        [lines addObject:[(ApolloPaneSplitViewController *)child apollo_simThemeState]];
+    }
+    NSString *status = lines.count > 0
+        ? [lines componentsJoinedByString:@"\n"] : @"no panes";
+    [status writeToFile:@"/tmp/apollofix-pane-theme-status.txt"
+             atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[PaneThemeTest] %@", status);
+}
+
+static void ApolloSimDebugPostThemeNotification(void) {
+    [NSNotificationCenter.defaultCenter
+        postNotificationName:@"com.christianselig.ApolloSpecificThemeChanged" object:nil];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloSimDebugWritePaneThemeStatus();
+    });
+}
+
+static void ApolloSimDebugSampleReflow(NSUInteger generation) {
+    if (!sApolloSimReflowActive || generation != sApolloSimReflowGeneration) return;
+    ApolloPaneSplitViewController *pane = ApolloSimDebugSelectedPane();
+    UITabBarController *tabs = [pane.tabBarController isKindOfClass:[UITabBarController class]]
+        ? pane.tabBarController : nil;
+    if (!pane || !tabs) {
+        sApolloSimReflowActive = NO;
+        ApolloSimDebugWriteReflowStatus();
+        return;
+    }
+
+    BOOL sidebarAvailable = NO;
+    BOOL sidebarHidden = NO;
+    if (@available(iOS 18.0, *)) {
+        sidebarAvailable = tabs.sidebar != nil;
+        sidebarHidden = tabs.sidebar.isHidden;
+    }
+    CGFloat primaryColumnWidth = pane.primaryColumnWidth;
+    UINavigationController *primary =
+        [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary];
+    UINavigationController *detail =
+        [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary];
+    CGFloat primaryNavigationWidth = CGRectGetWidth(primary.viewIfLoaded.bounds);
+
+    if (sApolloSimReflowSamples == 0) {
+        sApolloSimReflowSidebarAvailable = sidebarAvailable;
+        sApolloSimReflowInitialSidebarHidden = sidebarHidden;
+        sApolloSimReflowLastSidebarHidden = sidebarHidden;
+        sApolloSimReflowInitialPrimaryColumnWidth = primaryColumnWidth;
+        sApolloSimReflowMinPrimaryColumnWidth = primaryColumnWidth;
+        sApolloSimReflowMaxPrimaryColumnWidth = primaryColumnWidth;
+        sApolloSimReflowInitialPrimaryNavigationWidth = primaryNavigationWidth;
+        sApolloSimReflowMinPrimaryNavigationWidth = primaryNavigationWidth;
+        sApolloSimReflowMaxPrimaryNavigationWidth = primaryNavigationWidth;
+    } else if (sidebarAvailable && sidebarHidden != sApolloSimReflowLastSidebarHidden) {
+        sApolloSimReflowSidebarChanges++;
+    }
+
+    sApolloSimReflowLastSidebarHidden = sidebarHidden;
+    sApolloSimReflowLastPrimaryColumnWidth = primaryColumnWidth;
+    sApolloSimReflowMinPrimaryColumnWidth =
+        MIN(sApolloSimReflowMinPrimaryColumnWidth, primaryColumnWidth);
+    sApolloSimReflowMaxPrimaryColumnWidth =
+        MAX(sApolloSimReflowMaxPrimaryColumnWidth, primaryColumnWidth);
+    sApolloSimReflowLastPrimaryNavigationWidth = primaryNavigationWidth;
+    sApolloSimReflowMinPrimaryNavigationWidth =
+        MIN(sApolloSimReflowMinPrimaryNavigationWidth, primaryNavigationWidth);
+    sApolloSimReflowMaxPrimaryNavigationWidth =
+        MAX(sApolloSimReflowMaxPrimaryNavigationWidth, primaryNavigationWidth);
+    ApolloSimDebugRecordTextureWidths(primary.viewIfLoaded,
+        sApolloSimReflowPrimaryTableWidths, &sApolloSimReflowPrimaryTableWidthChanges);
+    ApolloSimDebugRecordTextureWidths(detail.viewIfLoaded,
+        sApolloSimReflowDetailTableWidths, &sApolloSimReflowDetailTableWidthChanges);
+    sApolloSimReflowSamples++;
+
+    // Twelve seconds covers clear -> first load -> clear -> repeated load with
+    // plenty of settling time, while keeping this bounded simulator-only work.
+    if (sApolloSimReflowSamples >= 240) {
+        sApolloSimReflowActive = NO;
+        ApolloSimDebugWriteReflowStatus();
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ApolloSimDebugSampleReflow(generation);
+    });
+}
+
+static void ApolloSimDebugStartReflowProbe(void) {
+    sApolloSimReflowGeneration++;
+    sApolloSimReflowActive = YES;
+    sApolloSimReflowSamples = 0;
+    sApolloSimReflowSidebarAvailable = NO;
+    sApolloSimReflowSidebarChanges = 0;
+    sApolloSimReflowInitialPrimaryColumnWidth = 0.0;
+    sApolloSimReflowLastPrimaryColumnWidth = 0.0;
+    sApolloSimReflowMinPrimaryColumnWidth = 0.0;
+    sApolloSimReflowMaxPrimaryColumnWidth = 0.0;
+    sApolloSimReflowInitialPrimaryNavigationWidth = 0.0;
+    sApolloSimReflowLastPrimaryNavigationWidth = 0.0;
+    sApolloSimReflowMinPrimaryNavigationWidth = 0.0;
+    sApolloSimReflowMaxPrimaryNavigationWidth = 0.0;
+    sApolloSimReflowPrimaryTableWidths = [NSMapTable weakToStrongObjectsMapTable];
+    sApolloSimReflowDetailTableWidths = [NSMapTable weakToStrongObjectsMapTable];
+    sApolloSimReflowPrimaryTableWidthChanges = 0;
+    sApolloSimReflowDetailTableWidthChanges = 0;
+    sApolloSimReflowLargestTextureWidthJump = 0.0;
+    ApolloSimDebugSampleReflow(sApolloSimReflowGeneration);
+    ApolloLog(@"[PaneReflowTest] started 12-second width-stability probe");
 }
 
 // Task 13 resolved-layout harness. Drive only the selected pane through public
@@ -677,6 +993,15 @@ static void ApolloSimDebugLogPaneStatus(void) {
     ApolloPaneSplitViewController *pane = ApolloSimDebugSelectedPane();
     ApolloLog(@"[PaneDisplayTest] status %@",
               pane ? [pane apollo_simResolvedLayoutState] : @"no pane");
+}
+
+static void ApolloSimDebugLogLayoutPassState(BOOL reset) {
+    ApolloPaneSplitViewController *pane = ApolloSimDebugSelectedPane();
+    NSString *state = pane
+        ? [pane apollo_simLayoutPassStateReset:reset] : @"no pane pass=0";
+    [state writeToFile:@"/tmp/apollofix-layout-pass.txt"
+             atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[PaneLayoutPassTest] %@ %@", reset ? @"reset" : @"status", state);
 }
 
 static void ApolloSimDebugLogMasterSelectionStatus(void) {
@@ -1200,6 +1525,64 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         }
         if ([[contents stringByTrimmingCharactersInSet:
                 NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"layoutreset"]) {
+            ApolloSimDebugLogLayoutPassState(YES);
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"layoutstatus"]) {
+            ApolloSimDebugLogLayoutPassState(NO);
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"reflowreset"]) {
+            ApolloSimDebugStartReflowProbe();
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"reflowstatus"]) {
+            ApolloSimDebugWriteReflowStatus();
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"readablestatus"]) {
+            ApolloSimDebugWriteReadableStatus();
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"widthstatus"]) {
+            ApolloSimDebugWritePaneWidthStatus();
+            return;
+        }
+        if ([contents hasPrefix:@"widthset "]) {
+            ApolloSimDebugSetPaneWidth([[contents substringFromIndex:9] doubleValue]);
+            return;
+        }
+        if ([contents hasPrefix:@"widthadjust "]) {
+            NSString *operation = [[contents substringFromIndex:12]
+                stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            ApolloSimDebugAdjustPaneDivider(operation);
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"themestatus"]) {
+            ApolloSimDebugWritePaneThemeStatus();
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                isEqualToString:@"themenotify"]) {
+            ApolloSimDebugPostThemeNotification();
+            return;
+        }
+        if ([[contents stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet]
                 isEqualToString:@"selectionstatus"]) {
             ApolloSimDebugLogMasterSelectionStatus();
             return;
@@ -1230,6 +1613,14 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
                 NSCharacterSet.whitespaceAndNewlineCharacterSet]
                 isEqualToString:@"loadstatus"]) {
             ApolloSimDebugDumpPaneLoadStatus();
+            return;
+        }
+        if ([contents hasPrefix:@"autohidescan"]) {
+            ApolloSimDebugRunAutoHideScan(contents);
+            return;
+        }
+        if ([contents hasPrefix:@"autohidepolicy "]) {
+            ApolloSimDebugSetAutoHidePolicy(contents);
             return;
         }
         if ([contents hasPrefix:@"transitiongate "]) {

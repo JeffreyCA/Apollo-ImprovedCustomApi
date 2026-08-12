@@ -136,6 +136,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString *)apollo_simResolvedLayoutState;
 - (BOOL)apollo_simActivateShowPrimaryItem;
 - (NSString *)apollo_simMasterSelectionState;
+- (NSString *)apollo_simLayoutPassStateReset:(BOOL)reset;
+- (void)apollo_simSetPreferredPrimaryColumnWidth:(CGFloat)width;
+- (NSString *)apollo_simPreferredPrimaryColumnWidthState;
+- (BOOL)apollo_simAdjustDivider:(NSString *)operation;
+- (NSString *)apollo_simThemeState;
 + (void)apollo_simRunDeallocatedSourceProbe;
 #endif
 

@@ -48,6 +48,7 @@
 #import "settings/TranslationSettingsViewController.h"
 #import "PictureInPictureViewController.h"
 #import "TagFiltersViewController.h"
+#import "ipad/ApolloPaneLayout.h"
 
 // The six speeds the "Hold for Video Speed" picker offers, in display order. They
 // mirror the video player's own speed menu minus 1.0× (holding at normal speed
@@ -73,6 +74,17 @@ static NSInteger sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
 
 static NSString *const kApolloRebornSubredditName = @"ApolloReborn";
 static char kAboutSubredditIconTaskKey;
+
+static NSString *ApolloIPadPaneLayoutSettingDetail(void) {
+    BOOL desired = [NSUserDefaults.standardUserDefaults boolForKey:UDKeyIPadPaneLayout];
+    BOOL active = ApolloPaneLayoutActive();
+    if (desired != active) {
+        return desired
+            ? @"Will turn on after Apollo quits and reopens. The current single-column layout remains active until then."
+            : @"Will turn off after Apollo quits and reopens. The current multi-column layout remains active until then.";
+    }
+    return @"Experimental. Puts your tabs in a sidebar and opens comments beside the post list instead of on top of it. Apollo restarts to apply changes.";
+}
 
 @implementation CustomAPIViewController
 
@@ -1398,7 +1410,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Meaningless once the pane layout hides the floating pill entirely.
     iPadTabBarBottom.visible = ^BOOL {
         return !(UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad &&
-                 [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadPaneLayout]);
+                 ApolloPaneLayoutActive());
     };
 
     // Experimental multi-column iPad layout. Hidden outright on iPhone rather
@@ -1411,7 +1423,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_IPadPaneLayout"
                                                                  label:@"Multi-Column Layout"
-                                                                detail:@"Experimental. Puts your tabs in a sidebar and opens comments beside the post list instead of on top of it. Apollo restarts to apply."
+                                                                detail:ApolloIPadPaneLayoutSettingDetail()
                                                                     on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadPaneLayout]
                                                                enabled:YES
                                                                 action:@selector(iPadPaneLayoutSwitchToggled:)];
@@ -3430,8 +3442,10 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)iPadPaneLayoutSwitchToggled:(UISwitch *)sender {
     BOOL on = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:UDKeyIPadPaneLayout];
-    // "Move Tab Bar to Bottom" is hidden while the pane layout is on.
+    // Dependent rows describe the hierarchy that is active in THIS process,
+    // while this switch and its pending subtitle describe the saved choice.
     [self visibilityDidChange];
+    [self reloadRowWithID:@"gen.iPadPaneLayout"];
 
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Restart to Apply"

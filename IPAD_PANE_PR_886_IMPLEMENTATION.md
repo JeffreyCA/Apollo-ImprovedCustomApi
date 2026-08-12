@@ -371,53 +371,153 @@ not by the numbering in the review report.
     simulator build, and pinned iOS 26 device build passed; package:
     `com.apollo.reborn_3.5.1-8+debug_iphoneos-arm.deb`.
 
-- [ ] **16 — Remove hot-scroll allocations outside pane mode.**
+- [x] **16 — Remove hot-scroll allocations outside pane mode.**
   Add direct-navigation/allocation-free fast paths for AutoHideTabBar scans.
   - Focused simulator test: allocation/signpost comparison on iPhone layout-off
     and iPad pane-on scrolling; behavior must remain unchanged.
+  - Evidence: the hot `setContentOffset:` predicate now checks stock tab
+    navigation controllers directly and pane tabs through their explicit
+    primary/detail accessors. It uses the allocating shared enumerator only for
+    an unrelated generic split-controller fallback. A bounded simulator probe
+    ran 50,000 aggregate scans on the stock iPhone layout (`directScans=50000`)
+    and 50,000 on the iPad pane layout (`paneScans=50000`); both reported
+    `genericFallbackArrayScans=0` and `pass=1`. Enabling/disabling the policy on
+    both layouts retained the requested predicate and resolved native behavior
+    (`OnScrollDown=2`, `Never=1`). Real feed swipes, the standard pane smoke,
+    no-build relaunch, `git diff --check`, simulator build, and pinned iOS 26
+    device build passed; package:
+    `com.apollo.reborn_3.5.1-9+debug_iphoneos-arm.deb`.
 
-- [ ] **17 — Remove layout-driving writes from `viewDidLayoutSubviews`.**
+- [x] **17 — Remove layout-driving writes from `viewDidLayoutSubviews`.**
   Move host geometry and grabber synchronization to stable transition/safe-area
   callbacks, caching resolved geometry to avoid feedback passes.
   - Focused simulator test: repeated rotation and scripted compact/regular
     changes with layout-pass logging; Stage Manager drag remains a device gate.
+  - Evidence: production builds no longer override `viewDidLayoutSubviews` in
+    either the detail-column host or pane container. Safe-area, size-transition,
+    split-display, collapse/expand, and appearance callbacks feed coalesced
+    post-transition refreshes; cached constraint constants, grabber visibility,
+    and grabber frames suppress redundant writes. Eight consecutive simulator
+    rotations produced eight pane passes/eight pane geometry writes and sixteen
+    read-only host passes with zero host constraint writes. Five consecutive
+    compact/regular cycles stayed bounded at fifteen pane passes and ten host
+    passes, with cached writes tracking only real topology changes and no
+    follow-on feedback passes. Populated-detail
+    portrait/landscape geometry and the standard pane smoke passed. Simulator
+    and pinned iOS 26 device builds passed; package:
+    `com.apollo.reborn_3.5.1-10+debug_iphoneos-arm.deb`. Continuous Stage
+    Manager divider dragging remains release gate D/F device coverage.
 
-- [ ] **18 — Eliminate sidebar-triggered content reflow instability.**
+- [x] **18 — Eliminate sidebar-triggered content reflow instability.**
   Stabilize column widths when opening detail, preferably by leaving sidebar
   visibility user-controlled.
   - Focused simulator test: first and repeated detail loads show no large
     sidebar-driven width jump or repeated Texture remeasurement.
+  - Evidence: Task 7's production fix already removed the causal mutation, so
+    Task 18 required no second sidebar policy: UIKit remains the only owner of
+    its global sidebar visibility. A simulator-only 12-second sampler observed
+    240 resolved frames while the real 280pt UIKit sidebar stayed visible and a
+    real Home text post ran empty detail → Comments → clear → Comments. Sidebar
+    state remained visible (`sidebarChanges=0`), the primary split/navigation
+    width stayed 760pt (`range=0`), and the live primary and detail ASTableViews
+    each recorded zero post-baseline width changes (`largestTextureWidthJump=0`,
+    `pass=1`). First/repeated screenshots retained identical three-region
+    geometry. The standard five-tab, detail continuation/Back,
+    regular/compact/escape/regular smoke and a no-build relaunch passed; the
+    simulator was returned to the user's original bottom-tab-bar preference.
+    `git diff --check`, the Liquid Glass simulator build, and the pinned iOS 26
+    device build passed; package:
+    `com.apollo.reborn_3.5.1-11+debug_iphoneos-arm.deb`.
 
-- [ ] **19 — Add readable-width treatment for text-heavy detail content.**
+- [x] **19 — Add readable-width treatment for text-heavy detail content.**
   Constrain comments/settings text to a centered readable guide without
   restricting media and intentionally full-width surfaces.
   - Focused simulator test: representative short/long comments, Settings,
     Dynamic Type, media, portrait, and landscape screenshots.
+  - Evidence: the detail host now applies an owned horizontal
+    `additionalSafeAreaInsets` delta only to text-post Comments tables and
+    table-backed Settings destinations. The table and navigation/background
+    stay full width while safe-area-following cell content is centered at a
+    680pt maximum; accessibility Dynamic Type relaxes the maximum to 760pt.
+    Apollo's realized `CommentsHeaderCellNode`/`RichMediaHeaderCellNode`
+    identifies prose versus media when its Swift Optional `link` is not
+    ObjC-readable. A 756pt text thread resolved to 680pt content (38pt per
+    side), the same-width image thread stayed full width (zero inset), and a
+    744pt native Settings form resolved to 680pt (32pt per side). At
+    accessibility-large the Settings form expanded back to its full 744pt;
+    portrait text/settings widths recomputed to 680pt without clipping.
+    Landscape/portrait screenshots, compact/regular transitions, the Liquid
+    Glass simulator build, `git diff --check`, and the pinned iOS 26 device
+    build passed; package:
+    `com.apollo.reborn_3.5.1-12+debug_iphoneos-arm.deb`.
 
-- [ ] **20 — Coordinate divider widths across tab panes.**
+- [x] **20 — Coordinate divider widths across tab panes.**
   Maintain a coherent per-scene preferred primary width while allowing UIKit to
   resolve constrained windows safely.
   - Focused simulator test: resize one tab, switch through all tabs, relaunch,
     and confirm intentional persistence without compact corruption.
+  - Evidence: each window scene now owns one clamped 340–480pt absolute list
+    preference. Intentional divider/accessibility/keyboard adjustments publish
+    it to every sibling pane and persist it under the scene session identifier;
+    UIKit's resolved width remains read-only, so rotation, compact mode, and
+    constrained windows cannot corrupt the preference. A 470pt simulator
+    preference propagated to all five panes without preloading the four cold
+    tabs, survived compact → regular unchanged, and restored at 470pt after a
+    full app relaunch. Simulator and pinned iOS 26 device builds passed;
+    package: `com.apollo.reborn_3.5.1-13+debug_iphoneos-arm.deb`.
 
-- [ ] **21 — Make the divider/grabber native and accessible.**
+- [x] **21 — Make the divider/grabber native and accessible.**
   Prefer UIKit's system affordance, or provide a real adjustable control with
   label, value, hint, hit target, pointer, and keyboard behavior.
   - Focused simulator test: accessibility tree, pointer/drag behavior, keyboard
     resizing, and every resolved display mode.
+  - Evidence: the decorative 5x44pt marker is now centered inside a real
+    44x64pt `UIControl` with a horizontal pan recognizer, pointer highlight,
+    adjustable accessibility semantics (`Column Divider`, value, and hint),
+    and Option-Left/Option-Right keyboard commands. Accessibility increment and
+    keyboard narrow changed 460 → 480 → 460 through the production preference
+    path. idb exposed it as one Slider at the exact 44x64pt divider frame with
+    `AXValue="460 points"`; pointer/key-command introspection found one pointer
+    interaction and two commands. It was visible only in tiled regular mode
+    and hidden in overlay, secondary-only, and compact modes, returning at the
+    same position/value after reset. Xcode 27's known broken idb HID path could
+    not supply a physical drag, so final pointer/drag feel remains a device
+    gate. Simulator and pinned iOS 26 device builds passed; package:
+    `com.apollo.reborn_3.5.1-13+debug_iphoneos-arm.deb`.
 
-- [ ] **22 — Refresh pane-owned colors on live theme changes.**
+- [x] **22 — Refresh pane-owned colors on live theme changes.**
   Observe the canonical theme notification rather than relying on trait changes.
   - Focused simulator test: change stock/custom themes and light/dark appearance
     with each tab both empty and populated.
+  - Evidence: every loaded pane now observes Apollo's canonical
+    `ApolloSpecificThemeChanged` notification and reapplies the scene ground,
+    divider accent, and any retained empty-detail placeholder background/icon;
+    observer removal is tied to pane deallocation. The existing trait callback
+    remains the light/dark dynamic-color path. A simulator state probe confirmed
+    the notification callback on every visited tab, including unloaded and
+    loaded placeholders plus populated Home and Inbox detail stacks, with the
+    active `#EAEBED` page and `#8839EF` accent consistently reapplied. The
+    Liquid Glass simulator build, `git diff --check`, and pinned iOS 26 device
+    build passed; package:
+    `com.apollo.reborn_3.5.1-14+debug_iphoneos-arm.deb`.
 
 ### Settings, compatibility, privacy, and integration
 
-- [ ] **23 — Make restart-deferred Settings rows reflect live state.**
+- [x] **23 — Make restart-deferred Settings rows reflect live state.**
   Separate persisted desired state from active process state after choosing
   Later so dependent rows do not lie about the current hierarchy.
   - Focused simulator test: enable/disable, choose Later, revisit Settings, then
     restart and verify both intermediate and final row sets.
+  - Evidence: the Multi-Column switch continues to represent the persisted
+    desired value, but its subtitle now explicitly says which change is pending
+    whenever desired and active state differ. The dependent Move Tab Bar to
+    Bottom row keys visibility from `ApolloPaneLayoutActive()`—the hierarchy
+    installed in this process—instead of the newly written default. Toggling
+    reloads the pane row and diffs visibility without mutating
+    `sIPadPaneLayout`, so choosing Later cannot make the screen claim that an
+    unapplied hierarchy is live. Liquid Glass simulator launch,
+    `git diff --check`, and the pinned iOS 26 device build passed; package:
+    `com.apollo.reborn_3.5.1-15+debug_iphoneos-arm.deb`.
 
 - [ ] **24 — Correct pre-iOS 18 feature copy and fallback behavior.**
   Use availability-specific copy or gate the experiment if the retained tab-bar
@@ -622,3 +722,225 @@ entry if a later regression requires reopening and re-verifying a task.
   `com.apollo.reborn_3.5.1-8+debug_iphoneos-arm.deb`.
 - Remaining device/external gate: controlled launch/RSS statistics and memory
   pressure/soak coverage remain part of release gate F.
+
+### Task 16 — 2026-08-12 — baseline `d9a17a6` + task working tree
+
+- Implementation: replaced AutoHideTabBar's per-scroll shared-array traversal
+  with allocation-free direct checks for Apollo's two real tab topologies:
+  stock navigation-controller children and pane primary/detail navigation
+  controllers. The generic enumerator remains only as a compatibility fallback
+  for unrelated split view controller children.
+- Focused test: a simulator-only bounded timing/counter probe ran the exact
+  production predicate 50,000 times. The iPhone layout-off run took 7.727ms,
+  used 50,000 direct scans, and entered the array fallback zero times. The iPad
+  pane-on run took 13.096ms, used 50,000 pane scans, and entered the array
+  fallback zero times. Both returned the enabled policy as true and `pass=1`.
+- Behavior test: on both form factors, setting every owned navigation stack's
+  request on/off made the aggregate predicate resolve 1/0 and UIKit's tab-bar
+  minimize behavior resolve `OnScrollDown`/`Never` (2/1), all with `pass=1`.
+  Up/down feed swipes delivered successfully with the same behavior active.
+- Standard smoke checks: opened a real Home comments route beside the feed,
+  verified retained selected-row/accessibility state, switched through all
+  five tabs, scrolled the live feed, exercised populated regular → compact →
+  Back via accessibility escape → regular, and reset the policy and compact
+  override. A no-build relaunch installed 5/5 panes and the final screenshot
+  showed the normal regular-width empty-detail state. Recent logs contained no
+  relevant exception, assertion, hierarchy, transition, routing-loop, or
+  dead-gesture diagnostics.
+- Build coverage: Liquid Glass simulator build/launch, `git diff --check`, and
+  `make package` for the pinned iOS 26 device SDK / iOS 14 deployment target
+  passed. Package: `com.apollo.reborn_3.5.1-9+debug_iphoneos-arm.deb`.
+- Remaining device/external gate: the source-path counters prove that the known
+  array constructors are absent from both production topologies; a full
+  Allocations/frame-time scroll soak remains part of release gate F.
+
+### Task 17 — 2026-08-12 — baseline `d9a17a6` + task working tree
+
+- Implementation: removed every production layout-driving write from the
+  detail host and pane container's `viewDidLayoutSubviews`. Detail top/bottom
+  constraints and the divider grabber now update through coalesced main-queue
+  refreshes requested by safe-area, size-transition, split-display,
+  collapse/expand, trait, and appearance events. Active transition coordinators
+  defer sampling until completion. Resolved constraint constants, grabber
+  visibility, and grabber frame are cached with a half-point tolerance, and the
+  grabber uses a fixed layer order instead of repeated `bringSubviewToFront:`.
+- Focused rotation test: a simulator-only `layoutreset`/`layoutstatus` probe
+  counts layout passes, refreshes, and actual writes without changing production
+  behavior. Eight real Device Hub rotations returned `panePasses=8`,
+  `paneRefreshes=8`, `paneWrites=8`, `hostPasses=16`, `hostRefreshes=16`, and
+  `hostWrites=0`, with `pass=1`. The final portrait state retained aligned
+  columns and a centered divider grabber.
+- Focused topology test: five forced compact → regular cycles returned fifteen
+  pane layout passes and ten host passes—bounded work rather than recursive
+  growth. The cached geometry wrote only when compact visibility/host offsets
+  actually changed. A mixed latest-build run of four rotations plus two
+  compact/regular cycles also ended `pass=1` with coherent regular geometry.
+- Standard smoke checks: opened a real Home comments route, verified selected
+  row/accessibility state, pushed and popped a detail continuation, visited all
+  five tabs, exercised populated compact Back via accessibility escape, reset
+  compact mode, and relaunched without rebuilding. Portrait and landscape
+  screenshots showed aligned primary/detail navigation bars, usable content,
+  and the grabber on the real divider. The final regular screenshot showed the
+  expected empty-detail state. Recent logs contained no relevant constraint,
+  exception, assertion, hierarchy, unbalanced-transition, routing-loop,
+  layout-loop, or dead-gesture diagnostics.
+- Build coverage: Liquid Glass simulator build/launch, `git diff --check`, and
+  `make package` for the pinned iOS 26 device SDK / iOS 14 deployment target
+  passed. Package: `com.apollo.reborn_3.5.1-10+debug_iphoneos-arm.deb`.
+- Remaining device/external gate: continuous Stage Manager resizing and a
+  ten-minute rotation/resize leak soak remain release gates D and F.
+
+### Task 18 — 2026-08-12 — baseline `d9a17a6` + task working tree
+
+- Implementation audit: the instability's production cause was the old
+  `apollo_reconcileSidebarForDetailContent` policy, which hid the one global tab
+  sidebar whenever detail filled. Task 7 removed that method, its ownership
+  flags, and every `sidebar.hidden` writer. The current detail replacement path
+  changes only the detail navigation stack and selection state; no additional
+  production mutation was needed or added for Task 18.
+- Focused width test: added a simulator-only `reflowreset`/`reflowstatus` probe
+  that samples the selected pane, global sidebar, primary navigation geometry,
+  and every visible primary/detail ASTableView without writing layout. With the
+  real UIKit sidebar visible, a real Home text post was opened, cleared, and
+  opened again during 240 samples. The final state was
+  `sidebarInitialHidden=0 sidebarFinalHidden=0 sidebarChanges=0`,
+  `primaryColumnInitial=760 primaryColumnFinal=760 primaryColumnRange=0`,
+  `primaryNavRange=0`, `primaryTextureWidthChanges=0`,
+  `detailTextureWidthChanges=0`, `largestTextureWidthJump=0`, and `pass=1`.
+- Visual/behavior checks: `.sim/task18-first-comments-visible-sidebar.png` and
+  `.sim/task18-repeated-comments-visible-sidebar.png` show identical sidebar,
+  list-divider, and comment-column geometry. A detail continuation pushed and
+  popped correctly, all five tabs remained reachable, and populated regular →
+  compact → accessibility escape → regular restored the two-deep primary stack
+  and cleared detail. Layout counters ended `pass=1`; recent logs contained no
+  relevant constraint, hierarchy, assertion, routing-loop, transition, or
+  dead-gesture diagnostics.
+- Relaunch/state cleanup: a no-build launch installed 5/5 panes in regular
+  width. The temporary sidebar-visible test configuration was removed and the
+  simulator's original `IPadTabBarBottom=YES` preference was restored before
+  the final screenshot.
+- Build coverage: `git diff --check`, the Liquid Glass simulator build/launch,
+  and `make package` for the pinned iOS 26 device SDK / iOS 14 deployment target
+  passed. Package: `com.apollo.reborn_3.5.1-11+debug_iphoneos-arm.deb`.
+
+### Task 19 — 2026-08-12 — baseline `d9a17a6` + task working tree
+
+- Implementation: the detail-column host owns a reversible horizontal
+  `additionalSafeAreaInsets` delta for prose surfaces. It caps ordinary text at
+  680pt, relaxes to 760pt for accessibility Dynamic Type categories, preserves
+  any pre-existing additional insets, recomputes from stable geometry/content-
+  size callbacks, and restores the original edges when the navigation top
+  changes. Navigation chrome, table frames, scroll indicators, and background
+  fills stay full width; only cell content that already follows the safe area is
+  centered.
+- Scope: table-backed destinations under the Settings index opt in. Comments
+  opt in only for self/text posts. Apollo's Swift Optional `link` ivar is often
+  nil through ObjC runtime access, so the policy also reads the realized first
+  Texture row: `CommentsHeaderCellNode` is prose and
+  `RichMediaHeaderCellNode` is media. Unknown headers, media threads, viewers,
+  galleries, web views, feeds, profiles, and non-table Settings descendants
+  fail open at full width.
+- Focused geometry/visual tests on the 13-inch iPad simulator: a real 756pt
+  text thread with short and long/nested comments resolved to
+  `safeInsets={86,38,64,38}` and 680pt cell content; an image-post thread at the
+  same 756pt width resolved to zero horizontal inset and full-width media. A
+  native 744pt Settings General form resolved to 32pt per side/680pt content.
+  At `accessibility-large`, the same form expanded to its full 744pt width and
+  its rows grew normally; the simulator was returned to `large`. Portrait
+  Comments (692pt) resolved to 6pt per side/680pt, while portrait Settings at
+  680pt needed no inset. Screenshots:
+  `.sim/task19-text-readable-landscape.png`,
+  `.sim/task19-media-fullwidth.png`,
+  `.sim/task19-settings-readable-landscape.png`,
+  `.sim/task19-settings-accessibility-large.png`,
+  `.sim/task19-text-comments-portrait.png`, and
+  `.sim/task19-settings-portrait.png`.
+- Transition/build coverage: populated compact → regular recomputed the cap
+  from the resolved width and the existing layout probe remained `pass=1` with
+  bounded passes/writes. The final Liquid Glass simulator build/launch,
+  `git diff --check`, and `make package` for the pinned iOS 26 device SDK / iOS
+  14 deployment target passed. Package:
+  `com.apollo.reborn_3.5.1-12+debug_iphoneos-arm.deb`.
+
+### Tasks 20–21 — 2026-08-12 — baseline `d9a17a6` + task working tree
+
+- Width ownership: an attached pane initializes one scene-associated preferred
+  primary width from that scene session's persisted value, or from the existing
+  42% default clamped to 340–480pt. It applies the absolute preference to every
+  sibling pane without loading any cold pane views. UIKit's
+  `primaryColumnWidth` remains an observed resolved value only, so compact,
+  rotation, sidebar overlap, and constrained-window results never persist as
+  user intent.
+- Persistence/coordination test: a simulator-only `widthset 470` command used
+  the same production publication path as the control. All five tab panes
+  reported `requested=470`; the four unvisited panes remained unloaded until
+  selected. After visiting every tab, forced compact mode reported
+  `scenePreferred=470 requested=470` while UIKit resolved the single compact
+  column to 1032pt. Expansion restored the tiled layout without changing the
+  preference. Killing/reinstalling-over/relaunching the app initialized the
+  scene from the persisted 470pt value and resolved the list to 470pt.
+- Accessible divider: the pane marker is now a transparent 44x64pt `UIControl`
+  around its original centred 5x44pt accent pill. It owns horizontal pan input,
+  a pointer highlight interaction, `UIAccessibilityTraitAdjustable` with a
+  descriptive label/value/hint, and Option-Left/Option-Right commands. All
+  inputs clamp and publish through the scene coordinator; cancelled pans return
+  to their starting preference.
+- Focused interaction test: accessibility increment changed 460 → 480 and the
+  keyboard narrow command changed it back to 460. idb's accessibility tree
+  exposed one `AXSlider` at `{{438,656},{44,64}}`, label `Column Divider`, hint
+  `Adjusts the width of the list column`, and value `460 points`. Runtime state
+  confirmed one pointer interaction and two key commands. The control was
+  visible in tiled regular mode and hidden in overlay, secondary-only, and
+  compact states; reset restored it at the same divider coordinate and value.
+- Environment limitation: Xcode 27's idb HID swipe returned without delivering
+  the physical drag, matching the repository's documented Device Hub/idb
+  limitation. The production pan path is installed and compiled, but final
+  mouse/trackpad drag feel remains release-gate device coverage.
+- Build coverage: Liquid Glass simulator build/launch, `git diff --check`, and
+  `make package` for the pinned iOS 26 device SDK / iOS 14 deployment target
+  passed. Package: `com.apollo.reborn_3.5.1-13+debug_iphoneos-arm.deb`.
+
+### Task 22 — 2026-08-12 — baseline `d9a17a6` + task working tree
+
+- Implementation: each loaded pane registers for Apollo's canonical
+  `com.christianselig.ApolloSpecificThemeChanged` notification in
+  `viewDidLoad` and removes itself in `dealloc`. The callback reapplies every
+  color owned by the pane layer: the ground behind floating columns, the
+  divider marker accent, and retained placeholder page/icon colors. Hosted
+  Apollo controllers continue to handle their own copy of the same
+  notification. Existing trait callbacks remain responsible for resolving the
+  dynamic providers when light/dark appearance changes.
+- Focused test: a simulator-only `themenotify` command posts the exact canonical
+  notification and records resolved pane colors/callback counts. Empty Home
+  advanced from zero to one callback while retaining a coherent `#EAEBED` page
+  ground/placeholder and `#8839EF` divider/icon accent. Visiting every tab and
+  notifying after each visit showed every loaded pane receiving subsequent
+  notifications; unloaded placeholder views remained unloaded. Home was then
+  populated with a real routed detail replacement and received another live
+  notification with its pane ground/divider refreshed; Inbox's populated
+  detail behaved the same way. This covers empty, populated, foreground, and
+  loaded-background pane ownership without forcing cold views to load.
+- Build coverage: the Liquid Glass simulator compiled and launched,
+  `git diff --check` passed, and `make package` passed against the pinned iOS 26
+  device SDK / iOS 14 deployment target. Package:
+  `com.apollo.reborn_3.5.1-14+debug_iphoneos-arm.deb`.
+
+### Task 23 — 2026-08-12 — baseline `d9a17a6` + task working tree
+
+- Implementation: Settings now treats the saved `UDKeyIPadPaneLayout` value as
+  desired next-launch state and `ApolloPaneLayoutActive()` as current-process
+  hierarchy. The switch reads desired state. Its detail text reports either the
+  normal description, “will turn on after Apollo quits and reopens,” or “will
+  turn off…” according to the desired/active matrix. The dependent Move Tab Bar
+  to Bottom row is visible only when the pane hierarchy is not currently active.
+- Later-state behavior: after writing the desired value, the handler leaves
+  `sIPadPaneLayout` untouched, diffs conditional visibility from active state,
+  and identity-reloads `gen.iPadPaneLayout` so the pending subtitle appears
+  immediately. Thus enable + Later retains the still-relevant bottom-tab row;
+  disable + Later keeps it hidden while panes remain installed; toggling back
+  to active state cancels the pending subtitle. Relaunch naturally makes desired
+  and active agree and returns the final row set.
+- Build coverage: the updated form compiled and launched in the Liquid Glass
+  iPad simulator, `git diff --check` passed, and `make package` passed against
+  the pinned iOS 26 device SDK / iOS 14 deployment target. Package:
+  `com.apollo.reborn_3.5.1-15+debug_iphoneos-arm.deb`.
