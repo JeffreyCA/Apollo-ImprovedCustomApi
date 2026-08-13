@@ -181,20 +181,6 @@ uint32_t ApolloPackedColorFromHexString(NSString *hex);
 // snapshot for the renderer. Call on the main thread.
 void ApolloSetLinkPreviewCardColorHex(NSString *hex);
 
-// Issue #515 (ApolloPublicStickyAsSubreddit): when `menuTitle` is the removal
-// "Notify user via…" menu, append a "Public Sticky from Subreddit" UIAction to
-// `children` (an NSMutableArray<UIMenuElement *>). No-op for any other menu.
-// Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
-void ApolloInjectPublicStickyAsSubredditIfNeeded(NSMutableArray *children, NSString *menuTitle);
-
-// ApolloDeletedCommentsMenu: when the comments view's "..." menu is being
-// built, append a "Show/Hide Deleted Comments" UIAction to `children`
-// (an NSMutableArray<UIMenuElement *>). No-op for any other menu. Called from
-// ApolloNativeActionMenuBuildMenu as it converts the action sheet; the
-// ActionController is tagged on first build so re-builds re-inject and other
-// menus can't claim the item.
-void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
-
 // Whether the experimental native Polls feature (voting + creation) is enabled.
 // Off by default; toggled from Settings → Polls (UDKeyPollsEnabled). All poll
 // entry points — the poll-node tap handler, remembered-vote reconciliation, the
@@ -251,13 +237,6 @@ BOOL ApolloTabBarVisualProviderBoolIvar(UITabBar *tabBar, const char *name, BOOL
 // also write to the diag log.
 NSString *ApolloDebugAccountKeychainReport(void);
 NSString *ApolloDebugPoisonAccountAccessibility(void);
-
-// ApolloGalleryMenu: when the subreddit "..." menu is being built, insert an
-// inline "Gallery View" section into `children` (an NSMutableArray<UIMenuElement *>),
-// just below the leading "submit a post" affordance.
-// No-op for any other menu, and for feeds that aren't a single subreddit.
-// Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
-void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
 
 // Marks a tweak-created text node/label as our own UI chrome (AI summary pill,
 // injected affordances, ...). Content pipelines that scan the view/node tree
