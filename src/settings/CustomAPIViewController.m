@@ -1320,9 +1320,15 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf blockAnnouncementsSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *devvitPosts =
+        [ApolloSettingsRow switchRowWithID:@"gen.devvitPosts"
+                                     title:@"Live Interactive Posts"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf devvitPostsSwitchToggled:sender]; }];
+
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list."
-                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements ]];
+                                            footer:@"Small tweaks for the post list. Live Interactive Posts renders Reddit app-platform posts (match threads, games) as their real live widget instead of a placeholder, in comments and large-mode feed cards."
+                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -3420,6 +3426,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)swipeUpCommentsSwitchToggled:(UISwitch *)sender {
     sSwipeUpForComments = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sSwipeUpForComments forKey:UDKeySwipeUpForComments];
+}
+
+- (void)devvitPostsSwitchToggled:(UISwitch *)sender {
+    sDevvitInteractivePosts = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sDevvitInteractivePosts forKey:UDKeyDevvitInteractivePosts];
 }
 
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {

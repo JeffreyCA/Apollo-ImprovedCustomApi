@@ -513,6 +513,11 @@ static NSString *const UDKeySwipeUpForComments = @"SwipeUpForComments";
 // video via the Streamable pipeline (off = link-preview card, stock behavior).
 static NSString *const UDKeySportsClipsInlineVideo = @"SportsClipsInlineVideo";
 
+// Live interactive Devvit ("Developer Platform") posts — match threads, games
+// — render their real web widget inline (comments header + large-mode feed
+// cards) instead of the "not supported on old Reddit" fallback text. Default ON.
+static NSString *const UDKeyDevvitInteractivePosts = @"DevvitInteractivePosts";
+
 // Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
 static NSString *const UDKeyLinkPreviewBodyMode = @"LinkPreviewBodyMode";
 static NSString *const UDKeyLinkPreviewCommentsMode = @"LinkPreviewCommentsMode";

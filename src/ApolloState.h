@@ -25,6 +25,8 @@ extern BOOL sFeedTextPostThumbnails;
 extern BOOL sFeedGalleryCarousel;
 // Default-on fullscreen-media comments pane, opened by upward flick or button.
 extern BOOL sSwipeUpForComments;
+// Default-on live interactive Devvit posts (embedded web widget).
+extern BOOL sDevvitInteractivePosts;
 extern NSInteger sPreferredGIFFallbackFormat;
 
 extern NSInteger sReadPostMaxCount;
