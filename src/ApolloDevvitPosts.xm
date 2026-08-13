@@ -145,6 +145,14 @@ static NSString *const kApolloDevvitCropScript = @""
 "  var CSS = ''"
 "    + 'html, body { overflow: hidden !important; background: transparent !important; }'"
 "    + 'body > * { visibility: hidden !important; }'"
+    /* visibility:hidden alone is NOT enough: reddit's own CSS marks some
+       chrome (e.g. the top-nav avatar/notification button) visibility:visible,
+       which re-enables it through a hidden ancestor and it floats over the
+       widget. Force-hide everything that isn't the devvit subtree; the
+       devvit elements' shadow trees are untouched by document styles. */
+"    + 'body *:not(devvit2-custom-post):not(devvit2-custom-post *)'"
+"    + ':not(shreddit-devvit-ui-loader):not(shreddit-devvit-ui-loader *)'"
+"    + ':not(devvit-blocks-renderer):not(devvit-blocks-renderer *) { visibility: hidden !important; }'"
 "    + 'devvit2-custom-post, shreddit-devvit-ui-loader, devvit-blocks-renderer {'"
 "    + '  visibility: visible !important; position: fixed !important;'"
 "    + '  top: 0 !important; left: 0 !important; right: 0 !important; width: 100vw !important;'"
