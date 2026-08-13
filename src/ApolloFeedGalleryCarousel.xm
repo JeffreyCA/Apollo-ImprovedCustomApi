@@ -77,12 +77,17 @@ struct ApolloFeedGallerySizeRange { CGSize min; CGSize max; };
 // Apollo's native album mosaic is 16:9 (confirmed in Hopper's
 // AlbumThumbnailsNode.layoutSpecThatFits helper: height = width * 0.5625).
 // The carousel sizes each card to the gallery's median image aspect instead,
-// clamped between that 16:9 floor and a 5:4 portrait ceiling: a full-bleed
+// clamped between that 16:9 floor and a 4:3 portrait ceiling: a full-bleed
 // pager reads as "the image", so center-cropping a portrait photo into a hard
 // 16:9 box looked like a bug, while an unclamped 1:3 comic would swallow the
-// feed. AspectFill within the clamp keeps residual crops modest.
+// feed. Pages render aspect-fit within the card (#899): aspect-fill cropped
+// every page whose aspect differs from the card's — a wide sketch in a
+// portrait-median gallery lost both edges — so off-aspect pages letterbox on
+// the page background instead. The 4:3 ceiling keeps the most common gallery
+// (3:4 iPhone photos) full-bleed now that residual crops are no longer an
+// option.
 static const CGFloat kApolloFeedGalleryRatio = 9.0 / 16.0;
-static const CGFloat kApolloFeedGalleryMaxRatio = 5.0 / 4.0;
+static const CGFloat kApolloFeedGalleryMaxRatio = 4.0 / 3.0;
 
 static CGFloat ApolloFeedGalleryRatioForItems(NSArray<NSDictionary *> *items) {
     NSMutableArray<NSNumber *> *aspects = [NSMutableArray arrayWithCapacity:items.count];
@@ -447,7 +452,7 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
         for (NSUInteger index = 0; index < items.count; index++) {
             UIImageView *imageView = [[UIImageView alloc] initWithFrame:CGRectZero];
             imageView.backgroundColor = [UIColor colorWithWhite:0.10 alpha:1.0];
-            imageView.contentMode = UIViewContentModeScaleAspectFill;
+            imageView.contentMode = UIViewContentModeScaleAspectFit;
             imageView.clipsToBounds = YES;
             imageView.isAccessibilityElement = YES;
             imageView.accessibilityLabel = [NSString stringWithFormat:@"Gallery image %lu of %lu",
@@ -544,6 +549,22 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     ApolloLog(@"[FeedGallery] obscured gallery revealed by user");
 }
 
+// Where the page's image actually renders under aspect-fit. The zoom
+// transition and viewer placeholder use the sender view's frame as their
+// origin; handing them the full page bounds would zoom out of the letterbox
+// bars on off-aspect pages.
+- (CGRect)apollo_fittedImageRectForPage:(UIImageView *)pageView {
+    CGRect bounds = pageView.bounds;
+    CGSize imageSize = pageView.image.size;
+    if (imageSize.width <= 0.0 || imageSize.height <= 0.0 || CGRectIsEmpty(bounds)) return bounds;
+    CGFloat scale = MIN(CGRectGetWidth(bounds) / imageSize.width,
+                        CGRectGetHeight(bounds) / imageSize.height);
+    CGSize fitted = CGSizeMake(imageSize.width * scale, imageSize.height * scale);
+    return CGRectMake(CGRectGetMidX(bounds) - fitted.width / 2.0,
+                      CGRectGetMidY(bounds) - fitted.height / 2.0,
+                      fitted.width, fitted.height);
+}
+
 - (void)apollo_pageTapped:(UITapGestureRecognizer *)recognizer {
     if (recognizer.state != UIGestureRecognizerStateEnded || self.contentIsObscured) return;
     NSInteger index = self.currentIndex;
@@ -578,7 +599,8 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     UIView *senderView = [senderNode respondsToSelector:@selector(view)]
         ? ((UIView *(*)(id, SEL))objc_msgSend)(senderNode, @selector(view)) : nil;
     if (senderView.superview && pageView.window) {
-        senderView.frame = [senderView.superview convertRect:pageView.bounds fromView:pageView];
+        senderView.frame = [senderView.superview convertRect:[self apollo_fittedImageRectForPage:pageView]
+                                                    fromView:pageView];
     }
 
     // Pages >= 3 have no matching native sender; seed the pager's index ivar
