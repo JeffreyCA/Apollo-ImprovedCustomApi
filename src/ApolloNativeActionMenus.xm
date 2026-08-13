@@ -1,8 +1,6 @@
-#import "ApolloActionMenu.h"
 #import "ApolloCommon.h"
 #import "ApolloNativeActionMenus.h"
 #import "ApolloNativeActionMetadata.h"
-#import "ApolloSwiftRuntime.h"
 #import "ApolloThemeRuntime.h"
 
 #import <UIKit/UIKit.h>
@@ -114,6 +112,78 @@ static BOOL ApolloNativeActionMenuMagicMorphEnabled(void) {
         sEnabledFn = (BOOL (*)(void))dlsym(RTLD_DEFAULT, "_UIContextMenuMagicMorphAnimationEnabled");
     });
     return sEnabledFn ? sEnabledFn() : YES;
+}
+
+static NSString *ApolloDecodeSwiftString(uint64_t w0, uint64_t w1) {
+    if (w1 == 0) {
+        return nil;
+    }
+
+    uint8_t disc = (uint8_t)(w1 >> 56);
+    if (disc >= 0xE0 && disc <= 0xEF) {
+        NSUInteger len = disc - 0xE0;
+        if (len == 0) return @"";
+
+        char buf[16] = {0};
+        memcpy(buf, &w0, 8);
+        uint64_t w1clean = w1 & 0x00FFFFFFFFFFFFFFULL;
+        memcpy(buf + 8, &w1clean, 7);
+        return [[NSString alloc] initWithBytes:buf length:len encoding:NSUTF8StringEncoding];
+    }
+
+    typedef NSString *(*BridgeFn)(uint64_t, uint64_t);
+    static BridgeFn sBridge = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sBridge = (BridgeFn)dlsym(RTLD_DEFAULT,
+            "$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF");
+    });
+
+    return sBridge ? sBridge(w0, w1) : nil;
+}
+
+static ptrdiff_t ApolloIvarOffset(Class cls, const char *name) {
+    Ivar ivar = class_getInstanceVariable(cls, name);
+    return ivar ? ivar_getOffset(ivar) : -1;
+}
+
+static void *ApolloReadRawIvar(id object, const char *name) {
+    if (!object) return NULL;
+    ptrdiff_t offset = ApolloIvarOffset(object_getClass(object), name);
+    if (offset < 0) return NULL;
+    uint8_t *base = (uint8_t *)(__bridge void *)object;
+    return *(void **)(base + offset);
+}
+
+static id ApolloReadObjectIvar(id object, const char *name) {
+    if (!object) return nil;
+    ptrdiff_t offset = ApolloIvarOffset(object_getClass(object), name);
+    if (offset < 0) return nil;
+    uint8_t *base = (uint8_t *)(__bridge void *)object;
+    void *value = *(void **)(base + offset);
+    return (__bridge id)value;
+}
+
+static BOOL ApolloReadBoolIvar(id object, const char *name, BOOL defaultValue) {
+    if (!object) return defaultValue;
+    ptrdiff_t offset = ApolloIvarOffset(object_getClass(object), name);
+    if (offset < 0) return defaultValue;
+    uint8_t *base = (uint8_t *)(__bridge void *)object;
+    return *(uint8_t *)(base + offset) != 0;
+}
+
+static NSString *ApolloReadSwiftStringIvar(id object, const char *name) {
+    if (!object) return nil;
+    ptrdiff_t offset = ApolloIvarOffset(object_getClass(object), name);
+    if (offset < 0) return nil;
+    uint8_t *base = (uint8_t *)(__bridge void *)object;
+    return ApolloDecodeSwiftString(*(uint64_t *)(base + offset), *(uint64_t *)(base + offset + 0x08));
+}
+
+static int64_t ApolloSwiftArrayCount(void *buffer) {
+    if (!buffer) return 0;
+    int64_t count = *(int64_t *)((uint8_t *)buffer + 0x10);
+    return count > 0 ? count : 0;
 }
 
 static NSString *ApolloNativeActionDefaultTitle(uint16_t actionKind) {
@@ -823,10 +893,15 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     }
 
     NSString *title = ApolloReadSwiftStringIvar(actionController, "actionsDescription") ?: @"";
-    // Every feature-registered row (Public Sticky from Subreddit, Show/Hide
-    // Deleted Comments, Gallery View, ...) is injected here through the single
-    // action-menu registry; see ApolloActionMenu.h for the registration contract.
-    ApolloActionMenuInjectMenuElements(children, title, actionController);
+    // Issue #515: append "Public Sticky from Subreddit" when this is the removal
+    // "Notify user via…" menu (no-op otherwise).
+    ApolloInjectPublicStickyAsSubredditIfNeeded(children, title);
+    // Append "Show/Hide Deleted Comments" when this is a comments view's "..."
+    // menu (no-op otherwise; see ApolloDeletedCommentsMenu.xm).
+    ApolloInjectDeletedCommentsMenuItemIfNeeded(children, title, actionController);
+    // Prepend "Gallery View" when this is a subreddit's "..." menu (no-op
+    // otherwise; see ApolloGalleryMenu.xm).
+    ApolloInjectGalleryViewMenuItemIfNeeded(children, title, actionController);
     return [UIMenu menuWithTitle:title children:children];
 }
 
