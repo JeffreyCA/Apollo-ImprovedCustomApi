@@ -15,6 +15,17 @@ NSString *const ApolloWebJSONSessionExpiredNotification = @"ApolloWebJSONSession
 NSString *const ApolloWebJSONEnabledDidChangeNotification = @"ApolloWebJSONEnabledDidChangeNotification";
 NSString *const ApolloWebJSONSyntheticBearerToken = @"apollo-webjson-cookie-session";
 
+// Web JSON authenticates as a normal reddit.com browser session. The custom
+// User-Agent setting belongs to OAuth and may intentionally identify another
+// approved client (for example Dystopia or RedReader). Reusing that identity on
+// cookie-authenticated www.reddit.com requests makes Reddit classify them as
+// third-party Data API traffic; mature listings then collapse to the
+// u/redditmaturecontent placeholder even though the account's 18+ preference is
+// enabled. Keep the two transports' identities separate.
+static NSString *ApolloWebJSONBrowserUserAgent(void) {
+    return defaultUserAgent;
+}
+
 #pragma mark - Synthetic bearer helpers + bearer-ownership registry
 
 BOOL ApolloWebJSONBearerIsSynthetic(NSString *token) {
@@ -413,7 +424,7 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
         [modMutable setValue:nil forHTTPHeaderField:@"Authorization"];
         [modMutable setValue:session.cookieHeader forHTTPHeaderField:@"Cookie"];
         modMutable.HTTPShouldHandleCookies = NO;
-        [modMutable setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+        [modMutable setValue:ApolloWebJSONBrowserUserAgent() forHTTPHeaderField:@"User-Agent"];
         ApolloLogDebug(@"[WebJSON] Rewrote moderators GET %@ -> %@ for u/%@", url.absoluteString, modURL.absoluteString, sessionUsername);
         return modMutable;
     }
@@ -490,7 +501,7 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
         [mutable setValue:@"empty" forHTTPHeaderField:@"Sec-Fetch-Dest"];
     }
 
-    [mutable setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+    [mutable setValue:ApolloWebJSONBrowserUserAgent() forHTTPHeaderField:@"User-Agent"];
 
     ApolloLogDebug(@"[WebJSON] Rewrote %@ %@ -> %@ for u/%@ (%@%@)",
                    method, url.absoluteString, rewrittenURL.absoluteString, sessionUsername,
@@ -583,7 +594,7 @@ static void ApolloWebJSONVerifySessionThenAnnounce(NSString *username) {
     NSURL *probeURL = ApolloWebJSONURLWithFragment([NSURL URLWithString:@"https://www.reddit.com/api/me.json"], kApolloWebJSONProbeMarker);
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:probeURL];
     [req setValue:cookie forHTTPHeaderField:@"Cookie"];
-    [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+    [req setValue:ApolloWebJSONBrowserUserAgent() forHTTPHeaderField:@"User-Agent"];
     req.HTTPShouldHandleCookies = NO;
     req.timeoutInterval = 15.0;
 
@@ -989,7 +1000,7 @@ static NSDictionary<NSString *, NSDictionary *> *ApolloWebJSONFetchFullPostsForM
                                                                cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                            timeoutInterval:2.5];
         [request setValue:webSession.cookieHeader forHTTPHeaderField:@"Cookie"];
-        [request setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+        [request setValue:ApolloWebJSONBrowserUserAgent() forHTTPHeaderField:@"User-Agent"];
         request.HTTPShouldHandleCookies = NO;
 
         dispatch_group_enter(group);
@@ -1179,7 +1190,10 @@ static NSDictionary *ApolloWebJSONFetchModernThingData(NSString *fullname) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:probeURL];
     if (cookie.length > 0) [req setValue:cookie forHTTPHeaderField:@"Cookie"];
     else [req setValue:[@"Bearer " stringByAppendingString:bearer] forHTTPHeaderField:@"Authorization"];
-    [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+    NSString *requestUserAgent = cookie.length > 0
+        ? ApolloWebJSONBrowserUserAgent()
+        : ([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent);
+    [req setValue:requestUserAgent forHTTPHeaderField:@"User-Agent"];
     req.HTTPShouldHandleCookies = NO;
     req.timeoutInterval = 15.0;
 
@@ -2226,7 +2240,7 @@ static NSString *ApolloWebJSONMintWebBearerForAccount(NSString *username) {
         [req setValue:[@"Basic " stringByAppendingString:basic] forHTTPHeaderField:@"Authorization"];
         [req setValue:session.cookieHeader forHTTPHeaderField:@"Cookie"];
         [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-        [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+        [req setValue:ApolloWebJSONBrowserUserAgent() forHTTPHeaderField:@"User-Agent"];
         req.HTTPBody = [@"{\"scopes\":[\"*\"]}" dataUsingEncoding:NSUTF8StringEncoding];
         req.HTTPShouldHandleCookies = NO;
         // Small JSON exchange — same budget class as the media-hydration
@@ -2332,7 +2346,7 @@ NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response) {
 
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:oauthURL];
     [req setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
-    [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+    [req setValue:ApolloWebJSONBrowserUserAgent() forHTTPHeaderField:@"User-Agent"];
     req.HTTPShouldHandleCookies = NO;
     req.timeoutInterval = 3;
 
