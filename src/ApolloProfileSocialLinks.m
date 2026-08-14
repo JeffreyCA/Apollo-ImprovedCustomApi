@@ -623,7 +623,7 @@ static NSString *ApolloSLScrapeCookieHeader(void) {
 + (WKWebsiteDataStore *)apollo_scrapeDataStore {
     static WKWebsiteDataStore *store;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ store = [WKWebsiteDataStore nonPersistentDataStore]; });
+    dispatch_once(&once, ^{ store = ApolloScrapeWebViewSharedDataStore(); });
     return store;
 }
 
@@ -878,7 +878,7 @@ static NSTimeInterval const kApolloSLWebMinTimeForNone  = 4.0;
 - (void)finish:(NSArray<ApolloSocialLink *> *)links {
     if (self.finished) return;   // watchdog / poll / queue-drop can race
     self.finished = YES;
-    if (self.web) { self.web.navigationDelegate = nil; [self.web stopLoading]; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     // Release the slot BEFORE the completion so a waiting scrape starts straight
     // away rather than a callback-chain later.
     NSMutableArray<ApolloSLWebFetch *> *queue = ApolloSLWebFetchQueue();

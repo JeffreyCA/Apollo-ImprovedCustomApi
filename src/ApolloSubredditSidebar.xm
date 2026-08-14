@@ -90,7 +90,7 @@ static NSCache<NSString *, NSArray<NSNumber *> *> *ApolloSBWebStatsCache(void) {
     }];
 }
 - (void)finishV:(NSNumber *)v c:(NSNumber *)c {
-    if (self.web) { self.web.navigationDelegate = nil; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     void (^d)(NSNumber *, NSNumber *) = self.done; self.done = nil;
     if (d) d(v, c);
 }

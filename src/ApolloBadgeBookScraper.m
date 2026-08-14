@@ -1025,7 +1025,7 @@ static NSTimeInterval const kApolloBBWebFetchWatchdog = 90.0;
 - (void)finish {
     if (self.finished) return;
     self.finished = YES;
-    if (self.web) { self.web.navigationDelegate = nil; [self.web stopLoading]; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     // Release the slot BEFORE the completion so a waiting scrape starts straight
     // away rather than a callback-chain later.
     NSMutableArray<ApolloBBWebFetch *> *queue = ApolloBBWebFetchQueue();

@@ -920,8 +920,7 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
               self.subreddit, (long)status, (unsigned long)responseLength,
               (unsigned long)result.count, validResponse ? @"no" : @"yes", reason ?: @"none");
 
-    self.web.navigationDelegate = nil;
-    [self.web stopLoading];
+    ApolloScrapeWebViewDestroy(self.web);
     self.web = nil;
     NSMutableDictionary *fetches = ApolloUserFlairWebEmojiFetches();
     @synchronized (fetches) {

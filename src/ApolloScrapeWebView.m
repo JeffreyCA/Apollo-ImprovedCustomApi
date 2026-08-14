@@ -62,15 +62,31 @@ static BOOL sBlockerFailed;                     // don't retry forever
 static BOOL sCompileInFlight;
 static NSMutableArray<void (^)(void)> *sWaiters;
 
-CGRect ApolloScrapeWebViewFrame(void) {
-    CGRect frame = CGRectZero;
+static UIWindow *ApolloScrapeKeyWindow(void) {
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-            if (w.isKeyWindow) { frame = w.bounds; break; }
+            if (w.isKeyWindow) return w;
         }
-        if (!CGRectIsEmpty(frame)) break;
     }
+    return nil;
+}
+
+// Real mobile Safari UA for this OS version. WKWebView's default UA is missing
+// the trailing "Version/x ... Safari" token, which marks the request as an
+// embedded web view and measurably raises Reddit's challenge rate.
+static NSString *ApolloScrapeSafariUserAgent(void) {
+    NSArray<NSString *> *parts = [UIDevice.currentDevice.systemVersion componentsSeparatedByString:@"."];
+    NSString *major = parts.count > 0 ? parts[0] : @"18";
+    NSString *minor = parts.count > 1 ? parts[1] : @"0";
+    BOOL pad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+    NSString *os = pad ? [NSString stringWithFormat:@"iPad; CPU OS %@_%@ like Mac OS X", major, minor]
+                       : [NSString stringWithFormat:@"iPhone; CPU iPhone OS %@_%@ like Mac OS X", major, minor];
+    return [NSString stringWithFormat:@"Mozilla/5.0 (%@) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/%@.%@ Mobile/15E148 Safari/604.1", os, major, minor];
+}
+
+CGRect ApolloScrapeWebViewFrame(void) {
+    CGRect frame = ApolloScrapeKeyWindow().bounds;
     if (CGRectIsEmpty(frame)) frame = UIScreen.mainScreen.bounds;
     // Last resort: a plausible phone viewport, so shreddit still picks its mobile
     // breakpoint rather than hydrating against a zero-sized layout.
@@ -150,10 +166,38 @@ void ApolloScrapeWebViewCreate(WKWebViewConfiguration *config, void (^ready)(WKW
             [cfg.userContentController addContentRuleList:sBlocker];
         }
         WKWebView *web = [[WKWebView alloc] initWithFrame:ApolloScrapeWebViewFrame() configuration:cfg];
-        // Belt and braces only — with no window these have nothing to act on. They
-        // matter if someone ever re-attaches one of these views by accident.
+        // Invisible and untouchable to the user, but attached — an unparented web
+        // view reports document.visibilityState == "hidden", which Reddit's
+        // reCAPTCHA interstitial treats as a bot and never clears. The rule-list
+        // blocker (no media can load) is what keeps #902 fixed with the view in
+        // the window.
         web.alpha = 0.011;
         web.userInteractionEnabled = NO;
+        web.customUserAgent = ApolloScrapeSafariUserAgent();
+        UIWindow *win = ApolloScrapeKeyWindow();
+        if (win) [win insertSubview:web atIndex:0];
         ready(web);
     });
+}
+
+void ApolloScrapeWebViewDestroy(WKWebView *web) {
+    if (!web) return;
+    web.navigationDelegate = nil;
+    [web stopLoading];
+    [web removeFromSuperview];
+}
+
+WKWebsiteDataStore *ApolloScrapeWebViewSharedDataStore(void) {
+    static WKWebsiteDataStore *store; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if (@available(iOS 17.0, *)) {
+            // Fixed identifier → the same on-disk store every launch. Cookies that
+            // already passed Reddit's checks keep future scrapes unchallenged,
+            // instead of every launch starting cookie-less at maximum suspicion.
+            NSUUID *ident = [[NSUUID alloc] initWithUUIDString:@"C4A9B7D2-3E61-4F0A-9B5C-8D2F7E1A6035"];
+            if (ident) store = [WKWebsiteDataStore dataStoreForIdentifier:ident];
+        }
+        if (!store) store = [WKWebsiteDataStore nonPersistentDataStore];
+    });
+    return store;
 }
