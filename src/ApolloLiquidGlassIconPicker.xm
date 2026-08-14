@@ -2021,7 +2021,10 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
     if (gestureRecognizer != self.panGestureRecognizer) return YES;
     CGPoint velocity = [self.panGestureRecognizer velocityInView:self];
     if (fabs(velocity.x) < fabs(velocity.y)) return NO;
-    return fabs(velocity.x) > 0.0;
+    // A new touch that interrupts horizontal deceleration can initially report
+    // zero velocity. Keep that undecided touch with Spotlight instead of
+    // failing the pan and handing a rightward follow-up swipe to navigation.
+    return YES;
 }
 
 // Give a horizontal Spotlight drag priority over Apollo's full-width back
