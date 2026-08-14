@@ -29,6 +29,8 @@ _lg_load_alternate_icons() {
     local i=0 id
     while id=$(plutil -extract "icons.${i}.id" raw -o - "$_LG_ICONS_REGISTRY" 2>/dev/null); do
         echo "$id"
+        echo "${id}__apollo_light"
+        echo "${id}__apollo_dark"
         ((i++))
     done
 }
