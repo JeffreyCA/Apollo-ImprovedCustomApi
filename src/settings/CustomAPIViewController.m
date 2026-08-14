@@ -1322,21 +1322,22 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     ApolloSettingsRow *devvitPosts =
         [ApolloSettingsRow switchRowWithID:@"gen.devvitPosts"
-                                     title:@"Live Interactive Posts"
+                                     title:@"Live Match Threads & Games"
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf devvitPostsSwitchToggled:sender]; }];
 
     // Feed cards are the surface where the widget's cost multiplies — its own
-    // escape hatch, without losing the widget in comments.
+    // escape hatch, without losing the widget in comments. Sits directly
+    // under the master row, so the short title reads in context.
     ApolloSettingsRow *devvitFeedPosts =
         [ApolloSettingsRow switchRowWithID:@"gen.devvitFeedPosts"
-                                     title:@"Interactive Posts in Feed"
+                                     title:@"Show in Feed"
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf devvitFeedPostsSwitchToggled:sender]; }];
     devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list. Live Interactive Posts renders Reddit app-platform posts (match threads, games) as their real live widget instead of a placeholder, in comments and large-mode feed cards."
+                                            footer:@"Small tweaks for the post list. Live Match Threads & Games shows the real live widget for Reddit's interactive posts — match scores, predictions, brackets, and community games — instead of a placeholder. Always shown in comments; Show in Feed also puts it on large-mode feed cards."
                                               rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
