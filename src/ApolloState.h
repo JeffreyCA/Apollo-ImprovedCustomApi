@@ -27,6 +27,8 @@ extern BOOL sFeedGalleryCarousel;
 extern BOOL sSwipeUpForComments;
 // Default-on live interactive Devvit posts (embedded web widget).
 extern BOOL sDevvitInteractivePosts;
+// Sub-toggle: Devvit widgets in large-mode feed cards too (vs comments only).
+extern BOOL sDevvitFeedWidgets;
 extern NSInteger sPreferredGIFFallbackFormat;
 
 extern NSInteger sReadPostMaxCount;

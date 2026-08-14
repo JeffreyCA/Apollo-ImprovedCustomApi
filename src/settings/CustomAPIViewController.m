@@ -1326,9 +1326,18 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf devvitPostsSwitchToggled:sender]; }];
 
+    // Feed cards are the surface where the widget's cost multiplies — its own
+    // escape hatch, without losing the widget in comments.
+    ApolloSettingsRow *devvitFeedPosts =
+        [ApolloSettingsRow switchRowWithID:@"gen.devvitFeedPosts"
+                                     title:@"Interactive Posts in Feed"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf devvitFeedPostsSwitchToggled:sender]; }];
+    devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
+
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
                                             footer:@"Small tweaks for the post list. Live Interactive Posts renders Reddit app-platform posts (match threads, games) as their real live widget instead of a placeholder, in comments and large-mode feed cards."
-                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts ]];
+                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -3431,6 +3440,12 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)devvitPostsSwitchToggled:(UISwitch *)sender {
     sDevvitInteractivePosts = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sDevvitInteractivePosts forKey:UDKeyDevvitInteractivePosts];
+    [self visibilityDidChange];  // drives the "Interactive Posts in Feed" sub-row
+}
+
+- (void)devvitFeedPostsSwitchToggled:(UISwitch *)sender {
+    sDevvitFeedWidgets = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sDevvitFeedWidgets forKey:UDKeyDevvitFeedWidgets];
 }
 
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
