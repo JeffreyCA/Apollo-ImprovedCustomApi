@@ -14,18 +14,11 @@
       <stop offset="0.5" stop-color="#7C4DFF"/>
       <stop offset="1" stop-color="#FF4FD8"/>
     </linearGradient>
-    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="7" result="blur"/>
-      <feMerge>
-        <feMergeNode in="blur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
   </defs>
 
   <!-- Left mountain range -->
   <g stroke="url(#leftGlow)" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M0 785L112 650L187 706L302 470L381 590L468 395L558 570L666 710" stroke-width="8" filter="url(#softGlow)"/>
+    <path d="M0 785L112 650L187 706L302 470L381 590L468 395L558 570L666 710" stroke-width="8"/>
     <path d="M0 785L112 650L187 706L302 470L381 590L468 395L558 570L666 710" stroke-width="3"/>
 
     <g stroke-width="2.5" opacity="0.8">
@@ -47,7 +40,7 @@
 
   <!-- Right mountain range -->
   <g stroke="url(#rightGlow)" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M934 710L1042 566L1130 630L1221 418L1306 564L1398 482L1481 651L1600 785" stroke-width="8" filter="url(#softGlow)"/>
+    <path d="M934 710L1042 566L1130 630L1221 418L1306 564L1398 482L1481 651L1600 785" stroke-width="8"/>
     <path d="M934 710L1042 566L1130 630L1221 418L1306 564L1398 482L1481 651L1600 785" stroke-width="3"/>
 
     <g stroke-width="2.5" opacity="0.8">
