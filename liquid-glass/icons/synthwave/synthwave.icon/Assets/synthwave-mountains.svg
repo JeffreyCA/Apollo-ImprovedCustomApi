@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" fill="none">
+  <title>Synthwave Mountains with Open Center</title>
+  <desc>Neon wireframe mountains split into left and right ranges, leaving a large transparent opening in the center.</desc>
+
+  <defs>
+    <linearGradient id="leftGlow" x1="60" y1="350" x2="670" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF4FD8"/>
+      <stop offset="0.55" stop-color="#B83CFF"/>
+      <stop offset="1" stop-color="#5B2BFF"/>
+    </linearGradient>
+    <linearGradient id="rightGlow" x1="1540" y1="350" x2="930" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#25D9FF"/>
+      <stop offset="0.5" stop-color="#7C4DFF"/>
+      <stop offset="1" stop-color="#FF4FD8"/>
+    </linearGradient>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Left mountain range -->
+  <g stroke="url(#leftGlow)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M0 785L112 650L187 706L302 470L381 590L468 395L558 570L666 710" stroke-width="8" filter="url(#softGlow)"/>
+    <path d="M0 785L112 650L187 706L302 470L381 590L468 395L558 570L666 710" stroke-width="3"/>
+
+    <g stroke-width="2.5" opacity="0.8">
+      <path d="M0 785L112 650L96 785"/>
+      <path d="M112 650L187 706L160 785"/>
+      <path d="M187 706L302 470L282 785"/>
+      <path d="M302 470L381 590L362 785"/>
+      <path d="M381 590L468 395L449 785"/>
+      <path d="M468 395L558 570L538 785"/>
+      <path d="M558 570L666 710L625 785"/>
+      <path d="M0 785H625"/>
+      <path d="M52 722L160 785"/>
+      <path d="M187 706L362 785"/>
+      <path d="M241 597L449 785"/>
+      <path d="M381 590L538 785"/>
+      <path d="M424 488L625 785"/>
+    </g>
+  </g>
+
+  <!-- Right mountain range -->
+  <g stroke="url(#rightGlow)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M934 710L1042 566L1130 630L1221 418L1306 564L1398 482L1481 651L1600 785" stroke-width="8" filter="url(#softGlow)"/>
+    <path d="M934 710L1042 566L1130 630L1221 418L1306 564L1398 482L1481 651L1600 785" stroke-width="3"/>
+
+    <g stroke-width="2.5" opacity="0.8">
+      <path d="M934 710L1042 566L975 785"/>
+      <path d="M1042 566L1130 630L1081 785"/>
+      <path d="M1130 630L1221 418L1186 785"/>
+      <path d="M1221 418L1306 564L1288 785"/>
+      <path d="M1306 564L1398 482L1392 785"/>
+      <path d="M1398 482L1481 651L1496 785"/>
+      <path d="M1481 651L1600 785"/>
+      <path d="M975 785H1600"/>
+      <path d="M934 710L1081 785"/>
+      <path d="M1042 566L1186 785"/>
+      <path d="M1130 630L1288 785"/>
+      <path d="M1176 523L1392 785"/>
+      <path d="M1306 564L1496 785"/>
+      <path d="M1398 482L1600 785"/>
+    </g>
+  </g>
+</svg>
