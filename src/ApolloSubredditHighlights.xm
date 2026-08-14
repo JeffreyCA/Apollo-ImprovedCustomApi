@@ -1993,10 +1993,15 @@ static void ApolloHLApplyStickyCountToTable(UIViewController *vc, NSString *subr
     // only for the common 2-sticky feed. When N differs (a single sticky that lost its
     // breaker, or 3+ that kept an orphan), the already-measured separators are wrong and
     // Texture won't re-measure them via relayoutItems alone (it reuses the cached size),
-    // so reload to re-run the exact rule. N==2 needs nothing — the fallback already matched,
-    // so the common case never reloads (no flash).
-    if (stickyN.integerValue != 2 && [tableNode respondsToSelector:@selector(reloadData)]) {
-        ApolloLog(@"[Highlights] r/%@ sticky count N=%@ → reload to fix breaker", subreddit, stickyN);
+    // so reload to re-run the exact rule. On the FIRST publish (prev nil) N==2 needs
+    // nothing — the fallback already matched, so the common case never reloads (no
+    // flash). But when a previously-published N CHANGES (a stale disk-seeded count, or
+    // a mod pinning/unpinning while the feed is up), the separators measured under the
+    // OLD rule and must re-measure even when the new N is 2 — otherwise a doubled (or
+    // missing) breaker sticks until the reactive fallback pass happens to catch it.
+    BOOL needsReload = prev ? ![prev isEqualToNumber:stickyN] : (stickyN.integerValue != 2);
+    if (needsReload && [tableNode respondsToSelector:@selector(reloadData)]) {
+        ApolloLog(@"[Highlights] r/%@ sticky count N=%@ (was %@) → reload to fix breaker", subreddit, stickyN, prev ?: @"unknown");
         ((void (*)(id, SEL))objc_msgSend)(tableNode, @selector(reloadData));
     }
 }
