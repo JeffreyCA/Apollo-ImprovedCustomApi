@@ -75,6 +75,8 @@ static UIViewController *ApolloGateTopViewController(void) {
 
 // "/r/<sub>", "/r/<sub>/hot", "/r/<sub>/top.json", … -> lowercased sub name;
 // nil for anything else (home feed, search, comments, user pages).
+// Apollo asks RedditKit for `r/%@/%@.json` (Hopper: the listing format string at
+// 0x100a2c150), so both the bare and the .json form have to match here.
 static NSString *ApolloGateSubredditFromListingPath(NSString *path) {
     static NSRegularExpression *re;
     static dispatch_once_t once;
@@ -87,6 +89,35 @@ static NSString *ApolloGateSubredditFromListingPath(NSString *path) {
     NSTextCheckingResult *m = [re firstMatchInString:path options:0 range:NSMakeRange(0, path.length)];
     if (!m || m.numberOfRanges < 2) return nil;
     return [[path substringWithRange:[m rangeAtIndex:1]] lowercaseString];
+}
+
+// Only an unfiltered FIRST page may be read as the gate. Two ordinary requests
+// answer with an empty `children` array from a perfectly healthy subreddit, and
+// both were indistinguishable from the gate on the path alone:
+//
+//   • Pagination — the page after the last one (`after=t3_…`) is always empty.
+//     Reddit also caps a listing around 1000 items, so anyone who keeps
+//     scrolling reaches that empty page.
+//   • Time-windowed sorts — `top`/`controversial` carry `t=hour|day|week|…`,
+//     and a sub that simply had no posts in the window returns nothing. `t=all`
+//     is the whole history, so it stays eligible.
+//
+// Treating either as the gate would pop the explainer (and offer to create a
+// subreddit) over a normal empty page, so both are rejected here.
+static BOOL ApolloGateListingIsFirstUnfilteredPage(NSURL *url) {
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    for (NSURLQueryItem *item in components.queryItems) {
+        NSString *name = item.name.lowercaseString;
+        if (item.value.length == 0) continue;
+        if ([name isEqualToString:@"after"] || [name isEqualToString:@"before"] ||
+            [name isEqualToString:@"count"]) {
+            return NO;
+        }
+        if ([name isEqualToString:@"t"] && ![item.value.lowercaseString isEqualToString:@"all"]) {
+            return NO;
+        }
+    }
+    return YES;
 }
 
 #pragma mark - Subreddit creation
@@ -178,7 +209,7 @@ static void ApolloGatePromptCreateSubreddit(void) {
     NSString *prefill = suggestion.length > 0 ? [suggestion stringByAppendingString:@"_apollo"] : @"my_apollo_sub";
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Create Private Subreddit"
-                                                                   message:@"Pick a name (3–21 letters, numbers, or underscores). The subreddit will be private — nobody else can see it."
+                                                                   message:@"Pick a name (3–21 letters, numbers, or underscores). The subreddit will be private — nobody else can see it.\n\nReddit does not allow subreddits to be deleted, so this can't be undone and the name is taken for good."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
         field.text = prefill;
@@ -267,15 +298,17 @@ static void ApolloGateVerifyAndExplain(NSString *subreddit) {
     [session finishTasksAndInvalidate];
 }
 
-// Serializer-level sniff. Runs for every OAuth response, so bail cheaply:
-// host check, then path regex, then result shape.
+// Serializer-level sniff. Runs for every OAuth response on whatever thread
+// AFNetworking parsed it on, so bail cheapest-first: the once-per-launch flag,
+// then host, then the path regex, then the query, then the result shape. The
+// NSUserDefaults read comes last so the common case never pays for it.
 static void ApolloGateInspectResponse(NSURLResponse *response, id responseObject) {
     if (sGateSheetShownThisLaunch) return;
-    if (![[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNSFWGateExplainerEnabled]) return;
     NSURL *url = response.URL;
     if (![url.host.lowercaseString isEqualToString:@"oauth.reddit.com"]) return;
     NSString *subreddit = ApolloGateSubredditFromListingPath(url.path);
     if (subreddit.length == 0) return;
+    if (!ApolloGateListingIsFirstUnfilteredPage(url)) return;
 
     if (![responseObject isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *listing = (NSDictionary *)responseObject;
@@ -283,6 +316,11 @@ static void ApolloGateInspectResponse(NSURLResponse *response, id responseObject
     NSDictionary *data = [listing[@"data"] isKindOfClass:[NSDictionary class]] ? listing[@"data"] : nil;
     NSArray *children = [data[@"children"] isKindOfClass:[NSArray class]] ? data[@"children"] : nil;
     if (!children || children.count > 0) return;
+    // An `after` cursor on an empty page means Reddit still has more to give —
+    // a gated listing terminates instead of paging on.
+    if ([data[@"after"] isKindOfClass:[NSString class]] && [data[@"after"] length] > 0) return;
+
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNSFWGateExplainerEnabled]) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         // Keyless accounts route through cookies and never see the gate; a

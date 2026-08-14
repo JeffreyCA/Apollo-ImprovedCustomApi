@@ -298,6 +298,18 @@ static NSString *ApolloTagLiveActiveUsername(void) {
 
 static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh);
 
+// Set while the tweak itself writes noProfanity onto a user object, so the
+// setNoProfanity: capture hook ignores the echo — otherwise an override-forced
+// stamp records itself as a rank-1 "network" capture and pollutes the map with
+// a value the server never said.
+//
+// Thread-local on purpose: the stamps run on the main thread, but the hook it
+// guards fires on whatever thread Mantle parsed or unarchived the user on. A
+// process-wide flag would let a background capture that happens to land during
+// a main-thread stamp be discarded as an echo — the same reason
+// sTagUserDecodeDepth below is __thread.
+static __thread BOOL sTagStampingLiveUser = NO;
+
 // Writes a captured pref onto the LIVE currentUser object when it belongs to
 // the active account (#861). Apollo's NATIVE obscure decision reads
 // currentUser.noProfanity at cell-configure time, so capturing into the
@@ -309,12 +321,6 @@ static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh);
 //     authoritative capture re-corrects the live object.
 // KVC on the Mantle property, same pattern as the identity layer's username
 // backfill. Returns YES when the stored value actually changed.
-// Set (main thread) while the tweak itself writes noProfanity onto a user
-// object, so the setNoProfanity: capture hook ignores the echo — otherwise an
-// override-forced stamp records itself as a rank-1 "network" capture and
-// pollutes the map with a value the server never said.
-static BOOL sTagStampingLiveUser = NO;
-
 static BOOL ApolloTagStampNoProfanityOnLiveUser(NSString *username, BOOL value) {
     id client = ApolloActiveAccountClient();
     if (!client || ![client respondsToSelector:@selector(currentUser)]) return NO;
