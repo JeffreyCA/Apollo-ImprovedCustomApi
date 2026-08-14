@@ -99,6 +99,7 @@ static const LGIconRowEntry kLGGroupEntries_concepts[] = {
     { "bajader-aperture-science", "Aperture Science", "bajader" },
     { "bajader-apollos", "ApollOS", "bajader" },
     { "bajader-glitched", "Glitched", "bajader" },
+    { "bajader-rtr", "Right to Repair", "bajader" },
     { "bajader-sunset", "Sunset", "bajader" },
     { "paulo1manso-modern", "Modern", "paulo1manso" },
     { "paulo1manso-modern-alt", "Modern Alt", "paulo1manso" },
@@ -134,7 +135,7 @@ static const LGIconGroupDef kLGIconGroups[] = {
     { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 10, kLGGroupCover_original, 3 },
     { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", "jryng, IllIIllIllIllII", kLGGroupEntries_classics, 46, kLGGroupCover_classics, 3 },
     { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 11, kLGGroupCover_helios, 3 },
-    { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "bajader, paulo1manso, jryng", kLGGroupEntries_concepts, 8, kLGGroupCover_concepts, 3 },
+    { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "bajader, paulo1manso, jryng", kLGGroupEntries_concepts, 9, kLGGroupCover_concepts, 3 },
 };
 
 static const size_t kLGIconGroupCount = 4;
@@ -142,7 +143,7 @@ static const size_t kLGIconGroupCount = 4;
 static const LGIconRowEntry kLGFeaturedEntries[] = {
     { "halo-glass", "Halo Glass", "IllIIllIllIllII" },
     { "helios-pixel", "Pixels", "IllIIllIllIllII" },
-    { "bajader-aperture-science", "Aperture Science", "bajader" },
+    { "bajader-rtr", "Right to Repair", "bajader" },
     { "paulo1manso-modern", "Modern", "paulo1manso" },
     { "pride", "Pride", "IllIIllIllIllII" },
 };

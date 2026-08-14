@@ -1,6 +1,6 @@
 {
   "primaryIconID": "jryng",
-  "featured": ["halo-glass", "helios-pixel", "bajader-aperture-science", "paulo1manso-modern", "pride"],
+  "featured": ["halo-glass", "helios-pixel", "bajader-rtr", "paulo1manso-modern", "pride"],
   "groups": [
     {
       "id": "original", "title": "Original",
@@ -90,6 +90,7 @@
     { "id": "bajader-aperture-science", "displayName": "Aperture Science",    "designer": "bajader",         "group": "concepts" },
     { "id": "bajader-apollos",          "displayName": "ApollOS",             "designer": "bajader",         "group": "concepts" },
     { "id": "bajader-glitched",         "displayName": "Glitched",            "designer": "bajader",         "group": "concepts" },
+    { "id": "bajader-rtr",  "displayName": "Right to Repair",     "designer": "bajader",         "group": "concepts" },
     { "id": "bajader-sunset",           "displayName": "Sunset",              "designer": "bajader",         "group": "concepts" },
     { "id": "paulo1manso-modern",       "displayName": "Modern",              "designer": "paulo1manso",     "group": "concepts" },
     { "id": "paulo1manso-modern-alt",   "displayName": "Modern Alt",          "designer": "paulo1manso",     "group": "concepts" },
