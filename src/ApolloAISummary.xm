@@ -942,9 +942,14 @@ static NSString *ApolloAISummaryTextFromTruncatedJSON(NSString *text) {
         }];
     }
 
+    // Complete `"key": "value"` pairs — the cut landed after this field.
+    static NSString *const kSummaryKeys =
+        @"reddit_post_summary|post_summary|article_summary|link_summary|discussion_summary"
+        @"|summary|consensus|takeaway|conclusion|notable_disagreement|disagreement";
     NSError *regexError = nil;
     NSRegularExpression *scalarRegex = [NSRegularExpression
-        regularExpressionWithPattern:@"\\\"(?:reddit_post_summary|post_summary|article_summary|link_summary|discussion_summary|summary|consensus|takeaway|conclusion|notable_disagreement|disagreement)\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\""
+        regularExpressionWithPattern:[NSString stringWithFormat:
+            @"\\\"(?:%@)\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"", kSummaryKeys]
                              options:0
                                error:&regexError];
     if (!regexError) {
@@ -956,6 +961,34 @@ static NSString *ApolloAISummaryTextFromTruncatedJSON(NSString *text) {
             NSString *decoded = ApolloAIDecodeJSONStringFragment([text substringWithRange:[match rangeAtIndex:1]]);
             ApolloAIAppendGeneratedValue(decoded, parts, seen);
         }];
+    }
+    if (parts.count > 0) return [parts componentsJoinedByString:@" "];
+
+    // Nothing complete. The likeliest reason is that the cut landed INSIDE the
+    // summary value itself: Apollo's maximumResponseTokens are tight (110 for a
+    // Balanced comment summary) and a JSON envelope spends a chunk of that
+    // budget on syntax before the prose even starts, so generation stops
+    // mid-sentence with no closing quote. Recover the unterminated tail — a
+    // summary cut mid-sentence is what a token-capped PLAIN response gives the
+    // user today, so it is the consistent outcome, and it beats the "The model
+    // returned an empty summary." error the whole response would otherwise
+    // become.
+    NSRegularExpression *tailRegex = [NSRegularExpression
+        regularExpressionWithPattern:[NSString stringWithFormat:
+            // The trailing \\? lets the cut land on a lone backslash — half an
+            // escape sequence — without failing the whole match.
+            @"\\\"(?:%@)\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\\?$", kSummaryKeys]
+                             options:0
+                               error:NULL];
+    NSTextCheckingResult *tail = [tailRegex firstMatchInString:text options:0
+                                                         range:NSMakeRange(0, text.length)];
+    if (tail && tail.numberOfRanges >= 2) {
+        NSString *fragment = [text substringWithRange:[tail rangeAtIndex:1]];
+        // A trailing lone backslash is half an escape sequence; JSON-decoding
+        // it fails, so drop it before decoding.
+        while ([fragment hasSuffix:@"\\"]) fragment = [fragment substringToIndex:fragment.length - 1];
+        NSString *decoded = ApolloAIDecodeJSONStringFragment(fragment);
+        ApolloAIAppendGeneratedValue(decoded, parts, seen);
     }
     return parts.count > 0 ? [parts componentsJoinedByString:@" "] : nil;
 }
