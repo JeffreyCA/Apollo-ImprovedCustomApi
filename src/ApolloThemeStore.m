@@ -866,7 +866,17 @@ static const NSInteger kUnexplainedDeathTripCount = 3;
         // the stable point. That alone is NOT proof of a theme crash: a user
         // force-quit, a prewarmed process iOS discarded, and jetsam all look
         // identical from here (#916). Corroborate before tripping.
-        BOOL crashed = [ApolloCrashManager sharedManager].crashedLastLaunch;
+        //
+        // ORDERING DEPENDENCY: crashedLastLaunch is only meaningful if the
+        // crash recorder is already installed, which happens in Tweak.xm's
+        // %ctor — and that runs before this one ONLY because Tweak.xm precedes
+        // ApolloThemeRuntime.xm in the Makefile's ApolloReborn_FILES (dyld
+        // fires constructors in link order). Reordering that list would
+        // silently degrade real theme crashes from first-strike to 3-strike
+        // detection; the recorder-down log below is the tripwire for that.
+        ApolloCrashManager *recorder = [ApolloCrashManager sharedManager];
+        BOOL recorderUp = recorder.installed;
+        BOOL crashed = recorder.crashedLastLaunch;
         BOOL prevRanRunLoop = [g boolForKey:kLaunchRunLoopKey];
         BOOL prevPrewarmed = [g boolForKey:kLaunchPrewarmKey];
         if (crashed) {
@@ -887,13 +897,19 @@ static const NSInteger kUnexplainedDeathTripCount = 3;
             // few, but a streak with no stable launch in between still trips.
             NSInteger count = [g integerForKey:kCrashCountKey] + 1;
             [g setInteger:count forKey:kCrashCountKey];
+            // Say WHY there was no crash on record: "recorder not installed"
+            // here means capture is user-disabled — or the ctor ordering above
+            // broke, which this line is the only visible symptom of.
+            const char *why = recorderUp ? "no crash was recorded"
+                                         : "crash recorder not installed (capture disabled, or theme ctor ran first)";
             if (count >= kUnexplainedDeathTripCount) {
-                ApolloLog(@"ThemeStore: %ld consecutive theme launches died before the stable point — tripping kill switch", (long)count);
+                ApolloLog(@"ThemeStore: %ld consecutive theme launches died before the stable point (%s) — tripping kill switch",
+                          (long)count, why);
                 [g setBool:YES forKey:kApolloRebornThemeRuntimeDisabledKey];
                 themeActive = NO;
             } else {
-                ApolloLog(@"ThemeStore: previous theme launch did not complete but no crash was recorded (strike %ld/%ld) — keeping theme enabled",
-                          (long)count, (long)kUnexplainedDeathTripCount);
+                ApolloLog(@"ThemeStore: previous theme launch did not complete but %s (strike %ld/%ld) — keeping theme enabled",
+                          why, (long)count, (long)kUnexplainedDeathTripCount);
             }
         }
         // On trip, leave the selection pointer intact. The crash flag alone
@@ -920,6 +936,9 @@ static const NSInteger kUnexplainedDeathTripCount = 3;
     // launching. A prewarmed process iOS discards never gets here, which is
     // what lets beginLaunchAttempt tell those deaths apart.
     NSUserDefaults *g = GroupDefaults();
+    // Only pay the synchronous flush when this launch actually armed the
+    // marker — on theme-off launches the key is never read.
+    if ([g objectForKey:kLaunchStartedKey] == nil || [g boolForKey:kLaunchDoneKey]) return;
     [g setBool:YES forKey:kLaunchRunLoopKey];
     [g synchronize];
 }
