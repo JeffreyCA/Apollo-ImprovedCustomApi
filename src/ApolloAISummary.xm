@@ -960,14 +960,46 @@ static NSString *ApolloAISummaryTextFromTruncatedJSON(NSString *text) {
     return parts.count > 0 ? [parts componentsJoinedByString:@" "] : nil;
 }
 
+// How much of a response the structure test below reads. An envelope announces
+// itself in its first field, and this runs on every streamed snapshot as well as
+// on the final text, so the scan is capped rather than growing with the response.
+static const NSUInteger kApolloAIStructureScanLimit = 512;
+
+// Does this response look like the model's structured/tool protocol rather than
+// a summary?
+//
+// A leading bracket is deliberately NOT sufficient. Reddit prose opens with one
+// constantly — "[Serious] the thread mostly argues…", "[OC] …" — and treating
+// that as protocol output is expensive to get wrong: the Swift side burns a
+// whole retry generation on it, then the normalizer below finds no known JSON
+// fields and returns nil, so a perfectly good summary reaches the user as "The
+// model returned an empty summary." A bracket therefore only counts when an
+// actual JSON key (`"name":`) sits beside it, which no summary sentence writes.
+//
+// Truncated envelopes still have to be caught here — a response cut off
+// mid-object never parses as JSON — which is why this is a shape test and not
+// simply NSJSONSerialization.
 static BOOL ApolloAIGeneratedResponseLooksStructured(NSString *summary) {
-    NSString *trimmed = [summary stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (trimmed.length == 0) return NO;
-    NSString *lower = trimmed.lowercaseString;
-    return [trimmed hasPrefix:@"{"] || [trimmed hasPrefix:@"["] ||
-        [lower hasPrefix:@"```json"] || [lower hasPrefix:@"toolcall:"] ||
+    NSString *head = summary.length > kApolloAIStructureScanLimit
+        ? [summary substringToIndex:kApolloAIStructureScanLimit] : summary;
+    head = [head stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (head.length == 0) return NO;
+    NSString *lower = head.lowercaseString;
+    // Markers no natural-language summary produces.
+    if ([lower hasPrefix:@"```json"] || [lower hasPrefix:@"toolcall:"] ||
         [lower hasPrefix:@"tool.call:"] || [lower containsString:@"\"_tool_calls\""] ||
-        [lower containsString:@"\"response_format\""];
+        [lower containsString:@"\"response_format\""]) {
+        return YES;
+    }
+    if (![head hasPrefix:@"{"] && ![head hasPrefix:@"["]) return NO;
+
+    static NSRegularExpression *keyRegex;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keyRegex = [NSRegularExpression regularExpressionWithPattern:@"\"[A-Za-z_][A-Za-z0-9_ ]*\"\\s*:"
+                                                             options:0 error:NULL];
+    });
+    return [keyRegex firstMatchInString:head options:0 range:NSMakeRange(0, head.length)] != nil;
 }
 
 static NSString *ApolloAINormalizeGeneratedSummary(NSString *summary) {

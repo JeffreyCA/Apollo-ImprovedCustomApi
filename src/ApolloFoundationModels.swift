@@ -331,15 +331,39 @@ public final class ApolloFoundationModels: NSObject {
         """
     }
 
+    /// Does this response look like the model's structured/tool protocol rather
+    /// than a summary?
+    ///
+    /// A leading bracket is deliberately NOT sufficient. Reddit prose opens with
+    /// one all the time — "[Serious] the thread mostly argues…", "[OC] …" — and
+    /// classifying that as protocol output costs a whole wasted retry and then
+    /// normalizes to nil, so a perfectly good summary surfaces as "The model
+    /// returned an empty summary." A bracket only counts when an actual JSON key
+    /// (`"name":`) sits next to it, which no summary sentence produces.
+    ///
+    /// Everything examined is bounded to the head of the response, so this stays
+    /// cheap enough to run on every streamed snapshot — the accumulating text
+    /// would otherwise make it quadratic over a generation.
     private static func looksLikeStructuredSummary(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        let lower = trimmed.lowercased()
-        return trimmed.hasPrefix("{") || trimmed.hasPrefix("[") ||
-            lower.hasPrefix("```json") || lower.hasPrefix("toolcall:") ||
-            lower.hasPrefix("tool.call:") || lower.contains("\"_tool_calls\"") ||
-            lower.contains("\"response_format\"")
+        let head = String(text.prefix(headScanLimit)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = head.first else { return false }
+        let lower = head.lowercased()
+        // Markers no natural-language summary produces.
+        if lower.hasPrefix("```json") || lower.hasPrefix("toolcall:") || lower.hasPrefix("tool.call:") {
+            return true
+        }
+        if lower.contains("\"_tool_calls\"") || lower.contains("\"response_format\"") {
+            return true
+        }
+        guard first == "{" || first == "[" else { return false }
+        return head.range(of: jsonKeyPattern, options: .regularExpression) != nil
     }
+
+    /// How much of a response the structure test reads. Any envelope announces
+    /// itself in its first field; capping the scan keeps the per-snapshot cost
+    /// constant while the response grows.
+    private static let headScanLimit = 512
+    private static let jsonKeyPattern = #""[A-Za-z_][A-Za-z0-9_ ]*"\s*:"#
 
     /// Pre-build (and prewarm) the plain no-instructions session the next
     /// `plainCompletion` for `identifier` will use. Session construction +
