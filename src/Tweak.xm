@@ -3422,7 +3422,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyFeedGalleryCarousel: @YES,
                                     UDKeySwipeUpForComments: @YES,
                                     UDKeySportsClipsInlineVideo: @YES,
-                                    UDKeyDevvitInteractivePosts: @YES,
+                                    UDKeyDevvitInteractivePosts: @NO,
                                     UDKeyDevvitFeedWidgets: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0,

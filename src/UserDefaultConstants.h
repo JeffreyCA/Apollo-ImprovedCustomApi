@@ -515,7 +515,9 @@ static NSString *const UDKeySportsClipsInlineVideo = @"SportsClipsInlineVideo";
 
 // Live interactive Devvit ("Developer Platform") posts — match threads, games
 // — render their real web widget inline (comments header + large-mode feed
-// cards) instead of the "not supported on old Reddit" fallback text. Default ON.
+// cards) instead of the "not supported on old Reddit" fallback text.
+// Default OFF (opt-in): each widget is a full embedded shreddit page, so the
+// cost is real and users choose to pay it.
 static NSString *const UDKeyDevvitInteractivePosts = @"DevvitInteractivePosts";
 // Sub-toggle: also render the widget in large-mode FEED cards (the costly
 // surface — comments is one widget at a time by construction). Default ON;
