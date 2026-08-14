@@ -1,9 +1,11 @@
 // Deleted-comments shortcut in the comments "..." menu + passive per-thread mode.
 //
 // Adds a "Show Deleted Comments" / "Hide Deleted Comments" item to the comments
-// view's overflow menu. Liquid Glass uses the native UIMenu assembled by
-// ApolloNativeActionMenus.xm; Standard/pre-Liquid-Glass builds append an
-// equivalent row to Apollo's legacy ActionController table.
+// view's overflow menu. Row rendering on both the Liquid Glass UIMenu and the
+// legacy ActionController sheet is owned entirely by ApolloActionMenu.{h,xm} —
+// see that header for the single-owner rationale. This file supplies the
+// feature-specific parts: WHICH sheet is "the comments' ... menu" (arming
+// below), the title/icon toggling between Show and Hide, and what a tap does.
 //
 // Two behaviors, decided by the "Passive Deleted Comments" setting:
 //   - Passive OFF: the item is a plain shortcut for the global Show Deleted
@@ -21,10 +23,10 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+#import "ApolloActionMenu.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "ApolloDeletedCommentsData.h"
-#import "ApolloThemeRuntime.h"
 #import "UserDefaultConstants.h"
 
 static NSString *const kApolloDCMenuShowTitle = @"Show Deleted Comments";
@@ -32,9 +34,9 @@ static NSString *const kApolloDCMenuHideTitle = @"Hide Deleted Comments";
 
 // The comments VC currently presenting its "..." menu. Armed in the tap hook
 // below; menu construction happens synchronously inside that tap (see
-// ApolloNativeActionMenus' Begin/EndCapture bracket), but a short grace window
-// keeps this robust if UIKit ever defers a runloop turn. The FIRST menu built
-// while armed consumes the arm (the ActionController gets tagged with the
+// ApolloActionMenu's per-controller `matches` memoization), but a short grace
+// window keeps this robust if UIKit ever defers a runloop turn. The FIRST menu
+// built while armed consumes the arm (the ActionController gets tagged with the
 // owning VC below), so a different menu opened moments later can never pick
 // up the item.
 static __weak id sApolloDCMenuArmedVC = nil;
@@ -44,8 +46,6 @@ static CFAbsoluteTime sApolloDCMenuArmedAt = 0;
 // hash table holding the owning CommentsViewController (a plain weak assoc
 // isn't possible with objc_setAssociatedObject).
 static char kApolloDCMenuOwnerVCKey;
-// Row count before our appended legacy ActionController row.
-static char kApolloDCMenuOrigRowCountKey;
 
 // linkFullName key -> weak set of CommentsViewController instances currently
 // showing that post's thread. Main-thread only. When the last live VC for an
@@ -70,8 +70,9 @@ static id ApolloDCMenuIvarObject(id object, const char *name) {
 }
 
 // Resolve and permanently tag the ActionController presenting the armed
-// comments menu. Both the Liquid Glass UIMenu builder and the legacy table
-// sheet use this same one-shot claim, whichever asks first.
+// comments menu. Both the ApolloActionMenu `matches` block and any later
+// re-ask (e.g. `title`, `perform`) use this same one-shot claim, whichever
+// asks first.
 static id ApolloDCMenuOwnerForController(id actionController) {
     if (!actionController) return nil;
     NSHashTable *holder = objc_getAssociatedObject(actionController, &kApolloDCMenuOwnerVCKey);
@@ -162,7 +163,7 @@ static void ApolloDCMenuRefreshComments(id vc) {
 }
 
 static void ApolloDCMenuPresentSlowdownWarning(id vc) {
-    // Give the context menu's dismissal animation a beat before presenting.
+    // Give the context menu's / sheet's dismissal animation a beat before presenting.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIViewController *host = (UIViewController *)vc;
         if (![host isKindOfClass:[UIViewController class]] || !host.viewLoaded || !host.view.window) return;
@@ -213,37 +214,28 @@ static void ApolloDCMenuHandleToggle(id vc, NSString *linkKey, BOOL wasEffective
     ApolloDCMenuRefreshComments(vc);
 }
 
-#pragma mark - Menu injection (called from ApolloNativeActionMenuBuildMenu)
+#pragma mark - Resolving whether/how the row applies
 
-void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController) {
-    (void)menuTitle;
-    if (!children || children.count == 0) return;
-
-    // Re-builds of an already-claimed "..." menu (the builder runs more than
-    // once per presentation) reuse the tag; otherwise the FIRST menu built
-    // while armed claims the armed VC and consumes the arm, so a different
-    // menu opened within the grace window can never pick up the item.
+// Resolves the owning comments VC, its per-thread link key, and whether
+// deleted-comment recovery is CURRENTLY effective for it. Returns NO when this
+// isn't the comments "..." menu, or (passive mode) when there's no post to key
+// a per-thread override on. Called fresh from `matches`, `title`, and `perform`
+// — never memoized beyond ApolloActionMenu's own once-per-controller `matches`
+// call, so a change in global/per-thread state between build and tap is always
+// picked up.
+static BOOL ApolloDCMenuResolveState(id actionController, id *outVC,
+                                     NSString **outLinkKey, BOOL *outEffective) {
     id vc = ApolloDCMenuOwnerForController(actionController);
-    if (!vc) return;
-
+    if (!vc) return NO;
     NSString *linkKey = ApolloDCMenuLinkKeyForVC(vc);
     BOOL passive = sPassiveDeletedComments && !sShowDeletedComments;
-    // Per-thread toggling needs a post to key the override on.
-    if (passive && linkKey.length == 0) return;
-
-    BOOL effective = sShowDeletedComments || (linkKey.length > 0 && ApolloDeletedCommentsHasThreadOverride(linkKey));
-    NSString *title = effective ? kApolloDCMenuHideTitle : kApolloDCMenuShowTitle;
-    UIImage *image = [UIImage systemImageNamed:(effective ? @"eye.slash" : @"eye")];
-
-    __weak id weakVC = vc;
-    UIAction *toggle = [UIAction actionWithTitle:title
-                                           image:image
-                                      identifier:nil
-                                         handler:^(__unused __kindof UIAction *action) {
-        ApolloDCMenuHandleToggle(weakVC, linkKey, effective);
-    }];
-    [children addObject:toggle];
-    ApolloLog(@"[DeletedCommentsMenu] Injected '%@' (passive=%d, link=%@)", title, passive, linkKey ?: @"-");
+    if (passive && linkKey.length == 0) return NO;
+    BOOL effective = sShowDeletedComments ||
+        (linkKey.length > 0 && ApolloDeletedCommentsHasThreadOverride(linkKey));
+    if (outVC) *outVC = vc;
+    if (outLinkKey) *outLinkKey = linkKey;
+    if (outEffective) *outEffective = effective;
+    return YES;
 }
 
 #pragma mark - CommentsViewController lifecycle
@@ -254,7 +246,7 @@ void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSStr
     sApolloDCMenuArmedVC = self;
     sApolloDCMenuArmedAt = CFAbsoluteTimeGetCurrent();
     %orig;
-    // The arm is consumed by the first menu build (see the injection function);
+    // The arm is consumed by the first menu build (see ApolloDCMenuOwnerForController);
     // the timestamp grace window expires it if no menu was built at all.
 }
 
@@ -287,238 +279,41 @@ void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSStr
 
 %end
 
-#pragma mark - Legacy ActionController row (Standard / pre-Liquid-Glass)
+#pragma mark - Registration
 
-// Apollo's non-Liquid-Glass overflow menu is an ActionController-backed table
-// sheet. Keep every native row at its original index and append ours: Apollo's
-// own cell builder dequeues with the supplied index path and will assert if
-// native rows are shifted.
-static NSInteger ApolloDCMenuOriginalRowCount(id actionController) {
-    NSNumber *stored = objc_getAssociatedObject(actionController, &kApolloDCMenuOrigRowCountKey);
-    return stored ? stored.integerValue : -1;
-}
+%ctor {
+    %init;
 
-static BOOL ApolloDCMenuResolveState(id actionController, id *outVC,
-                                     NSString **outLinkKey, BOOL *outEffective) {
-    id vc = ApolloDCMenuOwnerForController(actionController);
-    if (!vc) return NO;
-    NSString *linkKey = ApolloDCMenuLinkKeyForVC(vc);
-    BOOL passive = sPassiveDeletedComments && !sShowDeletedComments;
-    if (passive && linkKey.length == 0) return NO;
-    BOOL effective = sShowDeletedComments ||
-        (linkKey.length > 0 && ApolloDeletedCommentsHasThreadOverride(linkKey));
-    if (outVC) *outVC = vc;
-    if (outLinkKey) *outLinkKey = linkKey;
-    if (outEffective) *outEffective = effective;
-    return YES;
-}
+    ApolloActionMenuSpec *spec = [ApolloActionMenuSpec new];
+    spec.identifier = @"DeletedComments";
+    spec.placement = ApolloActionMenuPlacementAppend;
+    spec.inlineSection = NO;
+    spec.legacyDismissesSheet = YES;
 
-static BOOL ApolloDCMenuIsLegacyRow(id actionController, NSIndexPath *indexPath) {
-    NSInteger originalCount = ApolloDCMenuOriginalRowCount(actionController);
-    return originalCount >= 0 && indexPath.section == 0 && indexPath.row == originalCount;
-}
-
-static CGFloat ApolloDCMenuLegacyRowHeight(id actionController) {
-    id tableView = ApolloDCMenuIvarObject(actionController, "tableView");
-    if (![tableView isKindOfClass:[UITableView class]] ||
-        ![actionController respondsToSelector:@selector(tableView:heightForRowAtIndexPath:)]) {
-        return 0.0;
-    }
-    @try {
-        return [(id<UITableViewDelegate>)actionController
-                    tableView:(UITableView *)tableView
-                    heightForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
-    } @catch (__unused NSException *exception) {
-        return 0.0;
-    }
-}
-
-// Apollo's sheet rows use custom labels/icons rather than UITableViewCell's
-// stock textLabel geometry. Capture row 0 and mirror its presentation so the
-// appended row remains readable under stock and custom themes.
-static UIView *ApolloDCMenuFirstSubviewOfClass(UIView *root, Class cls, BOOL requireText) {
-    for (UIView *subview in root.subviews) {
-        if ([subview isKindOfClass:cls]) {
-            if (!requireText) return subview;
-            if ([subview isKindOfClass:[UILabel class]] &&
-                ((UILabel *)subview).text.length > 0) {
-                return subview;
-            }
-        }
-        UIView *nested = ApolloDCMenuFirstSubviewOfClass(subview, cls, requireText);
-        if (nested) return nested;
-    }
-    return nil;
-}
-
-static UIColor *sApolloDCMenuTitleColor = nil;
-static UIFont *sApolloDCMenuTitleFont = nil;
-static NSTextAlignment sApolloDCMenuTitleAlignment = NSTextAlignmentLeft;
-static CGRect sApolloDCMenuTitleFrame = CGRectZero;
-static CGRect sApolloDCMenuIconFrame = CGRectZero;
-static UIColor *sApolloDCMenuIconTint = nil;
-
-static void ApolloDCMenuCaptureLegacyRowStyle(UITableViewCell *cell) {
-    if (![cell isKindOfClass:[UITableViewCell class]]) return;
-    [cell layoutIfNeeded];
-    UILabel *label =
-        (UILabel *)ApolloDCMenuFirstSubviewOfClass(cell, [UILabel class], YES);
-    if (!label) return;
-    sApolloDCMenuTitleColor = label.textColor;
-    sApolloDCMenuTitleFont = label.font;
-    sApolloDCMenuTitleAlignment = label.textAlignment;
-    sApolloDCMenuTitleFrame = [label convertRect:label.bounds toView:cell];
-
-    UIImageView *icon =
-        (UIImageView *)ApolloDCMenuFirstSubviewOfClass(cell, [UIImageView class], NO);
-    if (icon.bounds.size.width > 1.0) {
-        sApolloDCMenuIconFrame = [icon convertRect:icon.bounds toView:cell];
-        sApolloDCMenuIconTint = icon.tintColor;
-    }
-}
-
-@interface ApolloDeletedCommentsMenuRowCell : UITableViewCell
-@property (nonatomic, strong) UILabel *apolloTitleLabel;
-@property (nonatomic, strong) UIImageView *apolloIconView;
-- (void)configureEffective:(BOOL)effective;
-@end
-
-@implementation ApolloDeletedCommentsMenuRowCell
-
-- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
-    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
-    if (self) {
-        self.backgroundColor = UIColor.clearColor;
-        self.contentView.backgroundColor = UIColor.clearColor;
-        UIColor *accent =
-            sApolloDCMenuTitleColor ?: ApolloThemeAccentColor() ?: UIColor.labelColor;
-
-        _apolloIconView = [[UIImageView alloc] initWithFrame:CGRectZero];
-        _apolloIconView.contentMode = UIViewContentModeScaleAspectFit;
-        _apolloIconView.tintColor = sApolloDCMenuIconTint ?: accent;
-        [self.contentView addSubview:_apolloIconView];
-
-        _apolloTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        _apolloTitleLabel.textColor = accent;
-        _apolloTitleLabel.font = sApolloDCMenuTitleFont ?: [UIFont systemFontOfSize:17.0];
-        _apolloTitleLabel.textAlignment = sApolloDCMenuTitleAlignment;
-        [self.contentView addSubview:_apolloTitleLabel];
-    }
-    return self;
-}
-
-- (void)configureEffective:(BOOL)effective {
-    self.apolloTitleLabel.text =
-        effective ? kApolloDCMenuHideTitle : kApolloDCMenuShowTitle;
-    self.apolloIconView.image =
-        [UIImage systemImageNamed:(effective ? @"eye.slash" : @"eye")];
-    self.accessibilityLabel = self.apolloTitleLabel.text;
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGRect bounds = self.contentView.bounds;
-    if (!CGRectIsEmpty(sApolloDCMenuIconFrame)) {
-        CGRect iconFrame = sApolloDCMenuIconFrame;
-        iconFrame.origin.y = (bounds.size.height - iconFrame.size.height) / 2.0;
-        self.apolloIconView.frame = iconFrame;
-        self.apolloIconView.hidden = NO;
-    } else {
-        self.apolloIconView.hidden = YES;
-    }
-
-    CGFloat left = CGRectIsEmpty(sApolloDCMenuTitleFrame)
-        ? 16.0
-        : CGRectGetMinX(sApolloDCMenuTitleFrame);
-    CGFloat height = CGRectIsEmpty(sApolloDCMenuTitleFrame)
-        ? 22.0
-        : CGRectGetHeight(sApolloDCMenuTitleFrame);
-    self.apolloTitleLabel.frame =
-        CGRectMake(left, (bounds.size.height - height) / 2.0,
-                   MAX(0.0, bounds.size.width - left - 16.0), height);
-}
-
-@end
-
-%hook _TtC6Apollo16ActionController
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    NSInteger count = %orig;
-    if (section != 0 || !ApolloDCMenuResolveState(self, NULL, NULL, NULL)) return count;
-    objc_setAssociatedObject(self, &kApolloDCMenuOrigRowCountKey,
-                             @(count), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return count + 1;
-}
-
-- (UITableViewCell *)tableView:(UITableView *)tableView
-         cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!ApolloDCMenuIsLegacyRow(self, indexPath)) {
-        UITableViewCell *cell = %orig;
-        if (ApolloDCMenuOriginalRowCount(self) >= 0 &&
-            indexPath.section == 0 && indexPath.row == 0) {
-            ApolloDCMenuCaptureLegacyRowStyle(cell);
-        }
-        return cell;
-    }
-
-    BOOL effective = NO;
-    BOOL hasOwner = ApolloDCMenuResolveState(self, NULL, NULL, &effective);
-    ApolloDeletedCommentsMenuRowCell *cell =
-        [[ApolloDeletedCommentsMenuRowCell alloc]
-            initWithStyle:UITableViewCellStyleDefault
-          reuseIdentifier:@"ApolloDeletedCommentsMenuRow"];
-    [cell configureEffective:effective];
-    // UITableView requires a non-nil cell for every row previously reported by
-    // the data source. The presenting comments controller should stay alive for
-    // the sheet's lifetime, but if UIKit asks during teardown after that weak
-    // owner disappears, return an inert row rather than violating the contract.
-    if (!hasOwner) {
-        cell.userInteractionEnabled = NO;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    }
-    return cell;
-}
-
-- (CGFloat)tableView:(UITableView *)tableView
- heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!ApolloDCMenuIsLegacyRow(self, indexPath)) return %orig;
-    return %orig(tableView, [NSIndexPath indexPathForRow:0 inSection:indexPath.section]);
-}
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!ApolloDCMenuIsLegacyRow(self, indexPath)) {
-        %orig;
-        return;
-    }
-
-    id vc = nil;
-    NSString *linkKey = nil;
-    BOOL effective = NO;
-    if (!ApolloDCMenuResolveState(self, &vc, &linkKey, &effective)) return;
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    [(UIViewController *)self dismissViewControllerAnimated:YES completion:^{
+    spec.matches = ^BOOL(id actionController, NSString *menuTitle) {
+        (void)menuTitle;
+        return ApolloDCMenuResolveState(actionController, NULL, NULL, NULL);
+    };
+    spec.title = ^NSString *(id actionController, UITableViewCell *donor) {
+        (void)donor;
+        BOOL effective = NO;
+        if (!ApolloDCMenuResolveState(actionController, NULL, NULL, &effective)) return nil;
+        return effective ? kApolloDCMenuHideTitle : kApolloDCMenuShowTitle;
+    };
+    spec.image = ^UIImage *(id actionController, UITableViewCell *donor) {
+        (void)donor;
+        BOOL effective = NO;
+        if (!ApolloDCMenuResolveState(actionController, NULL, NULL, &effective)) return nil;
+        return [UIImage systemImageNamed:(effective ? @"eye.slash" : @"eye")];
+    };
+    spec.perform = ^(id actionController) {
+        id vc = nil;
+        NSString *linkKey = nil;
+        BOOL effective = NO;
+        if (!ApolloDCMenuResolveState(actionController, &vc, &linkKey, &effective)) return;
         ApolloDCMenuHandleToggle(vc, linkKey, effective);
-    }];
+    };
+
+    ApolloActionMenuRegister(spec);
+    ApolloLog(@"[DeletedCommentsMenu] Deleted-comments menu spec registered");
 }
-
-%end
-
-// Apollo sizes the sheet from its original data-source row count. Grow only
-// the presentation frame so the appended row is reachable above Cancel.
-%hook _TtC6Apollo38ActionControllerPresentationController
-
-- (CGRect)frameOfPresentedViewInContainerView {
-    CGRect frame = %orig;
-    UIViewController *presented =
-        [(UIPresentationController *)self presentedViewController];
-    if (frame.size.height <= 0.0 || ApolloDCMenuOriginalRowCount(presented) < 0) {
-        return frame;
-    }
-    CGFloat rowHeight = ApolloDCMenuLegacyRowHeight(presented);
-    if (rowHeight <= 0.0) return frame;
-    frame.origin.y -= rowHeight;
-    frame.size.height += rowHeight;
-    return frame;
-}
-
-%end

@@ -1,4 +1,5 @@
 #import "ApolloCommon.h"
+#import "ApolloScrapeWebView.h"
 #import "ApolloOwnCommentFlair.h"
 #import "ApolloState.h"
 #import "ApolloUserFlair.h"
@@ -802,15 +803,8 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
 
 - (void)start {
     self.polls = 0;
-    UIWindow *window = nil;
-    for (UIWindow *candidate in ApolloAllWindows()) {
-        if (candidate.isKeyWindow) { window = candidate; break; }
-    }
-    if (!window) window = ApolloAllWindows().firstObject;
-    if (!window) {
-        [self finishWithItems:nil status:0 responseLength:0 reason:@"no app window"];
-        return;
-    }
+    // No window lookup: the scrape web view is deliberately never added to one
+    // (ApolloScrapeWebView.h explains why), and it sizes its own viewport.
     WKWebViewConfiguration *config = [WKWebViewConfiguration new];
     // Keep this account's cookies isolated from other API-free accounts and
     // from any unrelated Reddit login left in WebKit's shared browser store.
@@ -818,12 +812,6 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
     NSString *hook = @"(function(){var f=window.fetch;if(!f)return;window.fetch=function(){var a=arguments,u=String(a[0]&&a[0].url||a[0]),match=/\\/svc\\/shreddit\\/[^/]+\\/emojis\\/USER_FLAIR/i.test(u);var p=f.apply(this,a);if(match){p.then(function(r){r.clone().text().then(function(t){try{var d=new DOMParser().parseFromString(t,'text/html'),items=Array.from(d.querySelectorAll('li[data-token][data-url]')).map(function(n){var name=n.getAttribute('data-token')||'',url=n.getAttribute('data-url')||'';if(name.charAt(0)===':')name=name.slice(1);if(name.charAt(name.length-1)===':')name=name.slice(0,-1);return{name:name,url:url};}).filter(function(x){return x.name&&x.url;});window.__apolloEmojiCatalog={state:'done',status:r.status,length:t.length,items:items};}catch(e){window.__apolloEmojiCatalog={state:'error',error:String(e)};}}).catch(function(e){window.__apolloEmojiCatalog={state:'error',error:String(e)};});}).catch(function(e){window.__apolloEmojiCatalog={state:'error',error:String(e)};});}return p;};})();";
     WKUserScript *script = [[WKUserScript alloc] initWithSource:hook injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
     [config.userContentController addUserScript:script];
-    self.web = [[WKWebView alloc] initWithFrame:window.bounds configuration:config];
-    self.web.navigationDelegate = self;
-    self.web.alpha = 0.011;
-    self.web.userInteractionEnabled = NO;
-    self.web.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
-    [window insertSubview:self.web atIndex:0];
     ApolloWebSessionEntry *session = ApolloActiveWebSession();
     NSArray<NSHTTPCookie *> *cookies = ApolloUserFlairCookiesFromHeader(session.cookieHeader);
     if (cookies.count == 0) {
@@ -844,8 +832,16 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
     dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
         typeof(self) self = weakSelf;
         if (!self || self.finished) return;
-        [self.web loadRequest:request];
-        [self pollAfter:2.5];
+        ApolloScrapeWebViewCreate(config, ^(WKWebView *web) {
+            // Blocker resolution is one more async hop — re-check liveness.
+            typeof(self) ss = weakSelf;
+            if (!ss || ss.finished) return;
+            ss.web = web;
+            web.navigationDelegate = ss;
+            web.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+            [web loadRequest:request];
+            [ss pollAfter:2.5];
+        });
     });
 }
 
@@ -926,7 +922,6 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
 
     self.web.navigationDelegate = nil;
     [self.web stopLoading];
-    [self.web removeFromSuperview];
     self.web = nil;
     NSMutableDictionary *fetches = ApolloUserFlairWebEmojiFetches();
     @synchronized (fetches) {
