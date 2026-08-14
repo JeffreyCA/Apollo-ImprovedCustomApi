@@ -125,9 +125,9 @@ static const char *const kLGGroupCover_helios[] = {
 };
 
 static const char *const kLGGroupCover_concepts[] = {
-    "bajader-glitched",
-    "bajader-aperture-science",
     "paulo1manso-modern",
+    "synthwave",
+    "bajader-rtr",
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
