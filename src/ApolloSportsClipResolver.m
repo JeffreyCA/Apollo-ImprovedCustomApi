@@ -21,8 +21,9 @@
 //     static HTML) and read the data-link="…" attribute of its <video> tag.
 //     The embed's poster="…" attribute disappeared ~2026-08; the poster now
 //     comes from the watch page's og:image (fetched only when the embed
-//     yields none — its /thumbnails/<unixts>_thumb.jpg name is NOT derivable
-//     from the data-link filename).
+//     yields none, in parallel with the mp4 probe and capped at 4s — its
+//     /thumbnails/<unixts>_thumb.jpg name is NOT derivable from the
+//     data-link filename).
 //   bangr.im — og:video = https://cdn.bangr.im/videos/<id>.mp4; predictable URL
 //     used as fallback if the page fetch fails. NOTE: site AND CDN return
 //     410 Gone as of 2026-07-16 (deliberate shutdown); entry kept in case the
@@ -227,22 +228,27 @@ static NSString *SCUserAgent(void) {
     return @"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 }
 
-static NSMutableURLRequest *SCRequest(NSURL *url, NSString *method) {
+static NSMutableURLRequest *SCRequest(NSURL *url, NSString *method, NSTimeInterval timeout) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                   timeoutInterval:12.0];
+                                                   timeoutInterval:timeout];
     req.HTTPMethod = method;
     [req setValue:SCUserAgent() forHTTPHeaderField:@"User-Agent"];
     return req;
 }
 
-static void SCFetch(NSURL *url, NSString *method, void (^cb)(NSData *data, NSHTTPURLResponse *http)) {
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:SCRequest(url, method)
+static void SCFetchWithTimeout(NSURL *url, NSString *method, NSTimeInterval timeout,
+                               void (^cb)(NSData *data, NSHTTPURLResponse *http)) {
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:SCRequest(url, method, timeout)
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         cb(error ? nil : data, http);
     }];
     [task resume];
+}
+
+static void SCFetch(NSURL *url, NSString *method, void (^cb)(NSData *data, NSHTTPURLResponse *http)) {
+    SCFetchWithTimeout(url, method, 12.0, cb);
 }
 
 // Validates that a candidate video URL actually serves: 2xx after redirects AND
@@ -377,7 +383,9 @@ static void SCResolveDubz(NSString *clipID, NSString *originalURL, void (^comple
     NSURL *squeelabPoster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/thumbnails/%@.jpg", clipID]];
 
     // Bare dubz.link/<id> posts (no /v/ or /c/) get the makevos-first default.
-    BOOL vShape = [originalURL rangeOfString:@"/v/"].location != NSNotFound;
+    // The shape is read from the URL's path only, so a query string that
+    // happens to contain "/v/" can't flip the CDN choice.
+    BOOL vShape = [SCURLFromString(originalURL).path hasPrefix:@"/v/"];
     NSURL *firstMp4 = vShape ? squeelabMp4 : makevosMp4;
     NSURL *firstPoster = vShape ? squeelabPoster : makevosPoster;
     NSURL *secondMp4 = vShape ? makevosMp4 : squeelabMp4;
@@ -453,13 +461,38 @@ static void SCResolveStreamain(NSString *clipID, NSString *originalURL, void (^c
             SCFinishWithCandidate(@"streamain", mp4, poster, 0, 0, 0, completion);
             return;
         }
+        // No embed poster: fetch the watch page's og:image IN PARALLEL with the
+        // mp4 probe, on a short leash (4s vs the usual 12) — playback must
+        // never wait long on what is only a thumbnail. The poster does stay
+        // blocking up to that cap rather than fire-and-forget: a nil poster
+        // degrades fine (thumbnail_url falls back to the mp4 URL), but Apollo's
+        // VideoClient memoizes per launch and its paired mp4/thumbnail fetches
+        // resolve together, so a poster that misses the synthesized JSON here
+        // would never be re-requested — best-effort-async means no poster at
+        // all in practice. Typical cost over probe-only is one overlapping
+        // page RTT (~150ms); a dead watch page costs 4s once per clip per
+        // 10-minute cache window, then never blocks playback again.
         // A streama.in original 301s to the watch page; NSURLSession follows it.
         NSURL *watch = SCURLFromString(originalURL)
             ?: [NSURL URLWithString:[NSString stringWithFormat:@"https://streamain.com/en/%@/watch", clipID]];
-        SCFetch(watch, @"GET", ^(NSData *watchData, NSHTTPURLResponse *watchHttp) {
+        dispatch_group_t group = dispatch_group_create();
+        __block NSURL *ogPoster = nil;
+        __block BOOL probeOK = NO;
+        dispatch_group_enter(group);
+        SCFetchWithTimeout(watch, @"GET", 4.0, ^(NSData *watchData, NSHTTPURLResponse *watchHttp) {
             NSString *watchHtml = watchData ? [[NSString alloc] initWithData:watchData encoding:NSUTF8StringEncoding] : nil;
-            NSURL *ogPoster = SCURLFromString(SCMetaContent(watchHtml, @"og:image"));
-            SCFinishWithCandidate(@"streamain", mp4, ogPoster, 0, 0, 0, completion);
+            ogPoster = SCURLFromString(SCMetaContent(watchHtml, @"og:image"));
+            dispatch_group_leave(group);
+        });
+        dispatch_group_enter(group);
+        SCProbeVideoURL(mp4, ^(BOOL ok) {
+            probeOK = ok;
+            dispatch_group_leave(group);
+        });
+        dispatch_group_notify(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            if (!probeOK) { completion(nil); return; }
+            ApolloLog(@"[SportsClips] streamain resolved mp4=%@ poster=%@", mp4.absoluteString, ogPoster ? @"yes" : @"no");
+            completion(SCStreamableJSON(mp4, ogPoster, 0, 0, 0));
         });
     });
 }
