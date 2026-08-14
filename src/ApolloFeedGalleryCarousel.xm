@@ -24,6 +24,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "Tweak.h"
 #import "UserDefaultConstants.h"
 
@@ -83,11 +84,34 @@ struct ApolloFeedGallerySizeRange { CGSize min; CGSize max; };
 // feed. Pages render aspect-fit within the card (#899): aspect-fill cropped
 // every page whose aspect differs from the card's — a wide sketch in a
 // portrait-median gallery lost both edges — so off-aspect pages letterbox on
-// the page background instead. The 4:3 ceiling keeps the most common gallery
-// (3:4 iPhone photos) full-bleed now that residual crops are no longer an
-// option.
+// the theme's card surface instead. The 4:3 ceiling keeps the most common
+// gallery (3:4 iPhone photos) full-bleed now that residual crops are no
+// longer an option.
 static const CGFloat kApolloFeedGalleryRatio = 9.0 / 16.0;
 static const CGFloat kApolloFeedGalleryMaxRatio = 4.0 / 3.0;
+
+// Letterbox/placeholder surface behind carousel pages. Under aspect-fill this
+// was a debug backstop that only flashed during loads; with aspect-fit it is
+// permanently on screen beside every off-aspect page, so it follows the
+// theme's card background (Pure Black Dark Mode aware, custom themes
+// included) instead of a fixed near-black that read as a slab on light
+// themes. Fallback per the ApolloThemeRuntime contract.
+static UIColor *ApolloFeedGalleryPageSurfaceColor(void) {
+    return ApolloThemeCardBackgroundColor() ?: UIColor.secondarySystemGroupedBackgroundColor;
+}
+
+// The page dots were UIPageControl's default white, which disappears into a
+// light letterbox surface. Resolve the surface per trait collection and pick
+// contrasting dots; a dynamic provider so light/dark flips and theme reloads
+// re-resolve without reconfiguring the card.
+static UIColor *ApolloFeedGalleryPageIndicatorColor(BOOL current) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        UIColor *surface = [ApolloFeedGalleryPageSurfaceColor() resolvedColorWithTraitCollection:traits];
+        CGFloat alpha = current ? 1.0 : 0.35;
+        return ApolloColorIsLight(surface) ? [UIColor colorWithWhite:0.0 alpha:alpha]
+                                           : [UIColor colorWithWhite:1.0 alpha:alpha];
+    }];
+}
 
 static CGFloat ApolloFeedGalleryRatioForItems(NSArray<NSDictionary *> *items) {
     NSMutableArray<NSNumber *> *aspects = [NSMutableArray arrayWithCapacity:items.count];
@@ -347,7 +371,9 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     if (!self) return nil;
 
     self.clipsToBounds = YES;
-    self.backgroundColor = UIColor.blackColor;
+    // Same surface as the pages so horizontal bounce past the first/last page
+    // stays seamless.
+    self.backgroundColor = ApolloFeedGalleryPageSurfaceColor();
     self.accessibilityIdentifier = @"ApolloFeedGalleryCarousel";
     self.shouldGroupAccessibilityChildren = YES;
 
@@ -373,6 +399,8 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
 
     _pageControl = [[UIPageControl alloc] initWithFrame:CGRectZero];
     if (@available(iOS 14.0, *)) _pageControl.backgroundStyle = UIPageControlBackgroundStyleMinimal;
+    _pageControl.currentPageIndicatorTintColor = ApolloFeedGalleryPageIndicatorColor(YES);
+    _pageControl.pageIndicatorTintColor = ApolloFeedGalleryPageIndicatorColor(NO);
     [_pageControl addTarget:self action:@selector(apollo_pageControlChanged:)
            forControlEvents:UIControlEventValueChanged];
     [self addSubview:_pageControl];
@@ -451,7 +479,7 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
 
         for (NSUInteger index = 0; index < items.count; index++) {
             UIImageView *imageView = [[UIImageView alloc] initWithFrame:CGRectZero];
-            imageView.backgroundColor = [UIColor colorWithWhite:0.10 alpha:1.0];
+            imageView.backgroundColor = ApolloFeedGalleryPageSurfaceColor();
             imageView.contentMode = UIViewContentModeScaleAspectFit;
             imageView.clipsToBounds = YES;
             imageView.isAccessibilityElement = YES;
