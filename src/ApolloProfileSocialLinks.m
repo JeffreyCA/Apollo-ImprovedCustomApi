@@ -600,6 +600,13 @@ static NSString *ApolloSLScrapeCookieHeader(void) {
 @end
 
 @implementation ApolloSLWebFetch
+// Last-resort insurance: Create attaches the web view, so the window (not this
+// object) holds the strong reference — dropping the fetch without Destroy would
+// orphan an attached web view behind the app. Every normal path already goes
+// through Destroy; this makes "no orphaned attached web view" structural.
+- (void)dealloc {
+    ApolloScrapeWebViewDestroy(_web);
+}
 
 // A single non-persistent (in-memory) WKWebsiteDataStore, reused for every
 // social-links scrape this app session.

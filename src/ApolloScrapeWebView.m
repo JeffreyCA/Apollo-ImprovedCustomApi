@@ -174,14 +174,26 @@ void ApolloScrapeWebViewCreate(WKWebViewConfiguration *config, void (^ready)(WKW
         web.alpha = 0.011;
         web.userInteractionEnabled = NO;
         web.customUserAgent = ApolloScrapeSafariUserAgent();
+        // Attach ONLY when the blocker made it into the configuration. If the rule
+        // list failed to compile, an attached unblocked web view loading reddit is
+        // exactly the #902 configuration (fullscreen video promotion over the app)
+        // — so on that path the scrape stays detached instead: it still runs, it
+        // just can't clear a bot challenge, which is the safer way to degrade.
         UIWindow *win = ApolloScrapeKeyWindow();
-        if (win) [win insertSubview:web atIndex:0];
+        if (win && sBlocker) [win insertSubview:web atIndex:0];
         ready(web);
     });
 }
 
 void ApolloScrapeWebViewDestroy(WKWebView *web) {
     if (!web) return;
+    // Callable from any thread: the fetch classes also call this from dealloc as
+    // last-resort insurance, and dealloc offers no thread guarantee. UIKit work
+    // hops to main; the block keeps the web view alive until it runs.
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ ApolloScrapeWebViewDestroy(web); });
+        return;
+    }
     web.navigationDelegate = nil;
     [web stopLoading];
     [web removeFromSuperview];
@@ -198,6 +210,25 @@ WKWebsiteDataStore *ApolloScrapeWebViewSharedDataStore(void) {
             if (ident) store = [WKWebsiteDataStore dataStoreForIdentifier:ident];
         }
         if (!store) store = [WKWebsiteDataStore nonPersistentDataStore];
+        // Keep the persistent jar bounded: prune any origin the scrape doesn't
+        // need. Reddit's own cookies carry the session trust, and Google's carry
+        // reCAPTCHA reputation; everything else (link-shim redirects and whatever
+        // page JS stores) accumulates forever with no user-facing reset, so drop
+        // it once per launch. Async and best-effort — a miss just waits a launch.
+        WKWebsiteDataStore *prune = store;
+        [prune fetchDataRecordsOfTypes:[WKWebsiteDataStore allWebsiteDataTypes]
+                     completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
+            NSMutableArray<WKWebsiteDataRecord *> *evict = [NSMutableArray array];
+            for (WKWebsiteDataRecord *r in records) {
+                NSString *name = r.displayName.lowercaseString ?: @"";
+                BOOL keep = [name containsString:@"reddit"] || [name containsString:@"redd.it"] ||
+                            [name containsString:@"google"] || [name containsString:@"gstatic"] ||
+                            [name containsString:@"recaptcha"];
+                if (!keep) [evict addObject:r];
+            }
+            if (evict.count) [prune removeDataOfTypes:[WKWebsiteDataStore allWebsiteDataTypes]
+                                       forDataRecords:evict completionHandler:^{}];
+        }];
     });
     return store;
 }

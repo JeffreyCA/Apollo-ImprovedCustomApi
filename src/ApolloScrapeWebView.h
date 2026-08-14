@@ -55,7 +55,11 @@ CGRect ApolloScrapeWebViewFrame(void);
 /// mobile Safari user agent, inserts it at the BACK of the key window (index 0,
 /// alpha 0.011, no interaction — invisible and untouchable, but "visible" to the
 /// page, which Reddit's bot challenge requires), and hands it back on the main
-/// queue. Tear it down with ApolloScrapeWebViewDestroy when done.
+/// queue. The attach is gated on the blocker actually being present: if the rule
+/// list failed to compile, the view stays DETACHED — an attached unblocked web
+/// view on reddit is the #902 configuration, so the unblocked path degrades to
+/// challenge-vulnerable rather than ad-vulnerable. Tear the view down with
+/// ApolloScrapeWebViewDestroy when done.
 ///
 /// `ready` is always called, always on the main queue, always with a non-nil web
 /// view: if the blocker cannot be compiled we log and continue unblocked, since a
@@ -64,13 +68,18 @@ void ApolloScrapeWebViewCreate(WKWebViewConfiguration *config, void (^ready)(WKW
 
 /// Stops any in-flight load and removes the view from the window. Call from every
 /// finish/cancel path — Create attaches the view, so dropping the reference alone
-/// would leak an attached web view behind the app.
+/// would leak an attached web view behind the app. Safe from any thread (UIKit
+/// work hops to main), so the fetch classes also call it from dealloc as
+/// last-resort insurance.
 void ApolloScrapeWebViewDestroy(WKWebView *web);
 
 /// The shared logged-out scrape cookie jar: persistent on iOS 17+ (challenge
 /// cookies survive relaunch), process-cached non-persistent below. Never used for
 /// logged-in scrapes, never the app's default store (so a logged-in "use old
-/// reddit" account can't poison what www.reddit.com serves — see #499).
+/// reddit" account can't poison what www.reddit.com serves — see #499). Bounded:
+/// on first use each launch, origins other than reddit/google/recaptcha are
+/// pruned, so the jar holds only the session-trust and challenge-reputation
+/// cookies the scrape actually needs.
 WKWebsiteDataStore *ApolloScrapeWebViewSharedDataStore(void);
 
 /// Compile/lookup the blocker ahead of time so the first scrape after launch is
