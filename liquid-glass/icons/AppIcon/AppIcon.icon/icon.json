@@ -16,36 +16,6 @@
   ],
   "groups" : [
     {
-      "layers" : [
-        {
-          "blend-mode" : "plus-lighter",
-          "fill" : {
-            "solid" : "extended-gray:1.00000,1.00000"
-          },
-          "glass" : true,
-          "hidden" : false,
-          "image-name" : "apollo_antennaball.svg",
-          "name" : "Ball",
-          "opacity" : 1,
-          "position" : {
-            "scale" : 1.32,
-            "translation-in-points" : [
-              0,
-              -384
-            ]
-          }
-        }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 2.4
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.2
-      }
-    },
-    {
       "blur-material-specializations" : [
         {
           "value" : 0.24
@@ -57,6 +27,23 @@
       ],
       "hidden" : false,
       "layers" : [
+        {
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "apollo_antennaball.svg",
+          "name" : "Ball",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 1.32,
+            "translation-in-points" : [
+              0,
+              -384
+            ]
+          }
+        },
         {
           "fill-specializations" : [
             {
@@ -71,7 +58,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
           "image-name" : "Face.svg",
           "name" : "Face",
@@ -87,7 +74,7 @@
           "fill" : {
             "solid" : "display-p3:0.69546,0.15296,0.47658,1.00000"
           },
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
           "image-name" : "Eyes 3.svg",
           "name" : "Eyes",
@@ -113,7 +100,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
           "image-name" : "stem.svg",
           "name" : "Stem",
@@ -129,7 +116,7 @@
           "fill" : {
             "solid" : "extended-gray:1.00000,1.00000"
           },
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
           "image-name" : "Apollo Helmet Space.svg",
           "name" : "Apollo Helmet Space",
@@ -138,6 +125,22 @@
             "translation-in-points" : [
               0,
               120
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "Helmet 2.svg",
+          "name" : "Helmet",
+          "position" : {
+            "scale" : 1.71,
+            "translation-in-points" : [
+              1,
+              84
             ]
           }
         },
@@ -155,7 +158,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
           "image-name" : "Antenna.svg",
           "name" : "Radio_Antenna",
@@ -166,88 +169,7 @@
               -132
             ]
           }
-        }
-      ],
-      "lighting-specializations" : [
-        {
-          "value" : "individual"
         },
-        {
-          "appearance" : "tinted",
-          "value" : "individual"
-        }
-      ],
-      "shadow-specializations" : [
-        {
-          "value" : {
-            "kind" : "neutral",
-            "opacity" : 0.6
-          }
-        },
-        {
-          "appearance" : "tinted",
-          "value" : {
-            "kind" : "layer-color",
-            "opacity" : 1
-          }
-        }
-      ],
-      "specular-specializations" : [
-        {
-          "value" : true
-        },
-        {
-          "appearance" : "tinted",
-          "value" : false
-        }
-      ],
-      "translucency-specializations" : [
-        {
-          "value" : {
-            "enabled" : true,
-            "value" : 0.2
-          }
-        },
-        {
-          "appearance" : "tinted",
-          "value" : {
-            "enabled" : true,
-            "value" : 0.49
-          }
-        }
-      ]
-    },
-    {
-      "layers" : [
-        {
-          "fill" : {
-            "solid" : "extended-gray:1.00000,1.00000"
-          },
-          "glass" : true,
-          "hidden" : false,
-          "image-name" : "Helmet 2.svg",
-          "name" : "Helmet",
-          "position" : {
-            "scale" : 1.71,
-            "translation-in-points" : [
-              1,
-              84
-            ]
-          }
-        }
-      ],
-      "name" : "Group",
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 1.6
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.2
-      }
-    },
-    {
-      "layers" : [
         {
           "blend-mode-specializations" : [
             {
@@ -274,7 +196,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "hidden-specializations" : [
             {
               "value" : true
@@ -296,7 +218,7 @@
             },
             {
               "appearance" : "tinted",
-              "value" : 0.29
+              "value" : 0.35
             }
           ],
           "position" : {
@@ -323,7 +245,7 @@
             {
               "appearance" : "dark",
               "value" : {
-                "solid" : "extended-gray:0.50000,1.00000"
+                "solid" : "display-p3:0.50000,0.50000,0.50000,1.00000"
               }
             },
             {
@@ -333,7 +255,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "hidden-specializations" : [
             {
               "value" : true
@@ -355,7 +277,7 @@
             },
             {
               "appearance" : "tinted",
-              "value" : 0.29
+              "value" : 0.35
             }
           ],
           "position" : {
@@ -392,7 +314,7 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
           "hidden-specializations" : [
             {
               "value" : true
@@ -414,7 +336,7 @@
             },
             {
               "appearance" : "tinted",
-              "value" : 0.5
+              "value" : 0.35
             }
           ],
           "position" : {
@@ -426,14 +348,54 @@
           }
         }
       ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.6
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.2
-      }
+      "lighting-specializations" : [
+        {
+          "value" : "individual"
+        },
+        {
+          "appearance" : "tinted",
+          "value" : "individual"
+        }
+      ],
+      "shadow-specializations" : [
+        {
+          "value" : {
+            "kind" : "neutral",
+            "opacity" : 0.64
+          }
+        },
+        {
+          "appearance" : "tinted",
+          "value" : {
+            "kind" : "layer-color",
+            "opacity" : 1
+          }
+        }
+      ],
+      "specular-specializations" : [
+        {
+          "value" : true
+        },
+        {
+          "appearance" : "tinted",
+          "value" : false
+        }
+      ],
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : false,
+            "value" : 0.49
+          }
+        },
+        {
+          "appearance" : "tinted",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.49
+          }
+        }
+      ]
     }
   ],
   "supported-platforms" : {

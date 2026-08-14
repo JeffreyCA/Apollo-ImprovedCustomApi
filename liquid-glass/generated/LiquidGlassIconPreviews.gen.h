@@ -12,7 +12,6 @@ typedef struct {
     const char          *groupID;
     const char          *title;
     const char          *description;
-    const char          *author;
     const LGIconRowEntry *entries;
     size_t               entryCount;
     const char *const   *coverIconIDs;
@@ -20,65 +19,65 @@ typedef struct {
 } LGIconGroupDef;
 
 static const LGIconRowEntry kLGGroupEntries_original[] = {
-    { "apollo", "Apollo", "IllIIllIllIllII" },
-    { "AppIcon", "Apollo Glass", "IllIIllIllIllII" },
+    { "AppIcon", "Apollo", "IllIIllIllIllII" },
+    { "LG-og", "Apollo Glass", "IllIIllIllIllII" },
     { "halo", "Halo", "IllIIllIllIllII" },
     { "halo-glass", "Halo Glass", "IllIIllIllIllII" },
+    { "apollo-classic", "Apollo Classic", "IllIIllIllIllII" },
+    { "aloppo-v2", "Aloppo", "IllIIllIllIllII" },
     { "igerman00", "Canon", "iGerman00" },
     { "jryng", "OG", "jryng" },
     { "metalnakls", "metalnakls", "metalnakls" },
     { "harunatsu", "harunatsu", "harunatsu91202024" },
-    { "apollo-classic", "Apollo Classic", "IllIIllIllIllII" },
-    { "aloppo-v2", "Aloppo", "IllIIllIllIllII" },
 };
 
 static const LGIconRowEntry kLGGroupEntries_classics[] = {
-    { "morty", "Wubalubadubdub", "IllIIllIllIllII" },
-    { "duck", "Wilson", "IllIIllIllIllII" },
-    { "antenna", "Irradiate", "jryng" },
-    { "spaceship", "Stanley", "jryng" },
-    { "burnt-orange", "Nuclear Sunset", "IllIIllIllIllII" },
-    { "green", "Danger Noodle", "IllIIllIllIllII" },
-    { "dark", "Lumos", "IllIIllIllIllII" },
-    { "orange", "Hugo", "IllIIllIllIllII" },
-    { "purple", "Great Googly Moogly", "IllIIllIllIllII" },
-    { "white", "Dark Link", "IllIIllIllIllII" },
-    { "pink", "Jibbles", "IllIIllIllIllII" },
-    { "gold", "I Love Goooold", "IllIIllIllIllII" },
-    { "crimson", "Ruby", "IllIIllIllIllII" },
-    { "blueberry", "Blueberry Breath", "IllIIllIllIllII" },
-    { "calico", "Calico", "IllIIllIllIllII" },
-    { "castro", "Beware the Turtles", "IllIIllIllIllII" },
-    { "teal", "Under the Sea", "IllIIllIllIllII" },
-    { "brown", "Tremors", "IllIIllIllIllII" },
-    { "sunset", "Crimson", "IllIIllIllIllII" },
-    { "gravel-juice", "Gravel Juice", "IllIIllIllIllII" },
-    { "gray", "Deep Space", "IllIIllIllIllII" },
-    { "chosen-one", "Chosen One", "IllIIllIllIllII" },
-    { "enter-the-state", "Enter the State", "IllIIllIllIllII" },
-    { "rule-of-two", "Rule of Two", "IllIIllIllIllII" },
-    { "galactic-zoomer", "Galactic Zoomer", "IllIIllIllIllII" },
-    { "six-colors", "Six Colors", "IllIIllIllIllII" },
-    { "stonewall", "Stonewall", "IllIIllIllIllII" },
-    { "trans", "Helms", "IllIIllIllIllII" },
-    { "pride", "Pride", "IllIIllIllIllII" },
-    { "clearly-combustion", "Clearly Combustion", "IllIIllIllIllII" },
-    { "dino-spoon", "Dino Spoon", "jryng" },
-    { "apollos6", "ApollOS 6", "IllIIllIllIllII" },
-    { "atp", "ATP", "IllIIllIllIllII" },
-    { "canada", "Canada D'Eh", "IllIIllIllIllII" },
-    { "ernest", "Ernest", "jryng" },
-    { "slothkun", "Sloth-Kun", "IllIIllIllIllII" },
-    { "dave2d", "Teal All the Things", "IllIIllIllIllII" },
-    { "red-black-white", "Apollo: First App in 8K?", "IllIIllIllIllII" },
-    { "camera-pool", "Wrapping Paper", "IllIIllIllIllII" },
-    { "peachy", "Peachy", "IllIIllIllIllII" },
-    { "sandals", "Sandals 'n Socks", "IllIIllIllIllII" },
-    { "andru", "Pro Wrestler", "IllIIllIllIllII" },
-    { "rene", "A+ Intontaion", "IllIIllIllIllII" },
-    { "tld", "Yo. Jonathan Here.", "IllIIllIllIllII" },
-    { "snazzy", "Margaret", "IllIIllIllIllII" },
-    { "eap", "Icons Drop Test", "IllIIllIllIllII" },
+    { "LG-morty", "Wubalubadubdub", "IllIIllIllIllII" },
+    { "LG-duck", "Wilson", "IllIIllIllIllII" },
+    { "LG-antenna", "Irradiate", "jryng" },
+    { "LG-spaceship", "Stanley", "jryng" },
+    { "LG-burnt-orange", "Nuclear Sunset", "IllIIllIllIllII" },
+    { "LG-green", "Danger Noodle", "IllIIllIllIllII" },
+    { "LG-dark", "Lumos", "IllIIllIllIllII" },
+    { "LG-orange", "Hugo", "IllIIllIllIllII" },
+    { "LG-purple", "Great Googly Moogly", "IllIIllIllIllII" },
+    { "LG-white", "Dark Link", "IllIIllIllIllII" },
+    { "LG-pink", "Jibbles", "IllIIllIllIllII" },
+    { "LG-gold", "I Love Goooold", "IllIIllIllIllII" },
+    { "LG-crimson", "Ruby", "IllIIllIllIllII" },
+    { "LG-blueberry", "Blueberry Breath", "IllIIllIllIllII" },
+    { "LG-calico", "Calico", "IllIIllIllIllII" },
+    { "LG-castro", "Beware the Turtles", "IllIIllIllIllII" },
+    { "LG-teal", "Under the Sea", "IllIIllIllIllII" },
+    { "LG-brown", "Tremors", "IllIIllIllIllII" },
+    { "LG-sunset", "Crimson", "IllIIllIllIllII" },
+    { "LG-gravel-juice", "Gravel Juice", "IllIIllIllIllII" },
+    { "LG-gray", "Deep Space", "IllIIllIllIllII" },
+    { "LG-chosen-one", "Chosen One", "IllIIllIllIllII" },
+    { "LG-enter-the-state", "Enter the State", "IllIIllIllIllII" },
+    { "LG-rule-of-two", "Rule of Two", "IllIIllIllIllII" },
+    { "LG-galactic-zoomer", "Galactic Zoomer", "IllIIllIllIllII" },
+    { "LG-six-colors", "Six Colors", "IllIIllIllIllII" },
+    { "LG-stonewall", "Stonewall", "IllIIllIllIllII" },
+    { "LG-trans", "Helms", "IllIIllIllIllII" },
+    { "LG-pride", "Pride", "IllIIllIllIllII" },
+    { "LG-clearly-combustion", "Clearly Combustion", "IllIIllIllIllII" },
+    { "LG-dino-spoon", "Dino Spoon", "jryng" },
+    { "LG-apollos6", "ApollOS 6", "IllIIllIllIllII" },
+    { "LG-atp", "ATP", "IllIIllIllIllII" },
+    { "LG-canada", "Canada D'Eh", "IllIIllIllIllII" },
+    { "LG-ernest", "Ernest", "jryng" },
+    { "LG-slothkun", "Sloth-Kun", "IllIIllIllIllII" },
+    { "LG-dave2d", "Teal All the Things", "IllIIllIllIllII" },
+    { "LG-red-black-white", "Apollo: First App in 8K?", "IllIIllIllIllII" },
+    { "LG-camera-pool", "Wrapping Paper", "IllIIllIllIllII" },
+    { "LG-peachy", "Peachy", "IllIIllIllIllII" },
+    { "LG-sandals", "Sandals 'n Socks", "IllIIllIllIllII" },
+    { "LG-andru", "Pro Wrestler", "IllIIllIllIllII" },
+    { "LG-rene", "A+ Intontaion", "IllIIllIllIllII" },
+    { "LG-tld", "Yo. Jonathan Here.", "IllIIllIllIllII" },
+    { "LG-snazzy", "Margaret", "IllIIllIllIllII" },
+    { "LG-eap", "Icons Drop Test", "IllIIllIllIllII" },
 };
 
 static const LGIconRowEntry kLGGroupEntries_helios[] = {
@@ -108,15 +107,15 @@ static const LGIconRowEntry kLGGroupEntries_concepts[] = {
 };
 
 static const char *const kLGGroupCover_original[] = {
-    "harunatsu",
+    "apollo-classic",
     "halo-glass",
-    "AppIcon",
+    "LG-og",
 };
 
 static const char *const kLGGroupCover_classics[] = {
-    "white",
-    "crimson",
-    "galactic-zoomer",
+    "LG-white",
+    "LG-crimson",
+    "LG-galactic-zoomer",
 };
 
 static const char *const kLGGroupCover_helios[] = {
@@ -132,22 +131,12 @@ static const char *const kLGGroupCover_concepts[] = {
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
-    { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 10, kLGGroupCover_original, 3 },
-    { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", "jryng, IllIIllIllIllII", kLGGroupEntries_classics, 46, kLGGroupCover_classics, 3 },
-    { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 11, kLGGroupCover_helios, 3 },
-    { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "bajader, paulo1manso, jryng", kLGGroupEntries_concepts, 9, kLGGroupCover_concepts, 3 },
+    { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", kLGGroupEntries_original, 10, kLGGroupCover_original, 3 },
+    { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", kLGGroupEntries_classics, 46, kLGGroupCover_classics, 3 },
+    { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", kLGGroupEntries_helios, 11, kLGGroupCover_helios, 3 },
+    { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", kLGGroupEntries_concepts, 9, kLGGroupCover_concepts, 3 },
 };
 
 static const size_t kLGIconGroupCount = 4;
-
-static const LGIconRowEntry kLGFeaturedEntries[] = {
-    { "halo-glass", "Halo Glass", "IllIIllIllIllII" },
-    { "helios-pixel", "Pixels", "IllIIllIllIllII" },
-    { "bajader-rtr", "Right to Repair", "bajader" },
-    { "paulo1manso-modern", "Modern", "paulo1manso" },
-    { "pride", "Pride", "IllIIllIllIllII" },
-};
-
-static const size_t kLGFeaturedEntryCount = 5;
 
 static const char *const kLGPrimaryIconIDCString = "jryng";

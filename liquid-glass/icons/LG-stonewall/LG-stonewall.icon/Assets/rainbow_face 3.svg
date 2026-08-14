@@ -1,0 +1,19 @@
+<svg xml:space="preserve" viewBox="10 126 992 758" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="http://www.w3.org/2000/svg" style="max-height: 500px" width="992" height="758">
+<desc>Created with Fabric.js 3.5.0</desc>
+<defs>
+</defs>
+<rect fill="#ffffff" height="100%" width="100%" y="0" x="0"/>
+<g id="893677" transform="matrix(1.6607 0 0 1.6607 504.9931 504.9949)">
+<linearGradient y2="509" x2="0" y1="249" x1="0" gradientTransform="matrix(1.7433 0 0 1.5607 -498.5929 -591.5211)" gradientUnits="userSpaceOnUse" id="SVGID_3">
+<stop style="stop-color:rgb(222,50,38);stop-opacity: 1" offset="0%"/>
+<stop style="stop-color:rgb(232,117,46);stop-opacity: 1" offset="15%"/>
+<stop style="stop-color:rgb(242,163,61);stop-opacity: 1" offset="28.000000000000004%"/>
+<stop style="stop-color:rgb(232,210,74);stop-opacity: 1" offset="42%"/>
+<stop style="stop-color:rgb(143,194,74);stop-opacity: 1" offset="57.99999999999999%"/>
+<stop style="stop-color:rgb(78,154,216);stop-opacity: 1" offset="72%"/>
+<stop style="stop-color:rgb(90,95,240);stop-opacity: 1" offset="86%"/>
+<stop style="stop-color:rgb(139,46,245);stop-opacity: 1" offset="100%"/>
+</linearGradient>
+<ellipse ry="202.899" rx="273.703" cy="0" cx="0" style="stroke: url(#SVGID_3); stroke-width: 42; stroke-dasharray: none; stroke-linecap: butt; stroke-dashoffset: 0; stroke-linejoin: miter; stroke-miterlimit: 4; is-custom-font: none; font-file-url: none; fill: none; fill-rule: nonzero; opacity: 1;"/>
+</g>
+</svg>

@@ -148,6 +148,27 @@ BOOL ApolloBarkNoteSelectedIconName(NSString *name) {
             break;
         }
     }
+    // Classics use an LG- prefix in the app catalog, while Bark's hosted PNGs
+    // keep their established filenames. Translate only those renamed IDs.
+    static NSSet<NSString *> *classics;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        classics = [NSSet setWithArray:@[
+            @"morty", @"duck", @"antenna", @"spaceship", @"burnt-orange",
+            @"green", @"dark", @"orange", @"purple", @"white", @"pink",
+            @"gold", @"crimson", @"blueberry", @"calico", @"castro", @"teal",
+            @"brown", @"sunset", @"gravel-juice", @"gray", @"chosen-one",
+            @"enter-the-state", @"rule-of-two", @"galactic-zoomer", @"six-colors",
+            @"stonewall", @"trans", @"pride", @"clearly-combustion", @"dino-spoon",
+            @"apollos6", @"atp", @"canada", @"ernest", @"slothkun", @"dave2d",
+            @"red-black-white", @"camera-pool", @"peachy", @"sandals", @"andru",
+            @"rene", @"tld", @"snazzy", @"eap",
+        ]];
+    });
+    if ([name hasPrefix:@"LG-"]) {
+        NSString *legacyName = [name substringFromIndex:3];
+        if ([classics containsObject:legacyName]) name = legacyName;
+    }
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *stored = [defaults stringForKey:UDKeyBarkSelectedIconName];
     if (name.length == 0) {

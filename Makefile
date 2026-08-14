@@ -304,6 +304,9 @@ ApolloReborn_CFLAGS += \
 ApolloReborn_LIBRARIES += c++
 
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
+ApolloReborn_BUNDLE_RESOURCES = \
+    assets/bark-icons/low-battery.png \
+    assets/bark-icons/palette.png
 
 # Temporary theme-RE instrumentation (theme builder spike). Opt-in only:
 #   APOLLO_THEME_RE=1 scripts/run-in-sim.sh

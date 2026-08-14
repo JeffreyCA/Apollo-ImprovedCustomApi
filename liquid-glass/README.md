@@ -40,8 +40,8 @@ screens/orientations) of every icon in that group. Each entry has:
   omitted, or if none of the listed IDs are registered on a given IPA.
 - `description` *(optional)* — a short sentence shown as a header above the
   pack's icon grid.
-- `author` *(optional)* — pack-level curator credit, shown on the pack card
-  (distinct from each icon's own per-icon `"designer"`).
+- Pack-level authors are intentionally unsupported. Credit each icon with its
+  `designer` field so attribution stays attached to the icon itself.
 
 Every icon must declare a `"group"` field naming one of these group ids —
 there is no default/fallback group, so the generator fails if an
@@ -53,24 +53,20 @@ a theme or designer that would get lost or feel out of place in an existing
 group's fan art and description. For one-off icons or small sets, add them to
 the existing `"concepts"` group instead of creating a new pack.
 
-## Featuring specific icons
+## Daily Featured icons
 
-A top-level `"featured"` key lists icon IDs (must already exist in
-`"icons"`) to surface as one-tap shortcut rows above the pack list:
-
-```json
-"featured": ["jryng", "helios"]
-```
-
-Omit the key or leave it empty for no Featured section — this is fully
-backward compatible with registries that predate it. A featured ID that
-doesn't exist in `"icons"` fails the generator (it's a config typo,
-not something to silently drop).
+The picker automatically selects five unique Featured icons from the complete
+Liquid Glass registry. A deterministic shuffle seeded by the user's local
+calendar date keeps the choices stable throughout the day and reselects five
+the next time Apollo becomes active on a new day. The new lineup excludes the
+previous lineup and the icon active when it is generated, and deliberately
+represents at least three packs. This is entirely local: it requires no network
+request, remote configuration, or separate registry field.
 
 After editing `icons.json`:
 
 ```bash
-make lg-previews   # regenerates generated/LiquidGlassIconPreviews.gen.h with the new group/featured icons
+make lg-previews   # regenerates generated/LiquidGlassIconPreviews.gen.h with the new group/icon metadata
 ```
 
 Then rebuild the tweak. Unless you add a new icon, running `rebuild_assets.py`
