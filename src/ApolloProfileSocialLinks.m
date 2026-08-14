@@ -600,6 +600,13 @@ static NSString *ApolloSLScrapeCookieHeader(void) {
 @end
 
 @implementation ApolloSLWebFetch
+// Last-resort insurance: Create attaches the web view, so the window (not this
+// object) holds the strong reference — dropping the fetch without Destroy would
+// orphan an attached web view behind the app. Every normal path already goes
+// through Destroy; this makes "no orphaned attached web view" structural.
+- (void)dealloc {
+    ApolloScrapeWebViewDestroy(_web);
+}
 
 // A single non-persistent (in-memory) WKWebsiteDataStore, reused for every
 // social-links scrape this app session.
@@ -623,7 +630,7 @@ static NSString *ApolloSLScrapeCookieHeader(void) {
 + (WKWebsiteDataStore *)apollo_scrapeDataStore {
     static WKWebsiteDataStore *store;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ store = [WKWebsiteDataStore nonPersistentDataStore]; });
+    dispatch_once(&once, ^{ store = ApolloScrapeWebViewSharedDataStore(); });
     return store;
 }
 
@@ -878,7 +885,7 @@ static NSTimeInterval const kApolloSLWebMinTimeForNone  = 4.0;
 - (void)finish:(NSArray<ApolloSocialLink *> *)links {
     if (self.finished) return;   // watchdog / poll / queue-drop can race
     self.finished = YES;
-    if (self.web) { self.web.navigationDelegate = nil; [self.web stopLoading]; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     // Release the slot BEFORE the completion so a waiting scrape starts straight
     // away rather than a callback-chain later.
     NSMutableArray<ApolloSLWebFetch *> *queue = ApolloSLWebFetchQueue();

@@ -546,8 +546,19 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
 // more than the REST-sized two cards, take one confirming probe before finishing
 // so bestItems can grow to the complete set without restoring the old 3s delay.
 @property (nonatomic) BOOL awaitingLargeSetConfirmation;
+// The poll saw Reddit's "Prove your humanity" interstitial at least once this
+// fetch. A challenged load that still times out is retryable (the challenge is
+// served per-request), unlike a clean page that genuinely has no highlights.
+@property (nonatomic) BOOL sawChallenge;
 @end
 @implementation ApolloHLWebFetch
+// Last-resort insurance: Create attaches the web view, so the window (not this
+// object) holds the strong reference — dropping the fetch without Destroy would
+// orphan an attached web view behind the app. Every normal path already goes
+// through Destroy; this makes "no orphaned attached web view" structural.
+- (void)dealloc {
+    ApolloScrapeWebViewDestroy(_web);
+}
 
 // A single non-persistent (in-memory) WKWebsiteDataStore, reused for every
 // highlights scrape this app session.
@@ -574,7 +585,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
 + (WKWebsiteDataStore *)apollo_scrapeDataStore {
     static WKWebsiteDataStore *store;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ store = [WKWebsiteDataStore nonPersistentDataStore]; });
+    dispatch_once(&once, ^{ store = ApolloScrapeWebViewSharedDataStore(); });
     return store;
 }
 
@@ -582,6 +593,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     self.sub = sub; self.done = done; self.polls = 0;
     self.startedAt = [NSDate date]; self.bestItems = nil; self.pollScheduled = NO; self.evaluationInFlight = NO;
     self.awaitingLargeSetConfirmation = NO;
+    self.sawChallenge = NO;
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     config.websiteDataStore = [ApolloHLWebFetch apollo_scrapeDataStore];
     __weak typeof(self) ws = self;
@@ -613,7 +625,10 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     if (!self.web || self.evaluationInFlight) return;
     NSTimeInterval elapsed = self.startedAt ? -self.startedAt.timeIntervalSinceNow : 0.0;
     if (elapsed >= kApolloHLWebTimeout) {
-        ApolloLog(@"[Highlights][web] r/%@ timed out after %.1fs (%d probes)", self.sub, elapsed, self.polls);
+        if (self.sawChallenge && self.bestItems.count == 0)
+            ApolloLog(@"[Highlights][web] r/%@ blocked by Reddit's bot challenge after %.1fs — will retry later", self.sub, elapsed);
+        else
+            ApolloLog(@"[Highlights][web] r/%@ timed out after %.1fs (%d probes)", self.sub, elapsed, self.polls);
         [self finish:self.bestItems ?: @[]];
         return;
     }
@@ -622,7 +637,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     NSString *js = @"(function(){"
         "var all=document.querySelectorAll('*'),heading=null;"
         "for(var i=0;i<all.length;i++){var e=all[i];if(e.children.length===0&&(e.textContent||'').trim().toLowerCase()==='community highlights'){heading=e;break;}}"
-        "if(!heading)return JSON.stringify({n:0});"
+        "if(!heading)return JSON.stringify({n:0,t:document.title});"
         "var c=heading;for(var d=0;d<7&&c.parentElement;d++){c=c.parentElement;if(c.querySelectorAll('a[href*=\"/comments/\"]').length>=1)break;}"
         "var links=c.querySelectorAll('a[href*=\"/comments/\"]');var seen={},out=[];"
         "for(var j=0;j<links.length;j++){var l=links[j];var h=(l.getAttribute('href')||'').split('?')[0];if(!h||seen[h])continue;var t=(l.textContent||'').trim().split('\\n')[0].trim();if(!t)continue;seen[h]=1;"
@@ -637,6 +652,11 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
         if (!ss.web) return;
         NSArray<ApolloHLItem *> *items = [ApolloHLWebFetch parseItems:res];
         if (items.count > ss.bestItems.count) ss.bestItems = items;
+        // "Reddit - Prove your humanity" = the bot-challenge interstitial. Keep
+        // polling — it can clear itself mid-fetch — but remember we saw it so a
+        // timeout is classified as blocked-not-empty.
+        if ([res isKindOfClass:[NSString class]] && [(NSString *)res containsString:@"Prove your humanity"])
+            ss.sawChallenge = YES;
         NSTimeInterval now = ss.startedAt ? -ss.startedAt.timeIntervalSinceNow : 0.0;
         if (ss.bestItems.count > 2 && !ss.awaitingLargeSetConfirmation && now < kApolloHLWebTimeout) {
             ss.awaitingLargeSetConfirmation = YES;
@@ -647,7 +667,10 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
             ApolloLog(@"[Highlights][web] r/%@ extracted %lu highlights in %.2fs (probe#%d)", ss.sub, (unsigned long)ss.bestItems.count, now, ss.polls);
             [ss finish:ss.bestItems];
         } else if (now >= kApolloHLWebTimeout) {
-            ApolloLog(@"[Highlights][web] r/%@ timed out after %.1fs (%d probes, last error=%@)", ss.sub, now, ss.polls, e.localizedDescription ?: @"nil");
+            if (ss.sawChallenge && ss.bestItems.count == 0)
+                ApolloLog(@"[Highlights][web] r/%@ blocked by Reddit's bot challenge after %.1fs — will retry later", ss.sub, now);
+            else
+                ApolloLog(@"[Highlights][web] r/%@ timed out after %.1fs (%d probes, last error=%@)", ss.sub, now, ss.polls, e.localizedDescription ?: @"nil");
             [ss finish:ss.bestItems ?: @[]];
         } else {
             [ss pollAfter:kApolloHLWebPollInterval];
@@ -678,7 +701,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     return out;
 }
 - (void)finish:(NSArray<ApolloHLItem *> *)items {
-    if (self.web) { self.web.navigationDelegate = nil; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     self.pollScheduled = NO; self.evaluationInFlight = NO; self.awaitingLargeSetConfirmation = NO;
     self.startedAt = nil; self.bestItems = nil;
     void (^d)(NSArray *) = self.done; self.done = nil;
@@ -687,8 +710,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
 - (void)cancel {
     self.done = nil;
     if (self.web) {
-        self.web.navigationDelegate = nil;
-        [self.web stopLoading];
+        ApolloScrapeWebViewDestroy(self.web);
         self.web = nil;
     }
     self.pollScheduled = NO; self.evaluationInFlight = NO; self.awaitingLargeSetConfirmation = NO;
@@ -1548,6 +1570,27 @@ static NSMutableDictionary<NSString *, ApolloHLWebFetch *> *ApolloHLWebFetchers(
     static NSMutableDictionary *d; static dispatch_once_t o; dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; }); return d;
 }
 
+// Challenge-blocked subs are NOT marked web-done: the interstitial is served
+// per-request, so a later attempt often sails through. Bounded so a sub the
+// challenge keeps blocking doesn't re-run an 18s WebView on every layout pass:
+// at most kApolloHLWebChallengeMaxStrikes attempts per session, spaced at least
+// kApolloHLWebChallengeRetrySpacing apart. Any successful extraction clears all
+// strikes (the cookie jar has demonstrably passed Reddit's checks), and a
+// pull-to-refresh resets the blocked sub explicitly.
+static int const kApolloHLWebChallengeMaxStrikes = 3;
+static NSTimeInterval const kApolloHLWebChallengeRetrySpacing = 90.0;
+static NSMutableDictionary<NSString *, NSNumber *> *ApolloHLWebChallengeStrikes(void) {
+    static NSMutableDictionary *d; static dispatch_once_t o; dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; }); return d;
+}
+static NSMutableDictionary<NSString *, NSDate *> *ApolloHLWebChallengeLastTry(void) {
+    static NSMutableDictionary *d; static dispatch_once_t o; dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; }); return d;
+}
+static void ApolloHLWebChallengeReset(NSString *sub) {
+    if (sub.length == 0) return;
+    [ApolloHLWebChallengeStrikes() removeObjectForKey:sub];
+    [ApolloHLWebChallengeLastTry() removeObjectForKey:sub];
+}
+
 // Rebuild the carousel(s) for `sub` with a new (fuller) item set — used when the
 // WebView upgrade lands. Handles both placement modes.
 static void ApolloHLApplyItems(NSString *sub, NSArray<ApolloHLItem *> *items) {
@@ -1657,6 +1700,9 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
     if (!sCommunityHighlights || !sCommunityHighlightsWeb) return;
     NSString *sub = subreddit.lowercaseString;
     if (sub.length == 0 || [ApolloHLWebDone() containsObject:sub] || ApolloHLWebFetchers()[sub]) return;
+    if ([ApolloHLWebChallengeStrikes()[sub] intValue] >= kApolloHLWebChallengeMaxStrikes) return;
+    NSDate *lastTry = ApolloHLWebChallengeLastTry()[sub];
+    if (lastTry && -lastTry.timeIntervalSinceNow < kApolloHLWebChallengeRetrySpacing) return;
     ApolloHLWebFetch *fetch = [[ApolloHLWebFetch alloc] init];
     ApolloHLWebFetchers()[sub] = fetch;
     [fetch startForSub:sub completion:^(NSArray<ApolloHLItem *> *items) {
@@ -1664,9 +1710,20 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
         // The user may have changed Full to Partial/Off while WebKit was still
         // rendering. Never let that stale completion restore the full set.
         if (!sCommunityHighlights || !sCommunityHighlightsWeb) return;
+        if (items.count == 0 && fetch.sawChallenge) {
+            // Blocked, not empty — leave the sub eligible for a bounded retry.
+            int strikes = [ApolloHLWebChallengeStrikes()[sub] intValue] + 1;
+            ApolloHLWebChallengeStrikes()[sub] = @(strikes);
+            ApolloHLWebChallengeLastTry()[sub] = [NSDate date];
+            return;
+        }
         [ApolloHLWebDone() addObject:sub];
         NSArray<ApolloHLItem *> *apiItems = ApolloHLRestCache()[sub] ?: ApolloHLCache()[sub];
         if (items.count == 0) return; // web found nothing
+        // A successful extraction proves this cookie jar passes Reddit's checks —
+        // let every challenge-blocked sub retry on its next layout pass.
+        [ApolloHLWebChallengeStrikes() removeAllObjects];
+        [ApolloHLWebChallengeLastTry() removeAllObjects];
 
         // The DOM already has the authoritative order, titles, and links. Merge
         // whatever metadata the fast REST result already knows, then show the full
@@ -1746,6 +1803,7 @@ static void ApolloHLRefreshSub(NSString *subreddit, BOOL alwaysWeb) {
             // Re-harvest the full web set; it re-applies if it differs from what's shown.
             [ApolloHLWebDone() removeObject:key];
             [ApolloHLWebFetchers() removeObjectForKey:key];
+            ApolloHLWebChallengeReset(key); // explicit refresh overrides the challenge backoff
             ApolloHLMaybeWebUpgrade(subreddit);
         }
     });
@@ -2321,10 +2379,12 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
             [ApolloHLWebFetchers() removeAllObjects];
             for (ApolloHLWebFetch *fetch in fetches) [fetch cancel];
             [ApolloHLWebDone() removeAllObjects];
+            [ApolloHLWebChallengeStrikes() removeAllObjects];
+            [ApolloHLWebChallengeLastTry() removeAllObjects];
         } else {
             // Full selected after Partial: allow each visible subreddit to run a
             // fresh web upgrade even if it completed earlier in this app session.
-            for (NSString *sub in visibleSubs) [ApolloHLWebDone() removeObject:sub];
+            for (NSString *sub in visibleSubs) { [ApolloHLWebDone() removeObject:sub]; ApolloHLWebChallengeReset(sub); }
         }
 
         if (sCommunityHighlights && !sCommunityHighlightsWeb) {
