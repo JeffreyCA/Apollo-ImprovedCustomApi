@@ -78,17 +78,18 @@ struct ApolloFeedGallerySizeRange { CGSize min; CGSize max; };
 // Apollo's native album mosaic is 16:9 (confirmed in Hopper's
 // AlbumThumbnailsNode.layoutSpecThatFits helper: height = width * 0.5625).
 // The carousel sizes each card to the gallery's median image aspect instead,
-// clamped between that 16:9 floor and a 4:3 portrait ceiling: a full-bleed
+// clamped between that 16:9 floor and a 5:4 portrait ceiling: a full-bleed
 // pager reads as "the image", so center-cropping a portrait photo into a hard
 // 16:9 box looked like a bug, while an unclamped 1:3 comic would swallow the
 // feed. Pages render aspect-fit within the card (#899): aspect-fill cropped
 // every page whose aspect differs from the card's — a wide sketch in a
 // portrait-median gallery lost both edges — so off-aspect pages letterbox on
-// the theme's card surface instead. The 4:3 ceiling keeps the most common
-// gallery (3:4 iPhone photos) full-bleed now that residual crops are no
-// longer an option.
+// the theme's card surface instead. A 4:3 ceiling (full-bleed 3:4 iPhone
+// photos) was tried and deliberately reverted: the tighter 5:4 card reads
+// better in the feed, and the thin side bars it costs on portrait galleries
+// don't hide anything — the fullscreen viewer always shows the full image.
 static const CGFloat kApolloFeedGalleryRatio = 9.0 / 16.0;
-static const CGFloat kApolloFeedGalleryMaxRatio = 4.0 / 3.0;
+static const CGFloat kApolloFeedGalleryMaxRatio = 5.0 / 4.0;
 
 // Letterbox/placeholder surface behind carousel pages. Under aspect-fill this
 // was a debug backstop that only flashed during loads; with aspect-fit it is
