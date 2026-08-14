@@ -108,6 +108,8 @@ static const void *kApolloHLWrapperMarkerKey   = &kApolloHLWrapperMarkerKey;  //
 static const void *kApolloHLTeardownMarkerKey  = &kApolloHLTeardownMarkerKey; // BOOL on the VC
 static const void *kApolloHLActiveSubKey       = &kApolloHLActiveSubKey;      // NSString sub added to the hide-set by this VC
 static const void *kApolloHLContainerKey       = &kApolloHLContainerKey;      // ApolloHLHeaderContainerView on the VC (headers-on coexistence)
+static const void *kApolloHLHeaderChangeGenKey     = &kApolloHLHeaderChangeGenKey;     // NSNumber on the table: latest ApplyHeaderChange generation
+static const void *kApolloHLHeaderChangePendingKey = &kApolloHLHeaderChangePendingKey; // BOOL on the table: a deferred header change awaits scroll settle
 static char kApolloHLHiddenRowsKey;            // NSMutableSet<NSNumber*> of de-duped sticky rows, per ASTableNode
 static char kApolloHLStickyCountKey;           // NSNumber (REST sticky count N) per feed ASTableNode — breaker rule
 static char kApolloHLSwitchPendingKey;         // BOOL on the VC — an in-place-switch re-install is already scheduled
@@ -469,18 +471,28 @@ static NSMutableDictionary<NSString *, NSDictionary *> *ApolloHLDiskCache(void) 
     return cache;
 }
 
+// Coalesced: encoding re-serializes the whole (up-to-40-sub) dictionary, and a
+// REST completion + ApplyItems often persist back-to-back, so batch every save
+// requested in one runloop turn into a single defaults write. MAIN-QUEUE ONLY,
+// like every other cache here.
 static void ApolloHLDiskCacheSave(void) {
-    NSMutableDictionary *cache = ApolloHLDiskCache();
-    if (cache.count > kApolloHLDiskCacheMaxSubs) {
-        // Evict the least recently fetched subs first.
-        NSArray<NSString *> *oldestFirst = [cache.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-            NSDate *da = [cache[a][@"t"] isKindOfClass:[NSDate class]] ? cache[a][@"t"] : [NSDate distantPast];
-            NSDate *db = [cache[b][@"t"] isKindOfClass:[NSDate class]] ? cache[b][@"t"] : [NSDate distantPast];
-            return [da compare:db];
-        }];
-        for (NSUInteger i = 0; i + kApolloHLDiskCacheMaxSubs < oldestFirst.count; i++) [cache removeObjectForKey:oldestFirst[i]];
-    }
-    [[NSUserDefaults standardUserDefaults] setObject:cache forKey:kApolloHLDiskCacheDefaultsKey];
+    static BOOL scheduled;
+    if (scheduled) return;
+    scheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        scheduled = NO;
+        NSMutableDictionary *cache = ApolloHLDiskCache();
+        if (cache.count > kApolloHLDiskCacheMaxSubs) {
+            // Evict the least recently fetched subs first.
+            NSArray<NSString *> *oldestFirst = [cache.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+                NSDate *da = [cache[a][@"t"] isKindOfClass:[NSDate class]] ? cache[a][@"t"] : [NSDate distantPast];
+                NSDate *db = [cache[b][@"t"] isKindOfClass:[NSDate class]] ? cache[b][@"t"] : [NSDate distantPast];
+                return [da compare:db];
+            }];
+            for (NSUInteger i = 0; i + kApolloHLDiskCacheMaxSubs < oldestFirst.count; i++) [cache removeObjectForKey:oldestFirst[i]];
+        }
+        [[NSUserDefaults standardUserDefaults] setObject:cache forKey:kApolloHLDiskCacheDefaultsKey];
+    });
 }
 
 // Snapshot the sub's current in-memory state to disk. A sub whose highlights are
@@ -1509,6 +1521,12 @@ static void ApolloHLRestoreStandaloneHeader(UIViewController *vc) {
         objc_setAssociatedObject(tableView, kApolloHLManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloHLCarouselKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Invalidate any header change still deferred behind a scroll — restoring
+        // the native header makes it obsolete, and it must not fire afterwards
+        // and resurrect the carousel it captured.
+        NSUInteger gen = [objc_getAssociatedObject(tableView, kApolloHLHeaderChangeGenKey) unsignedIntegerValue] + 1;
+        objc_setAssociatedObject(tableView, kApolloHLHeaderChangeGenKey, @(gen), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(tableView, kApolloHLHeaderChangePendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     objc_setAssociatedObject(vc, kApolloHLCarouselKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(vc, kApolloHLWrapperKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1572,18 +1590,21 @@ static void ApolloHLPinCarouselToTop(UITableView *tv, int attempt) {
 //  - at the top of the feed → animate the shift as one smooth slide, fading the
 //    arriving carousel in with it;
 //  - scrolled away → compensate the content offset so the visible posts do not
-//    move at all (the carousel waits above the viewport for the next scroll-up).
-static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingView, void (^apply)(void)) {
-    if (!apply) return;
-    if (!tableView || !tableView.window || tableView.indexPathsForVisibleRows.count == 0) {
-        apply();
-        return;
-    }
+//    move at all (the carousel waits above the viewport for the next scroll-up);
+//  - scroll in flight (touch down or decelerating) → DEFER until it settles:
+//    writing contentOffset mid-deceleration stops the scroll dead, and changing
+//    the header height without the rebase visibly jumps the content, so neither
+//    is acceptable while the table is moving. A per-table generation lets a
+//    newer change (web upgrade, collapse toggle, teardown) supersede a deferred
+//    one, and the pending flag holds InstallCarousel's re-seat short-circuit off
+//    this table until the deferred apply lands.
+
+// The settled-table application: called only when no scroll is in flight.
+static void ApolloHLApplyHeaderChangeNow(UITableView *tableView, UIView *appearingView, void (^apply)(void)) {
     CGFloat oldHeight = tableView.tableHeaderView.frame.size.height;
     CGFloat topY = -tableView.adjustedContentInset.top;
     BOOL atTop = (tableView.contentOffset.y - topY) <= 0.5;
-    BOOL userDriven = tableView.tracking || tableView.dragging || tableView.decelerating;
-    if (atTop && !userDriven) {
+    if (atTop) {
         appearingView.alpha = 0.0;
         [UIView animateWithDuration:0.3 delay:0
                             options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction
@@ -1591,12 +1612,16 @@ static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingV
             apply();
             appearingView.alpha = 1.0;
             [tableView layoutIfNeeded];
-        } completion:nil];
+        } completion:^(__unused BOOL finished) {
+            // Self-heal: if the animation was interrupted or removed (view left
+            // the hierarchy, a rebuild landed on top), never leave the carousel
+            // stranded invisible under a full-height header.
+            appearingView.alpha = 1.0;
+        }];
         return;
     }
-    // Mid-scroll (or mid-drag): keep the content visually pinned. Adjusting the
-    // offset by the height delta is the standard infinite-scroll rebase; UIKit
-    // rebases an active pan around it, so a drag in progress doesn't stutter.
+    // Scrolled away but settled: keep the content visually pinned — the carousel
+    // waits above the viewport for the next scroll-up.
     apply();
     CGFloat delta = tableView.tableHeaderView.frame.size.height - oldHeight;
     if (fabs(delta) > 0.5) {
@@ -1605,6 +1630,41 @@ static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingV
         CGFloat targetY = MAX(tableView.contentOffset.y + delta, topY);
         tableView.contentOffset = CGPointMake(tableView.contentOffset.x, targetY);
     }
+}
+
+static void ApolloHLApplyHeaderChangeAttempt(UITableView *tableView, UIView *appearingView, void (^apply)(void), NSNumber *gen, int attempt) {
+    if (!tableView) return; // table died while deferred → the change is moot
+    NSNumber *current = objc_getAssociatedObject(tableView, kApolloHLHeaderChangeGenKey);
+    if (gen && current && ![gen isEqualToNumber:current]) return; // superseded by a newer change
+    BOOL scrollInFlight = tableView.tracking || tableView.dragging || tableView.decelerating;
+    if (scrollInFlight && attempt < 16) { // 16 × 0.25s ≈ 4s; deceleration never lasts that long
+        objc_setAssociatedObject(tableView, kApolloHLHeaderChangePendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        __weak UITableView *weakTable = tableView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloHLApplyHeaderChangeAttempt(weakTable, appearingView, apply, gen, attempt + 1);
+        });
+        return;
+    }
+    objc_setAssociatedObject(tableView, kApolloHLHeaderChangePendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // (Attempt-cap fallback lands here mid-touch: a rebase during an active pan is
+    // the safe case — UIKit rebases the gesture — it is only deceleration we wait out.)
+    if (!tableView.window || tableView.indexPathsForVisibleRows.count == 0) {
+        apply(); // nothing visible can shift
+        return;
+    }
+    ApolloHLApplyHeaderChangeNow(tableView, appearingView, apply);
+}
+
+static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingView, void (^apply)(void)) {
+    if (!apply) return;
+    if (!tableView || !tableView.window || tableView.indexPathsForVisibleRows.count == 0) {
+        apply();
+        return;
+    }
+    // New generation: any change still waiting on a scroll to settle is now stale.
+    NSUInteger gen = [objc_getAssociatedObject(tableView, kApolloHLHeaderChangeGenKey) unsignedIntegerValue] + 1;
+    objc_setAssociatedObject(tableView, kApolloHLHeaderChangeGenKey, @(gen), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloHLApplyHeaderChangeAttempt(tableView, appearingView, apply, @(gen), 0);
 }
 
 static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView, NSArray<ApolloHLItem *> *items, NSString *subreddit) {
@@ -1650,6 +1710,12 @@ static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView
     CGFloat width = tableView.bounds.size.width > 0 ? tableView.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
 
     if (sameContent && wrapper) {
+        // A deferred snap-free change for this same content is still waiting for
+        // the scroll to settle (viewDidLayoutSubviews fires every scroll frame, so
+        // this path re-enters constantly while decelerating). Re-seating here
+        // would install the header mid-scroll — the exact snap the deferral
+        // avoids — so leave it to the pending apply.
+        if ([objc_getAssociatedObject(tableView, kApolloHLHeaderChangePendingKey) boolValue]) return;
         // Carousel exists but isn't the live header (Apollo swapped it). Re-seat.
         objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         tableView.tableHeaderView = wrapper;
@@ -1999,7 +2065,10 @@ static void ApolloHLApplyStickyCountToTable(UIViewController *vc, NSString *subr
     // a mod pinning/unpinning while the feed is up), the separators measured under the
     // OLD rule and must re-measure even when the new N is 2 — otherwise a doubled (or
     // missing) breaker sticks until the reactive fallback pass happens to catch it.
-    BOOL needsReload = prev ? ![prev isEqualToNumber:stickyN] : (stickyN.integerValue != 2);
+    // Equality already early-returned above, so a non-nil prev means N genuinely
+    // changed → always reload. First publish: only when N differs from the
+    // fallback's assumed 2.
+    BOOL needsReload = (prev != nil) || stickyN.integerValue != 2;
     if (needsReload && [tableNode respondsToSelector:@selector(reloadData)]) {
         ApolloLog(@"[Highlights] r/%@ sticky count N=%@ (was %@) → reload to fix breaker", subreddit, stickyN, prev ?: @"unknown");
         ((void (*)(id, SEL))objc_msgSend)(tableNode, @selector(reloadData));
