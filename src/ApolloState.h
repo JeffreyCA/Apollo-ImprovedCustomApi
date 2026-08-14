@@ -25,6 +25,11 @@ extern BOOL sFeedTextPostThumbnails;
 extern BOOL sFeedGalleryCarousel;
 // Default-on fullscreen-media comments pane, opened by upward flick or button.
 extern BOOL sSwipeUpForComments;
+// Opt-in (default OFF) live interactive Devvit posts (embedded web widget).
+extern BOOL sDevvitInteractivePosts;
+// Sub-toggle: Devvit widgets in large-mode feed cards too (vs comments only).
+// Default on, but only consulted while the master toggle is on.
+extern BOOL sDevvitFeedWidgets;
 extern NSInteger sPreferredGIFFallbackFormat;
 
 extern NSInteger sReadPostMaxCount;

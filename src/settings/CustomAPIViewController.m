@@ -1320,9 +1320,25 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf blockAnnouncementsSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *devvitPosts =
+        [ApolloSettingsRow switchRowWithID:@"gen.devvitPosts"
+                                     title:@"Live Match Threads & Games"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf devvitPostsSwitchToggled:sender]; }];
+
+    // Feed cards are the surface where the widget's cost multiplies — its own
+    // escape hatch, without losing the widget in comments. Sits directly
+    // under the master row, so the short title reads in context.
+    ApolloSettingsRow *devvitFeedPosts =
+        [ApolloSettingsRow switchRowWithID:@"gen.devvitFeedPosts"
+                                     title:@"Show in Feed"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf devvitFeedPostsSwitchToggled:sender]; }];
+    devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
+
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list."
-                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements ]];
+                                            footer:@"Small tweaks for the post list. Live Match Threads & Games shows the real live widget for Reddit's interactive posts — match scores, predictions, brackets, and community games — instead of a placeholder. Always shown in comments; Show in Feed also puts it on large-mode feed cards."
+                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -3420,6 +3436,17 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)swipeUpCommentsSwitchToggled:(UISwitch *)sender {
     sSwipeUpForComments = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sSwipeUpForComments forKey:UDKeySwipeUpForComments];
+}
+
+- (void)devvitPostsSwitchToggled:(UISwitch *)sender {
+    sDevvitInteractivePosts = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sDevvitInteractivePosts forKey:UDKeyDevvitInteractivePosts];
+    [self visibilityDidChange];  // drives the "Interactive Posts in Feed" sub-row
+}
+
+- (void)devvitFeedPostsSwitchToggled:(UISwitch *)sender {
+    sDevvitFeedWidgets = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sDevvitFeedWidgets forKey:UDKeyDevvitFeedWidgets];
 }
 
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
