@@ -104,6 +104,7 @@ typedef NS_ENUM(NSInteger, ApolloPFDetailSection) {
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         cell.textLabel.text = items[indexPath.row];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        [self apollo_applyPrimaryTextColorToCell:cell];
         return cell;
     }
 

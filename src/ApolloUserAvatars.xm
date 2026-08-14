@@ -68,12 +68,59 @@ static const void *kApolloProfileTabOriginalImageKey = &kApolloProfileTabOrigina
 static const void *kApolloProfileTabOriginalSelectedImageKey = &kApolloProfileTabOriginalSelectedImageKey;
 static const void *kApolloProfileTabAppliedUsernameKey = &kApolloProfileTabAppliedUsernameKey;
 static const void *kApolloProfileTabAppliedImageKey = &kApolloProfileTabAppliedImageKey;
+static const void *kApolloProfileNavTitleViewKey = &kApolloProfileNavTitleViewKey;
 // Marker stamped on every rendered profile-tab avatar UIImage so the UIImageView
 // monochromatic-treatment clamp can recognise our avatar regardless of which tab
 // view class hosts it.
 static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAvatarImageMarkerKey;
 
 @class ApolloProfileStatCard;
+
+@interface ApolloProfileNavTitleView : UIView
+@property(nonatomic, strong) UILabel *titleLabel;
+- (void)apollo_setTitle:(NSString *)title;
+@end
+
+@implementation ApolloProfileNavTitleView
+
+- (instancetype)initWithTitle:(NSString *)title {
+    self = [super initWithFrame:CGRectZero];
+    if (self) {
+        _titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+        _titleLabel.adjustsFontForContentSizeCategory = YES;
+        _titleLabel.textColor = [UIColor labelColor];
+        _titleLabel.textAlignment = NSTextAlignmentCenter;
+        _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        _titleLabel.alpha = 1.0;
+        _titleLabel.accessibilityElementsHidden = NO;
+        [self addSubview:_titleLabel];
+        [self apollo_setTitle:title];
+    }
+    return self;
+}
+
+- (void)apollo_setTitle:(NSString *)title {
+    self.titleLabel.text = title;
+    CGSize size = self.titleLabel.intrinsicContentSize;
+    size.width = MIN(size.width, 240.0);
+    self.bounds = (CGRect){ CGPointZero, size };
+    self.titleLabel.frame = self.bounds;
+    [self invalidateIntrinsicContentSize];
+    [self setNeedsLayout];
+}
+
+- (CGSize)intrinsicContentSize {
+    CGSize size = self.titleLabel.intrinsicContentSize;
+    return CGSizeMake(MIN(size.width, 240.0), size.height);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.titleLabel.frame = self.bounds;
+}
+
+@end
 
 @interface ApolloProfileHeaderView : UIView
 @property(nonatomic, strong) UIImageView *bannerImageView;
@@ -2886,6 +2933,9 @@ static UIView *ApolloProfileUsernameCopyFindLabelInView(UIView *rootView, NSStri
 
 static UIView *ApolloProfileUsernameCopyTargetForController(UIViewController *viewController, NSString *username) {
     UIView *titleView = viewController.navigationItem.titleView;
+    if ([titleView isKindOfClass:[ApolloProfileNavTitleView class]]) {
+        return ((ApolloProfileNavTitleView *)titleView).titleLabel;
+    }
     UIView *target = ApolloProfileUsernameCopyFindLabelInView(titleView, username);
     if (target) return target;
     if ([titleView isKindOfClass:[UILabel class]] && ApolloAvatarUsernameMatches(((UILabel *)titleView).text, username)) return titleView;
@@ -3005,76 +3055,24 @@ static void ApolloProfileRemoveAmbient(UIViewController *viewController, UITable
     header.bannerImageView.alpha = 1.0;
 }
 
-// Like the username-copy finder, but without the alpha guard — once we have faded
-// the title to 0 we still need to find it again to fade it back in.
-static UIView *ApolloProfileNavTitleLabelInView(UIView *rootView, NSString *username) {
-    if (!rootView || username.length == 0 || rootView.hidden) return nil;
-    if ([rootView isKindOfClass:[UILabel class]] &&
-        ApolloAvatarUsernameMatches(((UILabel *)rootView).text, username)) {
-        return rootView;
+static ApolloProfileNavTitleView *ApolloProfileInstallNavTitleView(UIViewController *viewController) {
+    if (!viewController) return nil;
+    UINavigationItem *item = viewController.navigationItem;
+    ApolloProfileNavTitleView *titleView = objc_getAssociatedObject(item, kApolloProfileNavTitleViewKey);
+    if (!titleView) {
+        NSString *title = item.title ?: viewController.title
+            ?: ApolloUsernameFromProfileViewController(viewController);
+        titleView = [[ApolloProfileNavTitleView alloc] initWithTitle:title];
+        BOOL willInstallHeader =
+            sShowDetailedProfiles &&
+            ApolloUsernameFromProfileViewController(viewController).length > 0;
+        titleView.titleLabel.alpha = willInstallHeader ? 0.0 : 1.0;
+        titleView.titleLabel.accessibilityElementsHidden = willInstallHeader;
+        objc_setAssociatedObject(item, kApolloProfileNavTitleViewKey,
+                                 titleView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    for (UIView *subview in rootView.subviews) {
-        UIView *match = ApolloProfileNavTitleLabelInView(subview, username);
-        if (match) return match;
-    }
-    return nil;
-}
-
-static const void *kApolloProfileNavTitleFadeTargetKey = &kApolloProfileNavTitleFadeTargetKey;
-static const void *kApolloProfileNavTitleFadeMissAtKey = &kApolloProfileNavTitleFadeMissAtKey;
-// After a miss, don't re-walk the whole nav bar on every scroll frame — but the
-// target CAN appear late (the title control builds during a fling), so the miss
-// is only cached for a short window before we retry. Bounds a sustained miss to
-// a few walks/sec instead of 60-120, while still finding a late target quickly.
-static const NSTimeInterval kApolloProfileNavTitleFadeMissWindow = 0.3;
-
-// The view whose alpha the cross-fade drives: the _UINavigationBarTitleControl
-// hosting the title label when there is one (so the Liquid Glass title capsule
-// fades with the text), else the label itself.
-//
-// This runs on every scrollViewDidScroll: (60-120/sec during a fling), and the
-// lookup is an unbounded recursive subview walk of the whole nav bar plus a
-// string match per candidate label — expensive to repeat every frame. Cache
-// the resolved view on the controller and only re-walk when it's no longer
-// parented under this nav bar (Apollo occasionally rebuilds the title view,
-// e.g. on a nav-bar style change).
-static UIView *ApolloProfileNavTitleFadeTargetForController(UIViewController *viewController) {
-    ApolloProfileHeaderView *header = objc_getAssociatedObject(viewController, kApolloProfileHeaderViewKey);
-    if (!header || header.username.length == 0) return nil;
-    UINavigationBar *navigationBar = viewController.navigationController.navigationBar;
-    if (!navigationBar) return nil;
-
-    UIView *cached = objc_getAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey);
-    if (cached) {
-        UIView *walk = cached.superview;
-        while (walk && walk != navigationBar) walk = walk.superview;
-        if (walk == navigationBar) return cached;
-    }
-
-    // Recent miss still within its window → skip the walk this frame.
-    NSNumber *missAt = objc_getAssociatedObject(viewController, kApolloProfileNavTitleFadeMissAtKey);
-    if (missAt && (CACurrentMediaTime() - missAt.doubleValue) < kApolloProfileNavTitleFadeMissWindow) {
-        return nil;
-    }
-
-    UIView *label = ApolloProfileNavTitleLabelInView(navigationBar, header.username);
-    if (!label) {
-        objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeMissAtKey, @(CACurrentMediaTime()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        return nil;
-    }
-    objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeMissAtKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    UIView *target = label;
-    UIView *candidate = label.superview;
-    while (candidate && candidate != navigationBar) {
-        if ([NSStringFromClass(candidate.class) containsString:@"TitleControl"]) {
-            target = candidate;
-            break;
-        }
-        candidate = candidate.superview;
-    }
-    objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey, target, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return target;
+    if (item.titleView != titleView) item.titleView = titleView;
+    return titleView;
 }
 
 // Large-title choreography: while the header's big display name is on screen the
@@ -3083,36 +3081,29 @@ static UIView *ApolloProfileNavTitleFadeTargetForController(UIViewController *vi
 // header is torn down (toggle off) or the name row is not part of the header.
 static void ApolloProfileApplyNavTitleFade(UIViewController *viewController, UIScrollView *scrollView) {
     if (!ApolloProfileViewControllerIsVisibleTopController(viewController)) return;
-    UIView *target = ApolloProfileNavTitleFadeTargetForController(viewController);
+    ApolloProfileNavTitleView *titleView = ApolloProfileInstallNavTitleView(viewController);
+    UILabel *target = titleView.titleLabel;
     if (!target) return;
 
     ApolloProfileHeaderView *header = objc_getAssociatedObject(viewController, kApolloProfileHeaderViewKey);
-    CGFloat alpha = 1.0;
+    CGFloat alpha = target.alpha;
     if (header.window && !header.displayNameLabel.hidden && [scrollView isKindOfClass:[UIScrollView class]]) {
         CGRect nameRect = [header convertRect:header.displayNameLabel.frame toView:scrollView];
         CGFloat visibleTop = scrollView.contentOffset.y + scrollView.adjustedContentInset.top;
         CGFloat fadeStart = CGRectGetMinY(nameRect);
         CGFloat fadeSpan = MAX(CGRectGetHeight(nameRect), 1.0);
         alpha = MIN(1.0, MAX(0.0, (visibleTop - fadeStart) / fadeSpan));
+    } else if (header.displayNameLabel.hidden) {
+        alpha = 1.0;
     }
-    if (fabs(target.alpha - alpha) > 0.001) target.alpha = alpha;
+    if (fabs(target.alpha - alpha) > 0.001) {
+        target.alpha = alpha;
+        ApolloNavigationTitleGlassSetContentAlpha(titleView, alpha);
+    }
     // An alpha-0 title is still hit-testable/VoiceOver-visible by default,
     // which would expose a duplicate (invisible) title alongside the header's
     // own name — hide it from the accessibility tree while faded out.
     target.accessibilityElementsHidden = alpha <= 0.01;
-}
-
-// Restore the faded title control to alpha 1 (and un-hide it from
-// accessibility). Called when the profile disappears: the fade drives the
-// SHARED _UINavigationBarTitleControl to alpha 0, and only scroll events
-// un-fade it — none fire after a pop, so a profile popped while scrolled to the
-// top would leave the title control at alpha 0. If UIKit then reuses that
-// control for the destination screen's title, it would render invisible.
-static void ApolloProfileResetNavTitleFade(UIViewController *viewController) {
-    UIView *target = objc_getAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey);
-    if (!target) return;
-    if (fabs(target.alpha - 1.0) > 0.001) target.alpha = 1.0;
-    target.accessibilityElementsHidden = NO;
 }
 
 // Re-derive the fade from the table's current offset (appear/layout paths, where
@@ -3144,13 +3135,16 @@ static void ApolloProfileUpdateAmbientScroll(id viewControllerObject, UIScrollVi
 static void ApolloProfileRemoveHeader(id viewControllerObject, UITableView *tableView) {
     if (!viewControllerObject) return;
 
-    // The cross-fade may have the nav title at alpha 0; with the header gone the
-    // title is the only identity on the page, so bring it back before clearing
-    // the header association (the fade-target lookup needs it).
+    // With the custom header gone, the navigation title is the only identity.
     if ([viewControllerObject isKindOfClass:[UIViewController class]]) {
-        UIView *fadeTarget = ApolloProfileNavTitleFadeTargetForController((UIViewController *)viewControllerObject);
-        if (fadeTarget) fadeTarget.alpha = 1.0;
-        objc_setAssociatedObject(viewControllerObject, kApolloProfileNavTitleFadeTargetKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        UIViewController *viewController = (UIViewController *)viewControllerObject;
+        ApolloProfileNavTitleView *titleView =
+            objc_getAssociatedObject(viewController.navigationItem,
+                                     kApolloProfileNavTitleViewKey);
+        if (titleView.titleLabel) {
+            titleView.titleLabel.alpha = 1.0;
+            titleView.titleLabel.accessibilityElementsHidden = NO;
+        }
     }
 
     UIView *wrappedHeader = objc_getAssociatedObject(viewControllerObject, kApolloProfileWrappedHeaderKey);
@@ -3195,6 +3189,9 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
         if (ApolloViewControllerLooksProfileRelated(viewController)) {
             ApolloLogDebug(@"[UserAvatars] Profile header skipped class=%@ vc=%p reason=no-table", className, viewControllerObject);
         }
+        ApolloProfileNavTitleView *titleView = ApolloProfileInstallNavTitleView(viewController);
+        titleView.titleLabel.alpha = 1.0;
+        titleView.titleLabel.accessibilityElementsHidden = NO;
         return;
     }
 
@@ -3223,6 +3220,9 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
         if (ApolloViewControllerLooksProfileRelated(viewController)) {
             ApolloLogDebug(@"[UserAvatars] Profile header skipped class=%@ vc=%p table=%p reason=no-username title=%@", className, viewControllerObject, tableView, viewController.navigationItem.title ?: viewController.title ?: @"nil");
         }
+        ApolloProfileNavTitleView *titleView = ApolloProfileInstallNavTitleView(viewController);
+        titleView.titleLabel.alpha = 1.0;
+        titleView.titleLabel.accessibilityElementsHidden = NO;
         return;
     }
 
@@ -4191,6 +4191,7 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
 
 - (void)viewDidLoad {
     %orig;
+    ApolloProfileInstallNavTitleView((UIViewController *)self);
     ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewDidLoad");
     ApolloProfileApplyTabAvatarForController(((UIViewController *)self).tabBarController);
@@ -4203,20 +4204,15 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    ApolloProfileInstallNavTitleView((UIViewController *)self);
     ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewWillAppear");
     ApolloProfileApplyTabAvatarForController(((UIViewController *)self).tabBarController);
 }
 
-- (void)viewWillDisappear:(BOOL)animated {
-    %orig;
-    // Un-fade the shared nav title control we may have driven to alpha 0, so the
-    // next screen doesn't inherit an invisible title if UIKit reuses the control.
-    ApolloProfileResetNavTitleFade((UIViewController *)self);
-}
-
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    ApolloProfileInstallNavTitleView((UIViewController *)self);
     ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewDidAppear");
     ApolloProfileApplyTabAvatarForController(((UIViewController *)self).tabBarController);
@@ -4224,6 +4220,7 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
 
 - (void)viewDidLayoutSubviews {
     %orig;
+    ApolloProfileInstallNavTitleView((UIViewController *)self);
     ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewDidLayoutSubviews");
 }
@@ -4251,6 +4248,17 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
     %orig(notification);
     ApolloProfileRefreshControllersForUsername(nil);
     ApolloProfileScheduleAccountChangeTabAvatarRefresh(@"ProfileViewController account notification");
+}
+
+%end
+
+%hook UINavigationItem
+
+- (void)setTitle:(NSString *)title {
+    %orig(title);
+    ApolloProfileNavTitleView *titleView =
+        objc_getAssociatedObject(self, kApolloProfileNavTitleViewKey);
+    [titleView apollo_setTitle:title];
 }
 
 %end

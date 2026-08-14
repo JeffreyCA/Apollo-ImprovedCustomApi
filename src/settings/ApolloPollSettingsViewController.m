@@ -116,6 +116,7 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
     cell.textLabel.text = @"Option Text Alignment";
     cell.detailTextLabel.text = [self alignmentText];
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 
@@ -127,6 +128,7 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
     toggle.on = [self pollsEnabled];
     [toggle addTarget:self action:@selector(pollsSwitchToggled:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle;
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 
@@ -157,6 +159,7 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
         check.tintColor = [UIColor systemGreenColor];
         [check sizeToFit];
         cell.accessoryView = check;
+        [self apollo_applyPrimaryTextColorToCell:cell];
         return cell;
     }
 

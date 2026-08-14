@@ -31,6 +31,7 @@
 #import <objc/message.h>
 #import "ApolloState.h"
 #import "ApolloCommon.h"
+#import "ApolloScrapeWebView.h"
 #import "ApolloSubredditHighlights.h"
 
 #pragma mark - Minimal runtime interfaces
@@ -588,22 +589,20 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     self.sub = sub; self.done = done; self.polls = 0;
     self.startedAt = [NSDate date]; self.bestItems = nil; self.pollScheduled = NO; self.evaluationInFlight = NO;
     self.awaitingLargeSetConfirmation = NO;
-    UIWindow *win = nil;
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-        if (![s isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene *)s).windows) { if (w.isKeyWindow) win = w; }
-    }
-    if (!win) win = UIApplication.sharedApplication.windows.firstObject;
-    if (!win) { [self finish:nil]; return; }
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     config.websiteDataStore = [ApolloHLWebFetch apollo_scrapeDataStore];
-    self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:config];
-    self.web.navigationDelegate = self;
-    self.web.alpha = 0.011; self.web.userInteractionEnabled = NO;
-    [win insertSubview:self.web atIndex:0];
-    [self.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://www.reddit.com/r/%@/", sub]]]];
-    ApolloLog(@"[Highlights][web] loading r/%@ for full highlights", sub);
-    [self pollAfter:kApolloHLWebInitialPollDelay];
+    __weak typeof(self) ws = self;
+    ApolloScrapeWebViewCreate(config, ^(WKWebView *web) {
+        ApolloHLWebFetch *ss = ws;
+        // The blocker resolve is async, so the fetch may already have been
+        // cancelled (done cleared) by the time we get here.
+        if (!ss || !ss.done) return;
+        ss.web = web;
+        web.navigationDelegate = ss;
+        [web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://www.reddit.com/r/%@/", sub]]]];
+        ApolloLog(@"[Highlights][web] loading r/%@ for full highlights", sub);
+        [ss pollAfter:kApolloHLWebInitialPollDelay];
+    });
 }
 - (void)pollAfter:(double)delay {
     // didFinishNavigation and the fallback timer can both ask for a probe. Keep
@@ -686,7 +685,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     return out;
 }
 - (void)finish:(NSArray<ApolloHLItem *> *)items {
-    if (self.web) { self.web.navigationDelegate = nil; [self.web removeFromSuperview]; self.web = nil; }
+    if (self.web) { self.web.navigationDelegate = nil; self.web = nil; }
     self.pollScheduled = NO; self.evaluationInFlight = NO; self.awaitingLargeSetConfirmation = NO;
     self.startedAt = nil; self.bestItems = nil;
     void (^d)(NSArray *) = self.done; self.done = nil;
@@ -697,7 +696,6 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     if (self.web) {
         self.web.navigationDelegate = nil;
         [self.web stopLoading];
-        [self.web removeFromSuperview];
         self.web = nil;
     }
     self.pollScheduled = NO; self.evaluationInFlight = NO; self.awaitingLargeSetConfirmation = NO;
@@ -2305,6 +2303,11 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
 #pragma mark - Constructor
 
 %ctor {
+    // Compile the scrape ad/media blocker now so the first Full-highlights scrape
+    // of a launch — which can start within a couple of seconds — is already
+    // covered rather than racing the compile.
+    ApolloScrapeWebViewPrewarmBlocker();
+
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloCommunityHighlightsToggleChangedNotification"
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]

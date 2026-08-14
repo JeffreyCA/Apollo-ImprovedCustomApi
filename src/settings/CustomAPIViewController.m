@@ -640,6 +640,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         cell.textLabel.text = title;
         cell.textLabel.numberOfLines = 0;
         cell.detailTextLabel.text = subtitle ? subtitle() : nil;
+        [weakSelf apollo_applyPrimaryTextColorToCell:cell];
         return cell;
     }
                                      onSelect:^{
@@ -981,6 +982,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 [check sizeToFit];
                 cell.accessoryView = check;
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                [weakSelf apollo_applyPrimaryTextColorToCell:cell];
                 return cell;
             }
             cell.textLabel.text = @"Set Up reddit.com Web Sign-In";
@@ -1002,6 +1004,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             }
             cell.textLabel.text = @"Can't sign in?";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushTroubleshootingViewController]; }];
@@ -1016,6 +1019,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.textLabel.numberOfLines = 0;
             }
             cell.textLabel.text = @"Giphy & Image Chest API Key Setup";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushInstructionsViewController]; }];
@@ -1117,6 +1121,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
                 cell.detailTextLabel.text = @"Not signed in — tap to add a web-session account";
             }
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -1210,6 +1215,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             }
             cell.textLabel.text = @"Deleted Comments";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openDeletedCommentsSettings]; }];
@@ -1324,6 +1330,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (ApolloSettingsSection *)buildInterfaceSection {
     __weak typeof(self) weakSelf = self;
 
+    ApolloSettingsRow *iconOnlyTabBar =
+        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
+                                     title:@"Icon-Only Tab Bar"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
+
     ApolloSettingsRow *tabBarIdle =
         [ApolloSettingsRow customRowWithID:@"gen.tabBarIdle"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -1398,8 +1410,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
+                                            footer:@"Customize tab-bar labels and Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
+                                              rows:@[ iconOnlyTabBar, tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -1482,6 +1494,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openApolloAISettings]; }];
@@ -1523,6 +1536,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openInlineMediaSettings]; }];
@@ -1565,6 +1579,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openLinkPreviewSettings]; }];
@@ -1589,6 +1604,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openPollSettings]; }];
@@ -1768,12 +1784,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
-    ApolloSettingsRow *iconOnlyTabBar =
-        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
-                                     title:@"Icon-Only Tab Bar"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
-
     // Mirror of Apollo's native "Hide Username on Tab Bar" switch (relocated
     // here from General → Other, which now hides it — see
     // ApolloSettingsNativeInjections.xm). Same key, and the native change
@@ -1792,8 +1802,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name."
-                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, profileLayout ]];
+                                            footer:@"Customize profile pictures and profile pages. Hide Username on Tab Bar hides only your profile-tab label; Interface → Icon-Only Tab Bar hides every tab label."
+                                              rows:@[ userAvatars, profileTabAvatar, hideUsernameTab, profileLayout ]];
 }
 
 - (NSString *)profileLayoutSummaryText {
@@ -2149,6 +2159,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"🙏", [UIColor systemIndigoColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushThanksToViewController]; }];
@@ -2170,6 +2181,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F4A1", [UIColor systemYellowColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2190,6 +2202,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F41B", [UIColor systemRedColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2208,6 +2221,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F512", [UIColor systemGreenColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2274,6 +2288,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     textField.text = text;
     textField.accessibilityLabel = label;   // VoiceOver: tie the field to its caption
     cell.textLabel.text = label;
+    [self apollo_applyPrimaryTextColorToCell:cell];
 
     return cell;
 }
@@ -2542,6 +2557,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    [self apollo_applyPrimaryTextColorToCell:cell];
     if (b64Image.length > 0) {
         cell.imageView.image = [self roundedImage:[self decodeBase64ToImage:b64Image] size:29 cornerRadius:6.5];
     } else if (!cell.imageView.image) {
@@ -3436,10 +3452,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 - (void)iconOnlyTabBarSwitchToggled:(UISwitch *)sender {
     // Enabling also clears the native Hide Username key (see
-    // ApolloSetHideTabBarTitlesEnabled), so the sibling row below must re-read
-    // its switch state and enablement either way.
+    // ApolloSetHideTabBarTitlesEnabled). The profile-specific row re-reads
+    // that state whenever its screen appears.
     ApolloSetHideTabBarTitlesEnabled(sender.isOn);
-    [self reloadRowWithID:@"profiles.hideUsernameTab"];
 }
 
 - (void)hideUsernameTabSwitchToggled:(UISwitch *)sender {

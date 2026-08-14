@@ -27,6 +27,8 @@
 #import "ApolloState.h"
 #import "ApolloTagFilters.h"
 #import "ApolloWebJSON.h"
+#import "ApolloWebSessionStore.h"
+#import "Defaults.h"
 #import "Tweak.h"
 #import "UIWindow+Apollo.h"
 #import "UserDefaultConstants.h"
@@ -227,29 +229,29 @@ static NSMutableDictionary<NSString *, NSNumber *> *sTagNoProfanityByUser = nil;
 static NSString *sTagEffectiveUsername = nil;
 static NSInteger sTagEffectiveNoProfanity = -1;
 
+// Capture SOURCE rank per username (#861). RDKUser.setNoProfanity: fires from
+// three places, and they are not equally trustworthy:
+//   0 — NSKeyedUnarchiver decode of the archived account blob (AccountManager
+//       loads, the identity layer's repair scan, backup flows). The archived
+//       value is a snapshot from whenever the accounts were last persisted —
+//       observed live re-firing 20s AFTER a fresh network /me had already
+//       captured the current value, clobbering it back to stale.
+//   1 — Mantle JSON parse of a live network response (the real /me).
+//   2 — the tweak's own cookie-authed /api/me.json fetch (keyless accounts,
+//       below), which is the ONLY source that can ever know the pref for a
+//       web-session account: their /api/v1/me goes out cookie-authed to www,
+//       and that endpoint answers {} without OAuth, so no rank-1 parse for
+//       them ever fires.
+// A capture only applies when its rank >= the stored rank, so a stale archive
+// decode can never overwrite a live network value. Ranks are in-memory only;
+// each launch reseeds from the first (decode) capture and upgrades from there.
+static NSMutableDictionary<NSString *, NSNumber *> *sTagNoProfanityRankByUser = nil;
+// Usernames whose keyless pref fetch already ran this launch (retry on failure
+// is re-armed after a cooldown so a flaky launch doesn't hammer reddit).
+static NSMutableSet<NSString *> *sTagKeylessPrefFetchAttempted = nil;
+
 NSNotificationName const ApolloAdultContentBlurPreferenceDidChangeNotification =
     @"ApolloAdultContentBlurPreferenceDidChangeNotification";
-
-// YES when the ACTIVE account authenticates through a cookie web session
-// (keyless mode): the identity layer installs a synthetic OAuth credential on
-// its client (ApolloWebJSONIdentity.xm), so no real /me fetch — and therefore
-// no pref_no_profanity capture — can ever happen for it through the OAuth
-// path. Read from the live client rather than disk so the answer tracks
-// whatever credential the transport is actually using right now.
-static BOOL ApolloTagActiveAccountIsKeyless(void) {
-    id client = ApolloActiveAccountClient();
-    SEL credentialSel = NSSelectorFromString(@"authorizationCredential");
-    SEL tokenSel = NSSelectorFromString(@"accessToken");
-    if (!client || ![client respondsToSelector:credentialSel]) return NO;
-    id credential = ((id (*)(id, SEL))objc_msgSend)(client, credentialSel);
-    if (!credential || ![credential respondsToSelector:tokenSel]) return NO;
-    // RDKOAuthCredential.accessToken is an RDKAccessToken; its own accessToken
-    // getter returns the raw bearer string.
-    id accessToken = ((id (*)(id, SEL))objc_msgSend)(credential, tokenSel);
-    if (!accessToken || ![accessToken respondsToSelector:tokenSel]) return NO;
-    id token = ((id (*)(id, SEL))objc_msgSend)(accessToken, tokenSel);
-    return [token isKindOfClass:[NSString class]] && ApolloWebJSONBearerIsSynthetic((NSString *)token);
-}
 
 BOOL ApolloShouldBlurNSFWMediaInSubreddit(NSString *subreddit) {
     // The tweak's own Tag Filters choice is independent of the Reddit account
@@ -258,13 +260,14 @@ BOOL ApolloShouldBlurNSFWMediaInSubreddit(NSString *subreddit) {
     if (sTagFilterEnabled && ApolloTagFilterTagOn(subreddit, @"nsfw", sTagFilterNSFW)) return YES;
     if (sTagEffectiveNoProfanity == 1) return YES;
     if (sTagEffectiveNoProfanity == 0) return NO;
-    // Unknown: stay covered while Apollo is still loading the active account,
-    // just as its native feed does during launch — unless the account is
-    // keyless, where unknown is permanent (see above) and Apollo's native
-    // feed shows NSFW media uncovered (the synthesized user object carries
-    // noProfanity == NO). If a cookie-routed /me does land later and captures
-    // the real pref, the capture wins over this fallback.
-    return !ApolloTagActiveAccountIsKeyless();
+    // Unknown: stay covered while the pref is still being resolved, just as
+    // Apollo's native feed does during launch. This now includes keyless
+    // accounts: unknown is no longer permanent for them — the cookie-authed
+    // /api/me.json fetch (ApolloTagKickKeylessPrefFetch) resolves the real
+    // pref shortly after the account becomes active, so briefly covering is
+    // the safe default in the meantime (a fetch that cannot land leaves NSFW
+    // covered, never wrongly exposed — #861).
+    return YES;
 }
 
 static void ApolloTagRefreshAllVisibleCells(void);
@@ -293,6 +296,130 @@ static NSString *ApolloTagLiveActiveUsername(void) {
     return currentUser ? ApolloTagNormalizedUsername(currentUser) : nil;
 }
 
+static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh);
+
+// Writes a captured pref onto the LIVE currentUser object when it belongs to
+// the active account (#861). Apollo's NATIVE obscure decision reads
+// currentUser.noProfanity at cell-configure time, so capturing into the
+// tweak's own map is not enough for two cases this heals:
+//   • keyless accounts — the synthesized RDKUser is created with the default
+//     noProfanity == NO and no network parse ever updates it, so the native
+//     feed never blurs no matter what the reddit.com pref says;
+//   • an archive-decoded stale user reinstalled after a fresh /me — the
+//     authoritative capture re-corrects the live object.
+// KVC on the Mantle property, same pattern as the identity layer's username
+// backfill. Returns YES when the stored value actually changed.
+static BOOL ApolloTagStampNoProfanityOnLiveUser(NSString *username, BOOL value) {
+    id client = ApolloActiveAccountClient();
+    if (!client || ![client respondsToSelector:@selector(currentUser)]) return NO;
+    id user = ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser));
+    if (!user || ![ApolloTagNormalizedUsername(user) isEqualToString:username]) return NO;
+    @try {
+        NSNumber *existing = [user valueForKey:@"noProfanity"];
+        if ([existing isKindOfClass:[NSNumber class]] && existing.boolValue == value) return NO;
+        [user setValue:@(value) forKey:@"noProfanity"];
+        ApolloLog(@"[TagFilters] Stamped noProfanity=%d onto live currentUser u/%@ (blur mature media)", value, username);
+        return YES;
+    } @catch (NSException *e) {
+        ApolloLog(@"[TagFilters] live noProfanity stamp failed for u/%@: %@", username, e);
+        return NO;
+    }
+}
+
+// Main thread only. Single entry point for every pref capture. Applies the
+// source-rank rule (see sTagNoProfanityRankByUser), stamps rank>=1 values onto
+// the live user, and re-resolves the effective pref.
+static void ApolloTagRecordNoProfanity(NSString *username, BOOL value, NSInteger rank) {
+    if (username.length == 0) return;
+    if (!sTagNoProfanityByUser) sTagNoProfanityByUser = [NSMutableDictionary dictionary];
+    if (!sTagNoProfanityRankByUser) sTagNoProfanityRankByUser = [NSMutableDictionary dictionary];
+    NSInteger storedRank = sTagNoProfanityRankByUser[username].integerValue;
+    NSNumber *previous = sTagNoProfanityByUser[username];
+    BOOL stamped = NO;
+    if (!previous || rank >= storedRank) {
+        sTagNoProfanityRankByUser[username] = @(rank);
+        if (!previous || previous.boolValue != value) {
+            sTagNoProfanityByUser[username] = @(value);
+            ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d for u/%@ (blur mature media, source rank %ld)",
+                      value, username, (long)rank);
+        }
+        // A decode can only reinstall what the archive already held; never let
+        // it rewrite the live user (rank>=1 values are network truth).
+        if (rank >= 1) stamped = ApolloTagStampNoProfanityOnLiveUser(username, value);
+    } else if (previous && previous.boolValue != value) {
+        ApolloLog(@"[TagFilters] Ignored stale pref_no_profanity=%d for u/%@ (source rank %ld < %ld)",
+                  value, username, (long)rank, (long)storedRank);
+        // The stale value may sit on a just-reinstalled currentUser; re-assert
+        // the authoritative one so the native decision stays correct.
+        stamped = ApolloTagStampNoProfanityOnLiveUser(username, previous.boolValue);
+    }
+    ApolloTagRecomputeEffectiveNoProfanity(stamped);
+}
+
+// Keyless (web-session) accounts never produce a rank-1 capture: their
+// /api/v1/me is cookie-rewritten to www.reddit.com, which answers {} without
+// OAuth. The OLD endpoint /api/me.json DOES honor cookie auth and returns the
+// full t2 blob including pref_no_profanity (verified live), so fetch the pref
+// ourselves. Probe-marked so the transport chokepoint leaves it alone. One
+// attempt per username per launch; a failed attempt re-arms after 60s.
+static void ApolloTagKickKeylessPrefFetch(NSString *username) {
+    if (username.length == 0) return;
+    ApolloWebSessionEntry *session = ApolloWebSessionFor(username);
+    if (session.cookieHeader.length == 0) return; // not a keyless account
+    if (!sTagKeylessPrefFetchAttempted) sTagKeylessPrefFetchAttempted = [NSMutableSet set];
+    if ([sTagKeylessPrefFetchAttempted containsObject:username]) return;
+    [sTagKeylessPrefFetchAttempted addObject:username];
+
+    NSURL *url = ApolloWebJSONProbeURL([NSURL URLWithString:@"https://www.reddit.com/api/me.json"]);
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       timeoutInterval:10.0];
+    [request setValue:session.cookieHeader forHTTPHeaderField:@"Cookie"];
+    [request setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+    request.HTTPShouldHandleCookies = NO;
+
+    NSURLSession *urlSession = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]];
+    NSURLSessionDataTask *task = [urlSession dataTaskWithRequest:request
+                                               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        NSNumber *pref = nil;
+        NSString *parsedName = nil;
+        if (!error && http.statusCode == 200 && data.length > 0) {
+            id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+            // Logged-in shape: {kind:"t2", data:{...}}; a logged-out cookie
+            // answers {} — treated as a failed attempt, not a NO.
+            NSDictionary *me = [root isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)root)[@"data"] : nil;
+            if ([me isKindOfClass:[NSDictionary class]]) {
+                id v = me[@"pref_no_profanity"];
+                if ([v isKindOfClass:[NSNumber class]]) pref = v;
+                id n = me[@"name"];
+                if ([n isKindOfClass:[NSString class]]) parsedName = [n lowercaseString];
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (pref && (parsedName.length == 0 || [parsedName isEqualToString:username])) {
+                ApolloLog(@"[TagFilters] Keyless pref fetch: pref_no_profanity=%d for u/%@", pref.boolValue, username);
+                ApolloTagRecordNoProfanity(username, pref.boolValue, 2);
+            } else {
+                ApolloLog(@"[TagFilters] Keyless pref fetch failed for u/%@ (HTTP %ld, error=%@) — retrying in 60s",
+                          username, (long)http.statusCode, error.localizedDescription);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    [sTagKeylessPrefFetchAttempted removeObject:username];
+                    // Re-kick only while the account is still the active one
+                    // (an archive decode may have seeded a rank-0 value in the
+                    // meantime — the fetch still outranks it, so retry).
+                    if ([sTagEffectiveUsername isEqualToString:username]) {
+                        ApolloTagKickKeylessPrefFetch(username);
+                    }
+                });
+            }
+        });
+    }];
+    [task resume];
+    [urlSession finishTasksAndInvalidate];
+}
+
 // Main thread only. Re-resolves the active account's captured pref; on an
 // EFFECTIVE change (capture for the active account, or an account switch)
 // re-evaluates visible cells — a statically-visible feed gets no layout pass
@@ -300,6 +427,10 @@ static NSString *ApolloTagLiveActiveUsername(void) {
 static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh) {
     NSString *activeUsername = ApolloTagLiveActiveUsername();
     NSNumber *captured = activeUsername.length > 0 ? sTagNoProfanityByUser[activeUsername] : nil;
+    // Keyless accounts can only learn the pref from the tweak's own cookie
+    // fetch (self-guarded: no-op for OAuth accounts and once it has run).
+    // Kicked even when a rank-0 archive value exists — the fetch outranks it.
+    if (activeUsername.length > 0) ApolloTagKickKeylessPrefFetch(activeUsername);
     NSInteger effective = captured ? (captured.boolValue ? 1 : 0) : -1;
     BOOL identityChanged = ![sTagEffectiveUsername isEqualToString:activeUsername];
     if (!forceRefresh && !identityChanged && effective == sTagEffectiveNoProfanity) return;
@@ -733,21 +864,30 @@ static void ApolloTagRefreshAllVisibleCells(void) {
 // state is main-confined (the old direct call also walked UIWindows from the
 // parse thread). Cell refresh happens only when the ACTIVE account's
 // effective value changes, inside the recompute.
+//
+// The setter fires from both live JSON parses AND NSKeyedUnarchiver decodes of
+// the archived account blob; the decode value is disk-stale, so its source is
+// sampled SYNCHRONOUSLY here (per-thread depth around -initWithCoder:) and the
+// ranked recorder decides whether it may apply.
+static __thread NSInteger sTagUserDecodeDepth = 0;
+
 %hook RDKUser
+
+- (id)initWithCoder:(NSCoder *)coder {
+    sTagUserDecodeDepth++;
+    id result = %orig;
+    sTagUserDecodeDepth--;
+    return result;
+}
 
 - (void)setNoProfanity:(BOOL)value {
     %orig;
     id parsedUser = self;
+    NSInteger rank = (sTagUserDecodeDepth > 0) ? 0 : 1;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *username = ApolloTagNormalizedUsername(parsedUser);
         if (username.length == 0) return;  // uncaptured stays conservative (-1)
-        if (!sTagNoProfanityByUser) sTagNoProfanityByUser = [NSMutableDictionary dictionary];
-        NSNumber *previous = sTagNoProfanityByUser[username];
-        if (!previous || previous.boolValue != value) {
-            sTagNoProfanityByUser[username] = @(value);
-            ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d for u/%@ (blur mature media)", value, username);
-        }
-        ApolloTagRecomputeEffectiveNoProfanity(NO);
+        ApolloTagRecordNoProfanity(username, value, rank);
     });
 }
 
@@ -755,14 +895,36 @@ static void ApolloTagRefreshAllVisibleCells(void) {
 
 // A current-user install can belong to any stored client. Re-resolve through
 // AccountManager instead of treating the receiver as proof that it is active.
+//
+// This hook also RE-ASSERTS the authoritative pref onto the object being
+// installed (#861): a stale archive-decoded user can be installed as
+// currentUser AFTER its decode-time capture was rejected — the capture-side
+// stamp corrects whichever object was current at capture time, not the one
+// installed later, and Apollo's native obscure decision reads
+// accounts[currentAccountIndex].currentUser.noProfanity live (Hopper,
+// sub_1002053d8/sub_100303928). Without this, the fresh value wins the
+// capture map while the INSTALLED object quietly reverts the native blur.
 %hook RDKClient
 
 - (void)setCurrentUser:(id)user {
     %orig;
+    id installedUser = user;
     dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *username = ApolloTagNormalizedUsername(installedUser);
+        NSNumber *authoritative = username.length > 0 ? sTagNoProfanityByUser[username] : nil;
+        NSInteger rank = username.length > 0 ? sTagNoProfanityRankByUser[username].integerValue : 0;
+        if (authoritative && rank >= 1) {
+            @try {
+                NSNumber *existing = [installedUser valueForKey:@"noProfanity"];
+                if (![existing isKindOfClass:[NSNumber class]] || existing.boolValue != authoritative.boolValue) {
+                    [installedUser setValue:authoritative forKey:@"noProfanity"];
+                    ApolloLog(@"[TagFilters] Re-asserted noProfanity=%d on installed currentUser u/%@ (blur mature media)",
+                              authoritative.boolValue, username);
+                }
+            } @catch (__unused NSException *e) {}
+        }
         ApolloTagRecomputeEffectiveNoProfanity(NO);
     });
-    (void)user;
 }
 
 %end

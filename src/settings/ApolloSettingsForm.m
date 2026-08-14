@@ -431,6 +431,9 @@ static void ApolloSFAddPath(NSMutableDictionary<NSNumber *, NSMutableArray<NSInd
     } else if (row.kind != ApolloSFRowKindCustom) {
         cell.imageView.image = nil;
     }
+    if (row.kind != ApolloSFRowKindButton && row.kind != ApolloSFRowKindCustom) {
+        [self apollo_applyPrimaryTextColorToCell:cell];
+    }
     if (row.configure) row.configure(cell);
     return cell;
 }

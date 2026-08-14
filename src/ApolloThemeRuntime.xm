@@ -155,8 +155,7 @@ static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
     // background host but never renders the image.) Instead paint the capsule
     // ourselves: an inert themed overlay stacked directly above UIKit's pill
     // view and below the field's text/icons — same overlay pattern the rest of
-    // the tweak uses. Dynamic color, so light/dark resolves via the trait
-    // cascade; didMoveToWindow/traitCollectionDidChange keep it applied.
+    // the tweak uses.
     if (!pill) {
         pill = [[UIView alloc] initWithFrame:field.bounds];
         pill.userInteractionEnabled = NO;
@@ -165,14 +164,31 @@ static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
         pill.layer.cornerCurve = kCACornerCurveContinuous;
         objc_setAssociatedObject(field, kApolloThemeSearchPillKey, pill, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    pill.backgroundColor = pillColor;
+    // Resolve the dynamic color EXPLICITLY against the search BAR's traits
+    // instead of assigning it dynamic and trusting the pill's own trait
+    // environment. Under iOS 27 Liquid Glass the field hosts inserted
+    // subviews in a container whose effective style can disagree with the
+    // bar, and the dynamic color then resolves the LIGHT card variant on a
+    // dark themed Search tab (3.5.1 regression report — near-white pill,
+    // unreadable placeholder). The bar itself always carries the correct
+    // themed style, and both apply points (didMoveToWindow /
+    // traitCollectionDidChange:) re-run this on every trait change, so a
+    // statically resolved color stays current across light/dark flips.
+    pill.backgroundColor = [pillColor resolvedColorWithTraitCollection:searchBar.traitCollection];
     pill.frame = field.bounds;
     if (pill.superview != field) {
         // Directly above UIKit's own background view when it exists (covering
-        // its grey material), else at the very back.
+        // its grey material), else at the very back. The name scan also
+        // accepts effect/glass hosts: iOS 27's Liquid Glass field can draw
+        // its material through a view without "Background" in the class name,
+        // and a pill inserted at index 0 would sit UNDER that material and
+        // wash out.
         UIView *systemPill = nil;
         for (UIView *sub in field.subviews) {
-            if ([NSStringFromClass(sub.class) containsString:@"Background"]) { systemPill = sub; break; }
+            if (sub == pill) continue;
+            NSString *cls = NSStringFromClass(sub.class);
+            if ([cls containsString:@"Background"] || [cls containsString:@"Glass"]
+                || [sub isKindOfClass:UIVisualEffectView.class]) { systemPill = sub; break; }
         }
         if (systemPill) [field insertSubview:pill aboveSubview:systemPill];
         else [field insertSubview:pill atIndex:0];
@@ -293,6 +309,9 @@ static ApolloThemeMode CurrentRuntimeMode(void) {
 
 static BOOL ClassNameLooksApolloOwned(const char *name);
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
+static NSAttributedString *ThemedAttributedText(NSAttributedString *text,
+                                                id owner,
+                                                uintptr_t caller);
 
 // Pinned views carry a font the tweak chose deliberately in a SPECIFIC design
 // (the editor's font-picker tiles and preview rows must each render their own
@@ -300,6 +319,9 @@ static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
 // skip them.
 static const void *kApolloThemeFontPinnedKey = &kApolloThemeFontPinnedKey;
 static const void *kApolloThemeBackgroundColorPassthroughKey = &kApolloThemeBackgroundColorPassthroughKey;
+static const void *kApolloThemeOriginalAttributedTextKey =
+    &kApolloThemeOriginalAttributedTextKey;
+static __thread NSInteger sAttributedTextAssignmentBypass;
 
 void ApolloThemeRuntimeSetFontPinned(id view, BOOL pinned) {
     if (!view) return;
@@ -467,14 +489,24 @@ typedef struct { uint32_t rgb; ApolloThemeToken token; } TextPaletteEntry;
 // which ends in UIColor initWithRed:green:blue:alpha:. We intentionally use the
 // constants only at text render sinks, never as global constructor remaps.
 static const TextPaletteEntry kTextPaletteEntries[] = {
-    // role 0: primary. Read-state primary (0x303030 light / 0xD0D1D6 dark —
-    // the dimmed title Apollo renders once a post is read) routes to secondary
-    // so custom themes keep a visible read/unread distinction (issue #716);
-    // mapping it to Label made read posts identical to unread ones.
+    // role 0: primary. sub_100689abc(role, isRead, isDark) emits three
+    // unread/read pairs, the third gated on "UsePureBlackDarkMode" in the
+    // group.com.christianselig.apollo suite (branch at 0x100689d78):
+    //
+    //     light             #000000 / #999999
+    //     dark              #EEEFF5 / #939499
+    //     dark, pure black  #D0D1D6 / #86868A
+    //
+    // Only the read halves route to SecondaryLabel; that is what keeps a
+    // read/unread distinction under custom themes (issue #716). #D0D1D6 is a
+    // PRIMARY despite being the dimmest of the three — routing it to
+    // SecondaryLabel greys out nearly all text for Pure Black Dark Mode users.
+    // #303030 is emitted nowhere in the binary and is kept only as a defensive
+    // alias of the light primary.
     { 0x000000, ApolloThemeTokenLabel },
-    { 0x303030, ApolloThemeTokenSecondaryLabel },
+    { 0x303030, ApolloThemeTokenLabel },
     { 0xEEEFF5, ApolloThemeTokenLabel },
-    { 0xD0D1D6, ApolloThemeTokenSecondaryLabel },
+    { 0xD0D1D6, ApolloThemeTokenLabel },
     { 0x999999, ApolloThemeTokenSecondaryLabel },
     { 0x939499, ApolloThemeTokenSecondaryLabel },
     { 0x86868A, ApolloThemeTokenSecondaryLabel },
@@ -615,22 +647,82 @@ static UINavigationBar *NavigationBarForDescendant(UIView *view) {
     return nil;
 }
 
+static UIViewController *ChromeBarOwningViewController(UIView *bar) {
+    for (UIResponder *responder = bar; responder; responder = responder.nextResponder) {
+        if ([responder isKindOfClass:[UINavigationController class]]) {
+            UINavigationController *navigationController = (UINavigationController *)responder;
+            return navigationController.visibleViewController ?: navigationController.topViewController;
+        }
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            return (UIViewController *)responder;
+        }
+    }
+    return nil;
+}
+
 // Nav/tab bars host their labels outside Apollo's view/responder chain, so
 // ownership is vetted at the bar: either the chain reaches an Apollo class,
-// or the bar's delegate is one (Apollo's own controllers).
+// the bar's delegate is one, or the owning navigation controller is currently
+// displaying one. UINavigationBar.delegate is normally the UINavigationController
+// itself, so checking only the delegate misses Apollo's Swift child controllers.
 static BOOL ChromeBarLooksApolloOwned(UIView *bar) {
     if (!([bar isKindOfClass:[UINavigationBar class]] || [bar isKindOfClass:[UITabBar class]])) return NO;
     if (ObjectChainLooksApolloOwned(bar)) return YES;
     id delegate = ((id (*)(id, SEL))objc_msgSend)(bar, @selector(delegate));
     if (delegate && ClassNameLooksApolloOwned(class_getName(object_getClass(delegate)))) return YES;
+    UIViewController *owner = ChromeBarOwningViewController(bar);
+    if (owner && ClassNameLooksApolloOwned(class_getName(object_getClass(owner)))) return YES;
     return NO;
 }
 
 // Re-derive one live text control's font into `target`'s design. Only touches
 // fonts that are Apple system designs (explicit app fonts like markdown code
 // faces survive) and skips pinned views (the editor's picker tiles).
+static BOOL AttributedTextSuppliesAllTextFonts(NSAttributedString *text) {
+    if (![text isKindOfClass:[NSAttributedString class]] || text.length == 0) return NO;
+    __block BOOL foundFont = NO;
+    __block BOOL foundUnstyledText = NO;
+    [text enumerateAttributesInRange:NSMakeRange(0, text.length)
+                             options:0
+                          usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attributes,
+                                       NSRange range,
+                                       BOOL *stop) {
+        if ([attributes[NSFontAttributeName] isKindOfClass:[UIFont class]]) {
+            foundFont = YES;
+            return;
+        }
+        // Attachments use their own bounds and intentionally have no font.
+        if ([attributes[NSAttachmentAttributeName] isKindOfClass:[NSTextAttachment class]]) return;
+        foundUnstyledText = YES;
+        *stop = YES;
+    }];
+    return foundFont && !foundUnstyledText;
+}
+
+static void SetLabelAttributedTextWithoutRecapture(UILabel *label,
+                                                   NSAttributedString *text) {
+    sAttributedTextAssignmentBypass++;
+    label.attributedText = text;
+    sAttributedTextAssignmentBypass--;
+}
+
 static void RefreshFontOnTextControl(UIView *view, ApolloThemeFont target) {
     if (FontPinned(view)) return;
+    if ([view isKindOfClass:[UILabel class]] &&
+        AttributedTextSuppliesAllTextFonts(((UILabel *)view).attributedText)) {
+        UILabel *label = (UILabel *)view;
+        NSAttributedString *original = objc_getAssociatedObject(
+            label, kApolloThemeOriginalAttributedTextKey);
+        NSAttributedString *source = original ?: label.attributedText;
+        NSAttributedString *themed = ApolloThemeCurrentSnapshot()->enabled
+            ? ThemedAttributedText(source, label,
+                                   (uintptr_t)&RefreshFontOnTextControl)
+            : source;
+        if (![themed isEqualToAttributedString:label.attributedText]) {
+            SetLabelAttributedTextWithoutRecapture(label, themed);
+        }
+        return;
+    }
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
     if (![font isKindOfClass:[UIFont class]] || !FontIsThemeable(font)) return;
     sFontBypass++;
@@ -691,6 +783,26 @@ static void RethemeFontOnAttach(UIView *view) {
     if (!snapshot->enabled || sFontBypass) return;
     if (!view.window) return;
     if (FontPinned(view)) return;
+    // An attributed label's visible font and color come from its string, while
+    // UILabel.font remains the backing line-box font. Theme the attributed
+    // runs in place, but leave that backing font untouched: replacing it can
+    // both enlarge the rendered text and collapse spacing that intentionally
+    // relies on a larger line box (Recently Read's 12pt stats inside a default
+    // 17pt label).
+    if ([view isKindOfClass:[UILabel class]] &&
+        AttributedTextSuppliesAllTextFonts(((UILabel *)view).attributedText)) {
+        if (!ObjectChainLooksApolloOwned(view)) return;
+        UILabel *label = (UILabel *)view;
+        NSAttributedString *original = objc_getAssociatedObject(
+            label, kApolloThemeOriginalAttributedTextKey);
+        NSAttributedString *source = original ?: label.attributedText;
+        NSAttributedString *themed = ThemedAttributedText(
+            source, label, (uintptr_t)&RethemeFontOnAttach);
+        if (![themed isEqualToAttributedString:label.attributedText]) {
+            SetLabelAttributedTextWithoutRecapture(label, themed);
+        }
+        return;
+    }
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
     if (![font isKindOfClass:[UIFont class]] || !FontIsThemeable(font)) return;
     sFontBypass++;
@@ -701,21 +813,52 @@ static void RethemeFontOnAttach(UIView *view) {
     sFontBypass--;
 }
 
-static void ApplyThemeFontToNavigationTitleControl(UIView *titleControl) {
+static void ApplyThemeColorToNavigationTitleLabels(UIView *view, UIColor *primaryColor) {
     const ApolloThemeRuntimeSnapshot *snapshot = ApolloThemeCurrentSnapshot();
-    if (!snapshot->enabled || ![titleControl isKindOfClass:[UIView class]]) return;
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *label = (UILabel *)view;
+        NSAttributedString *original =
+            objc_getAssociatedObject(label, kApolloThemeOriginalAttributedTextKey);
+        NSAttributedString *source = original ?: label.attributedText;
+        if (source.length > 0) {
+            NSAttributedString *base = snapshot->enabled
+                ? ThemedAttributedText(source, label,
+                                       (uintptr_t)&ApplyThemeColorToNavigationTitleLabels)
+                : source;
+            NSMutableAttributedString *colored = [base mutableCopy];
+            [colored addAttribute:NSForegroundColorAttributeName
+                            value:primaryColor
+                            range:NSMakeRange(0, colored.length)];
+            if (![colored isEqualToAttributedString:label.attributedText]) {
+                SetLabelAttributedTextWithoutRecapture(label, colored);
+            }
+        } else if (![label.textColor isEqual:primaryColor]) {
+            label.textColor = primaryColor;
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        ApplyThemeColorToNavigationTitleLabels(subview, primaryColor);
+    }
+}
+
+static void ApplyThemeToNavigationTitleControl(UIView *titleControl) {
+    const ApolloThemeRuntimeSnapshot *snapshot = ApolloThemeCurrentSnapshot();
+    if (![titleControl isKindOfClass:[UIView class]]) return;
     if (!ChromeBarLooksApolloOwned(NavigationBarForDescendant(titleControl))) return;
-    RefreshFontsInViewTree(titleControl, snapshot->fontChoices[CurrentRuntimeMode()], YES);
+    ApolloThemeFont target = snapshot->enabled
+        ? snapshot->fontChoices[CurrentRuntimeMode()]
+        : ApolloThemeFontSystem;
+    RefreshFontsInViewTree(titleControl, target, YES);
+    UIColor *primary = snapshot->enabled
+        ? ApolloThemeRuntimeColor(ApolloThemeTokenLabel)
+        : [UIColor labelColor];
+    if (primary) ApplyThemeColorToNavigationTitleLabels(titleControl, primary);
 }
 
 // Per-thread text-sink bypass (ASDK builds nodes off the main thread, so a
 // plain global would leak the bypass across concurrently-initializing nodes).
-// Incremented around code whose text must keep its original colors — currently
-// SmallInfoOverlayNode, the GIF/gallery duration pill (issue #710): its text
-// sits on an always-dark blurred pill that never follows the theme, but its
-// near-white color collides with the dark-mode text palette constants, so the
-// remap sank it to the theme's Label token — dark, and therefore unreadable on
-// the pill, whenever a light custom theme was active.
+// Raised around the duration-pill restore below (issue #710) so our own
+// corrective setAttributedText: is not re-themed by the ASTextNode sink.
 static __thread NSInteger sTextSinkBypass;
 
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller) {
@@ -1660,6 +1803,12 @@ void ApolloThemeRuntimeInvalidate(void) {
 }
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
+    if (sAttributedTextAssignmentBypass) {
+        %orig(attributedText);
+        return;
+    }
+    objc_setAssociatedObject(self, kApolloThemeOriginalAttributedTextKey,
+                             [attributedText copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     %orig(ThemedAttributedText(attributedText, (id)self, caller));
 }
@@ -1751,9 +1900,14 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 
 %hook _UINavigationBarTitleControl
 
+- (void)didMoveToWindow {
+    %orig;
+    if (self.window) ApplyThemeToNavigationTitleControl((UIView *)self);
+}
+
 - (void)layoutSubviews {
     %orig;
-    ApplyThemeFontToNavigationTitleControl((UIView *)self);
+    ApplyThemeToNavigationTitleControl((UIView *)self);
 }
 
 %end
@@ -1829,23 +1983,60 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 
 %end
 
-// The GIF/gallery duration pill (issue #710 — see sTextSinkBypass). Its text
-// is set from init and (re)referenced while building the layout spec; bypass
-// the text remap inside both so the pill keeps Apollo's original near-white
-// text on its always-dark backdrop instead of the theme's Label color.
-%hook _TtC6Apollo20SmallInfoOverlayNode
+// The GIF/gallery duration pill (issue #710). Apollo's Swift init
+// (sub_1002d78a4) builds a translucent WHITE capsule with BLACK text in both
+// appearances. #000000 is the light primary in kTextPaletteEntries, so without
+// this the ASTextNode sink swaps it for the theme's dynamic Label colour —
+// near-black in light mode, near-white in dark, i.e. white-on-white. The
+// capsule is never themed, so only the text moves.
+//
+// There is nowhere to raise the bypass around that assignment: -init is a Swift
+// unimplemented-initializer stub that is never called, the designated init
+// reaches ASDisplayNode via objc_msgSendSuper2, -layoutSpecThatFits: runs long
+// after the text is set, and -didLoad never fires — the pill loads no view or
+// layer of its own. So schedule the restore from the layout pass and write on
+// the main thread once it has ended; mutating node state mid-layout is
+// unsupported in ASDK. The flag is set at schedule time so repeated passes
+// queue the work once.
+static const void *kApolloThemePillRestoredKey = &kApolloThemePillRestoredKey;
 
-- (id)init {
+static void ApolloThemeRestoreOverlayPillText(id node) {
+    if (!node || !ApolloThemeCurrentSnapshot()->enabled) return;
+    Ivar ivar = class_getInstanceVariable(object_getClass(node), "textNode");
+    id textNode = ivar ? object_getIvar(node, ivar) : nil;
+    if (![textNode respondsToSelector:@selector(attributedText)]) return;
+
+    NSAttributedString *text = [textNode attributedText];
+    if (![text isKindOfClass:[NSAttributedString class]] || text.length == 0) return;
+
+    if (sDebugLogging) {
+        UIColor *was = [text attribute:NSForegroundColorAttributeName atIndex:0 effectiveRange:NULL];
+        ApolloLog(@"ThemeRuntime: pill '%@' restore #%06X -> #000000",
+                  text.string, ApolloThemeRGBFromUIColor(was));
+    }
+    NSMutableAttributedString *stock = [text mutableCopy];
+    [stock addAttribute:NSForegroundColorAttributeName
+                  value:[UIColor blackColor]
+                  range:NSMakeRange(0, stock.length)];
     sTextSinkBypass++;
-    id result = %orig;
+    [textNode setAttributedText:stock];
     sTextSinkBypass--;
-    return result;
 }
 
+%hook _TtC6Apollo20SmallInfoOverlayNode
+
 - (id)layoutSpecThatFits:(struct ApolloThemeSizeRange)fits {
-    sTextSinkBypass++;
     id result = %orig;
-    sTextSinkBypass--;
+    // ASDK lays out off the main thread; schedule, never write, from in here.
+    if (ApolloThemeCurrentSnapshot()->enabled &&
+        !objc_getAssociatedObject(self, kApolloThemePillRestoredKey)) {
+        objc_setAssociatedObject(self, kApolloThemePillRestoredKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        __weak id weakNode = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloThemeRestoreOverlayPillText(weakNode);
+        });
+    }
     return result;
 }
 
