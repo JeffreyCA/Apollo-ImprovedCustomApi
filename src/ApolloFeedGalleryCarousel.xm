@@ -278,6 +278,13 @@ static UINavigationController *ApolloFeedGalleryAncestorNavigationController(UIV
 // deliberate pull, but far less than a page turn.
 static const CGFloat kApolloFeedGalleryReleaseHandOffOverscroll = 16.0;
 
+// The begin-time hand-off only acts on an unambiguous velocity: below this
+// floor the hysteresis reading is jitter, and a wrong-sign blip would hand
+// the touch away and navigate — the one failure mode worse than a bounce.
+// Marginal drags simply fall through to the release-past-edge path, which
+// decides from release position and needs no velocity at all.
+static const CGFloat kApolloFeedGalleryHandOffMinimumVelocity = 150.0;
+
 // ApolloNavigationController keeps the pages popped by swipe-back in a Swift
 // [UIViewController] ivar named poppedViewControllers; its goForward command
 // and right-side navigation pan re-push from it (RE: the class's ivar list and
@@ -318,23 +325,29 @@ static BOOL ApolloFeedGalleryCanGoForward(UINavigationController *navigationCont
         // take over the same touch. Only decline when that navigation can
         // actually act; otherwise keep the native bounce.
         //
-        // Direction comes from the velocity SIGN alone: translationInView: is
-        // still zero at pan-hysteresis time, and any magnitude or axis-ratio
-        // gate here rejects slow or arced swipes (both measured during the
-        // PR #805 review).
+        // Direction comes from the velocity sign (translationInView: is still
+        // zero at pan-hysteresis time), taken only above a magnitude floor:
+        // hysteresis velocity can read as zero or momentarily backwards for
+        // real fingers, and a false hand-off navigates the user away, which
+        // is worse than a bounce. Anything below the floor falls through to
+        // the deterministic release-past-edge path in the scroll delegate.
         UIPanGestureRecognizer *pan = (UIPanGestureRecognizer *)gestureRecognizer;
         CGFloat velocityX = [pan velocityInView:self].x;
-        BOOL rightToLeft = self.effectiveUserInterfaceLayoutDirection ==
-            UIUserInterfaceLayoutDirectionRightToLeft;
-        CGFloat towardPrevious = rightToLeft ? -velocityX : velocityX;
         CGFloat maximumOffset = self.contentSize.width - CGRectGetWidth(self.bounds);
-        if (maximumOffset > 0.5 && velocityX != 0.0) {
-            BOOL atFirstPage = rightToLeft ? (self.contentOffset.x >= maximumOffset - 0.5)
-                                           : (self.contentOffset.x <= 0.5);
-            BOOL atLastPage = rightToLeft ? (self.contentOffset.x <= 0.5)
-                                          : (self.contentOffset.x >= maximumOffset - 0.5);
-            BOOL wantsBack = atFirstPage && towardPrevious > 0.0;
-            BOOL wantsForward = atLastPage && towardPrevious < 0.0;
+        if (maximumOffset > 0.5 &&
+            fabs(velocityX) >= kApolloFeedGalleryHandOffMinimumVelocity) {
+            // Pages are laid out left-to-right in every locale (see
+            // layoutSubviews), so the first image sits at offset 0 even under
+            // RTL. Only the NAVIGATION meaning of pulling past an edge
+            // mirrors with the layout direction, not the edges themselves.
+            BOOL atFirstPage = self.contentOffset.x <= 0.5;
+            BOOL atLastPage = self.contentOffset.x >= maximumOffset - 0.5;
+            BOOL pullingPastLeading = atFirstPage && velocityX > 0.0;
+            BOOL pullingPastTrailing = atLastPage && velocityX < 0.0;
+            BOOL rightToLeft = self.effectiveUserInterfaceLayoutDirection ==
+                UIUserInterfaceLayoutDirectionRightToLeft;
+            BOOL wantsBack = rightToLeft ? pullingPastTrailing : pullingPastLeading;
+            BOOL wantsForward = rightToLeft ? pullingPastLeading : pullingPastTrailing;
             if (wantsBack || wantsForward) {
                 UINavigationController *navigationController =
                     ApolloFeedGalleryAncestorNavigationController(self);
