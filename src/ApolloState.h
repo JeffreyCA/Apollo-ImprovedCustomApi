@@ -23,6 +23,9 @@ extern BOOL sShowRecentlyReadThumbnails;
 extern BOOL sFeedTextPostThumbnails;
 // Default-on large-feed carousel for Reddit-native multi-image galleries.
 extern BOOL sFeedGalleryCarousel;
+// Default-on: at the carousel's first/last image, swiping past the edge hands
+// the drag to Apollo's swipe-back/forward navigation instead of rubber-banding.
+extern BOOL sFeedGalleryEdgeSwipeNav;
 // Default-on fullscreen-media comments pane, opened by upward flick or button.
 extern BOOL sSwipeUpForComments;
 extern NSInteger sPreferredGIFFallbackFormat;

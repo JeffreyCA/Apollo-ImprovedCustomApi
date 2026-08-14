@@ -1635,6 +1635,13 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                       isOn:^BOOL { return sFeedGalleryCarousel; }
                                   onToggle:^(UISwitch *sender) { [weakSelf feedGalleryCarouselSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *edgeSwipeNav =
+        [ApolloSettingsRow switchRowWithID:@"media.feedGalleryEdgeSwipeNav"
+                                     title:@"Swipe Past Gallery to Navigate"
+                                      isOn:^BOOL { return sFeedGalleryEdgeSwipeNav; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedGalleryEdgeSwipeNavSwitchToggled:sender]; }];
+    edgeSwipeNav.visible = ^BOOL { return sFeedGalleryCarousel; };
+
     ApolloSettingsRow *swipeComments =
         [ApolloSettingsRow switchRowWithID:@"media.swipeUpComments"
                                      title:@"Swipe Up for Comments"
@@ -1642,8 +1649,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                   onToggle:^(UISwitch *sender) { [weakSelf swipeUpCommentsSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Browsing"
-                                            footer:@"Swipe through Reddit image galleries without leaving the feed. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
-                                              rows:@[ feedGalleries, swipeComments ]];
+                                            footer:@"Swipe through Reddit image galleries without leaving the feed. With Swipe Past Gallery to Navigate, continuing to swipe at a gallery's first or last image goes back or forward to the previous page instead of bouncing. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
+                                              rows:@[ feedGalleries, edgeSwipeNav, swipeComments ]];
 }
 
 - (ApolloSettingsSection *)buildMediaPlaybackSection {
@@ -3415,6 +3422,13 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sFeedGalleryCarousel = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sFeedGalleryCarousel forKey:UDKeyFeedGalleryCarousel];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedGalleryCarouselChangedNotification object:nil];
+    // The edge-swipe navigation row is only shown while the carousel is on.
+    [self visibilityDidChange];
+}
+
+- (void)feedGalleryEdgeSwipeNavSwitchToggled:(UISwitch *)sender {
+    sFeedGalleryEdgeSwipeNav = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFeedGalleryEdgeSwipeNav forKey:UDKeyFeedGalleryEdgeSwipeNav];
 }
 
 - (void)swipeUpCommentsSwitchToggled:(UISwitch *)sender {

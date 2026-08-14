@@ -260,6 +260,36 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
 
 #pragma mark - Gesture-cooperative paging scroll view
 
+static UINavigationController *ApolloFeedGalleryAncestorNavigationController(UIView *view) {
+    for (UIResponder *responder = view.nextResponder; responder; responder = responder.nextResponder) {
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            UIViewController *viewController = (UIViewController *)responder;
+            if (viewController.navigationController) return viewController.navigationController;
+            return [viewController isKindOfClass:[UINavigationController class]]
+                ? (UINavigationController *)viewController : nil;
+        }
+    }
+    return nil;
+}
+
+// ApolloNavigationController keeps the pages popped by swipe-back in a Swift
+// [UIViewController] ivar named poppedViewControllers; its goForward command
+// and right-side navigation pan re-push from it (RE: the class's ivar list and
+// method list). A Swift array ivar is a single word holding the storage
+// object, which on Darwin is an NSArray subclass, so counting it through the
+// runtime is legitimate. Every failure path (different nav class, missing
+// ivar on a future Apollo, nil/empty array) returns NO, which keeps the
+// carousel's native rubber-band.
+static BOOL ApolloFeedGalleryCanGoForward(UINavigationController *navigationController) {
+    id popped = ApolloFeedGalleryObjectIvar(navigationController, "poppedViewControllers");
+    if (![popped respondsToSelector:@selector(count)]) return NO;
+    @try {
+        return ((NSUInteger (*)(id, SEL))objc_msgSend)(popped, @selector(count)) > 0;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
 @interface ApolloFeedGalleryScrollView : UIScrollView
 @end
 
@@ -270,6 +300,50 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     // carousel drag. There is no reorder interaction to preserve here.
     (void)view;
     return YES;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer == self.panGestureRecognizer && sFeedGalleryEdgeSwipeNav) {
+        // The carousel owns a horizontal drag only while it still has a page
+        // to show in that direction. At the first/last page the drag could
+        // only rubber-band, so decline it: the failure requirements wired in
+        // didMoveToWindow then release Apollo's own back/forward navigation
+        // pans (ApolloNavigationController's left/right pan recognizers) to
+        // take over the same touch. Only decline when that navigation can
+        // actually act; otherwise keep the native bounce.
+        //
+        // Direction comes from the velocity SIGN alone: translationInView: is
+        // still zero at pan-hysteresis time, and any magnitude or axis-ratio
+        // gate here rejects slow or arced swipes (both measured during the
+        // PR #805 review).
+        UIPanGestureRecognizer *pan = (UIPanGestureRecognizer *)gestureRecognizer;
+        CGFloat velocityX = [pan velocityInView:self].x;
+        BOOL rightToLeft = self.effectiveUserInterfaceLayoutDirection ==
+            UIUserInterfaceLayoutDirectionRightToLeft;
+        CGFloat towardPrevious = rightToLeft ? -velocityX : velocityX;
+        CGFloat maximumOffset = self.contentSize.width - CGRectGetWidth(self.bounds);
+        if (maximumOffset > 0.5 && velocityX != 0.0) {
+            BOOL atFirstPage = rightToLeft ? (self.contentOffset.x >= maximumOffset - 0.5)
+                                           : (self.contentOffset.x <= 0.5);
+            BOOL atLastPage = rightToLeft ? (self.contentOffset.x <= 0.5)
+                                          : (self.contentOffset.x >= maximumOffset - 0.5);
+            BOOL wantsBack = atFirstPage && towardPrevious > 0.0;
+            BOOL wantsForward = atLastPage && towardPrevious < 0.0;
+            if (wantsBack || wantsForward) {
+                UINavigationController *navigationController =
+                    ApolloFeedGalleryAncestorNavigationController(self);
+                BOOL navigationCanAct = wantsBack
+                    ? navigationController.viewControllers.count > 1
+                    : ApolloFeedGalleryCanGoForward(navigationController);
+                if (navigationCanAct) {
+                    ApolloLog(@"[FeedGallery] handing %@ swipe to navigation (offset=%.0f)",
+                              wantsBack ? @"back" : @"forward", self.contentOffset.x);
+                    return NO;
+                }
+            }
+        }
+    }
+    return [super gestureRecognizerShouldBegin:gestureRecognizer];
 }
 
 - (void)didMoveToWindow {
