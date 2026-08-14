@@ -54,6 +54,13 @@ static NSCache<NSString *, NSArray<NSNumber *> *> *ApolloSBWebStatsCache(void) {
 @property (nonatomic) int polls;
 @end
 @implementation ApolloSBStatsWebFetch
+// Last-resort insurance: Create attaches the web view, so the window (not this
+// object) holds the strong reference — dropping the fetch without Destroy would
+// orphan an attached web view behind the app. Every normal path already goes
+// through Destroy; this makes "no orphaned attached web view" structural.
+- (void)dealloc {
+    ApolloScrapeWebViewDestroy(_web);
+}
 - (void)startForSub:(NSString *)sub completion:(void (^)(NSNumber *, NSNumber *))done {
     self.sub = sub; self.done = done; self.polls = 0;
     __weak typeof(self) ws = self;
@@ -90,7 +97,7 @@ static NSCache<NSString *, NSArray<NSNumber *> *> *ApolloSBWebStatsCache(void) {
     }];
 }
 - (void)finishV:(NSNumber *)v c:(NSNumber *)c {
-    if (self.web) { self.web.navigationDelegate = nil; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     void (^d)(NSNumber *, NSNumber *) = self.done; self.done = nil;
     if (d) d(v, c);
 }

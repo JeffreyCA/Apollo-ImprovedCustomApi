@@ -45,6 +45,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAISummary.xm \
     $(SRC_DIR)/ApolloAICloudBridge.m \
     $(SRC_DIR)/ApolloAutoHideMetaFeeds.xm \
+    $(SRC_DIR)/ApolloDevvitPosts.xm \
     $(SRC_DIR)/ApolloWhatsNew.xm \
     $(WHATS_NEW_GEN_M) \
     $(SRC_DIR)/Tweak.xm \

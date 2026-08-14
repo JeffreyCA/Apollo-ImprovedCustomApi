@@ -151,6 +151,7 @@ typedef NSDictionary *_Nullable (^ApolloThemeGalleryResolver)(NSString *slug);
 #pragma mark - Crash kill-switch (spec §18)
 
 - (void)beginLaunchAttempt;     // call early, before runtime activation
+- (void)markRunLoopStarted;     // call on the first main-queue drain (real launch, not prewarm)
 - (void)markLaunchStable;       // call once the app reaches a stable point
 - (BOOL)runtimeDisabledDueToCrash;
 - (void)clearCrashDisable;      // user re-enables from Theme Manager

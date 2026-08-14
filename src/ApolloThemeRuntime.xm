@@ -2102,10 +2102,31 @@ static void ApolloThemeRestoreOverlayPillText(id node) {
         if (store.runtimeDisabledDueToCrash)
             ApolloLog(@"ThemeRuntime: ctor — runtime DISABLED by crash kill-switch");
         ApolloThemeRuntimeReload();
-        // Mark launch stable once the UI has had time to come up (the feed
-        // renders within ~1-3s; 5s clears the kill-switch marker for a healthy
-        // launch while still catching a theme that crashes during startup).
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ [store markLaunchStable]; });
+        // Stability bookkeeping is anchored to the first main-queue drain, not
+        // ctor time: during an iOS prewarm this ctor runs but the run loop does
+        // not, so both marks must wait for the app to REALLY launch (a timer
+        // from ctor would have long expired by the time a prewarmed process is
+        // foregrounded, shrinking the crash-detection window to zero).
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [store markRunLoopStarted];
+            // Mark launch stable once the UI has had time to come up (the feed
+            // renders within ~1-3s; 5s clears the kill-switch marker for a
+            // healthy launch while still catching a theme crashing at startup).
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [store markLaunchStable]; });
+        });
+        // Reaching the background is also proof the launch didn't brick: the
+        // user got in and left before the 5s timer. Without this, backgrounding
+        // quickly and later being jetsammed while suspended (timer never fired)
+        // would count a strike against the theme. One-shot — the timer owns
+        // every later stable mark.
+        __block id bgObserver = [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidEnterBackgroundNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+            [store markLaunchStable];
+            if (bgObserver) { [[NSNotificationCenter defaultCenter] removeObserver:bgObserver]; bgObserver = nil; }
+        }];
     }
 }

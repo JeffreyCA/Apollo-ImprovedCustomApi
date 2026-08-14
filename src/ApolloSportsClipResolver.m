@@ -19,20 +19,36 @@
 //     streamain.com with the same id) — highest-volume host. Video URL is
 //     unrelated to the page id; GET https://streamain.com/embed/<id> (small
 //     static HTML) and read the data-link="…" attribute of its <video> tag.
+//     The embed's poster="…" attribute disappeared ~2026-08; the poster now
+//     comes from the watch page's og:image (fetched only when the embed
+//     yields none, in parallel with the mp4 probe and capped at 4s — its
+//     /thumbnails/<unixts>_thumb.jpg name is NOT derivable from the
+//     data-link filename).
 //   bangr.im — og:video = https://cdn.bangr.im/videos/<id>.mp4; predictable URL
 //     used as fallback if the page fetch fails. NOTE: site AND CDN return
 //     410 Gone as of 2026-07-16 (deliberate shutdown); entry kept in case the
 //     domain resurrects — dead clips already surface the player's error state.
-//   dubz.link/.co — no og:video; predictable CDN URL. Mid-2026 the CDN moved
-//     from cdn.squeelab.com/guest/videos/<id>.mp4 to
-//     cdn.makevos.com/videos/<id>.mp4 and the two serve DISJOINT id sets (new
-//     clips only on makevos, pre-move clips only on squeelab), so both are
-//     probed, current CDN first. NOTE: squeelab ignores Range headers, so the
-//     probe uses HEAD only.
+//   dubz.link/.co — no og:video; predictable CDN URL, but WHICH CDN is keyed on
+//     the URL shape (verified 2026-08-14): /c/<id> clips live on
+//     cdn.makevos.com/videos/<id>.mp4 and /v/<id> clips on
+//     cdn.squeelab.com/guest/videos/<id>.mp4 — strictly disjoint id sets, and
+//     the wrong CDN answers 500. The shape picks the primary; the other CDN
+//     stays as a fallback in case the split shifts again. NOTE: squeelab
+//     ignores Range headers, so the probe uses HEAD only.
 //   dropr.co — og:video -> cdn.dropr.co/<unrelated-16hex>.(mp4|mov); a dead or
 //     still-encoding clip serves an og:video-less "Video is processing" page.
 //   bdata-producedclips.mlb.com / mlb-cuts-diamond.mlb.com — the post URL IS
 //     the mp4 (Apollo has no generic direct-.mp4 case; it's imgur-locked).
+//     cuts-diamond URLs are deep /FORGE/<y>/<y-m>/<d>/<name>_<bitrate>K.mp4
+//     paths; posts usually link the 16000K rendition (~100MB), whose 4000K
+//     twin (~10-30MB) exists at the same name — probed first, posted URL as
+//     fallback. Rare .m3u8 bdata posts are deliberately unrecognized (the
+//     synthesized-Streamable pipeline expects progressive mp4).
+//
+// Retention (checked 2026-08-14): streamin/streamain/dubz/dropr/MLB clips
+// survive >=1 month; streamff now purges after ~3 DAYS (share API returns []),
+// so most non-fresh streamff posts resolve dead — that's the host, not a
+// recipe break.
 
 #import "ApolloSportsClipResolver.h"
 #import "ApolloCommon.h"
@@ -74,6 +90,7 @@ static SCHostKind SCKindForHost(NSString *host) {
             @"dubz.live":     @(SCHostDubz),
             @"dropr.co":      @(SCHostDropr),
             @"bdata-producedclips.mlb.com": @(SCHostMLBDirect),
+            @"mlb-cuts-diamond.mlb.com":    @(SCHostMLBDirect),
         };
     });
     return (SCHostKind)[table[host] integerValue];
@@ -104,10 +121,12 @@ static NSString *const kSCStreamablePatternWithQuery =
 // when our replacement is the one that lands.
 //
 // MLB note: bdata-producedclips URLs are a single "<uuid>.mp4" segment off the
-// host root (verified against live r/baseball posts), so the one-segment shape
-// here is deliberate. MLB's OTHER clip CDN (mlb-cuts-diamond.mlb.com) uses deep
-// /FORGE/<date>/… paths that can't ride through the single shortcode capture
-// group, so it's intentionally unsupported (also absent from SCKindForHost).
+// host root (verified against live r/baseball posts). mlb-cuts-diamond URLs
+// are deep /FORGE/<y>/<y-m>/<d>/<file>.mp4 paths — its branch swallows the
+// directory segments non-capturingly so group 1 stays the filename stem (the
+// resolver never derives anything from the id for MLB; it replays the post URL
+// itself). Rare bdata ".m3u8" posts intentionally DON'T match (the stem
+// capture can't cross the dot) and stay link cards.
 static NSString *const kSCWidenedStreamablePattern =
     @"^(?:(?:https?:)?//)?(?:www\\.)?(?:"
     @"streamable\\.com/(?:edit/)?"
@@ -118,6 +137,7 @@ static NSString *const kSCWidenedStreamablePattern =
     @"|dropr\\.co/v/"
     @"|(?:streamain\\.com|streama\\.in)/(?:[a-z]{2}/)?"
     @"|bdata-producedclips\\.mlb\\.com/"
+    @"|mlb-cuts-diamond\\.mlb\\.com/(?:[\\w-]+/)*"
     @")([\\w-]+)(?:\\.mp4)?(?:/watch)?/?(?:\\?.*)?$";
 
 NSString *ApolloSportsClipsWidenPatternIfNeeded(NSString *pattern) {
@@ -208,22 +228,27 @@ static NSString *SCUserAgent(void) {
     return @"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 }
 
-static NSMutableURLRequest *SCRequest(NSURL *url, NSString *method) {
+static NSMutableURLRequest *SCRequest(NSURL *url, NSString *method, NSTimeInterval timeout) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                   timeoutInterval:12.0];
+                                                   timeoutInterval:timeout];
     req.HTTPMethod = method;
     [req setValue:SCUserAgent() forHTTPHeaderField:@"User-Agent"];
     return req;
 }
 
-static void SCFetch(NSURL *url, NSString *method, void (^cb)(NSData *data, NSHTTPURLResponse *http)) {
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:SCRequest(url, method)
+static void SCFetchWithTimeout(NSURL *url, NSString *method, NSTimeInterval timeout,
+                               void (^cb)(NSData *data, NSHTTPURLResponse *http)) {
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:SCRequest(url, method, timeout)
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         cb(error ? nil : data, http);
     }];
     [task resume];
+}
+
+static void SCFetch(NSURL *url, NSString *method, void (^cb)(NSData *data, NSHTTPURLResponse *http)) {
+    SCFetchWithTimeout(url, method, 12.0, cb);
 }
 
 // Validates that a candidate video URL actually serves: 2xx after redirects AND
@@ -346,22 +371,33 @@ static void SCResolveStreamin(NSString *clipID, void (^completion)(NSDictionary 
     SCFinishWithCandidate(@"streamin", mp4, poster, 0, 0, 0, completion);
 }
 
-// dubz: predictable from the clip id, but the CDN moved mid-2026 from
-// cdn.squeelab.com to cdn.makevos.com and the two serve DISJOINT id sets (new
-// clips exist only on makevos, pre-move clips only on squeelab) — probe the
-// current CDN first, then the legacy one.
-static void SCResolveDubz(NSString *clipID, void (^completion)(NSDictionary *)) {
-    NSURL *mp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.makevos.com/videos/%@.mp4", clipID]];
-    NSURL *poster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.makevos.com/thumbnails/%@.jpg", clipID]];
-    SCProbeVideoURL(mp4, ^(BOOL ok) {
+// dubz: predictable from the clip id, but the host's storage is split by URL
+// shape (2026-08): /c/<id> clips exist only on cdn.makevos.com and /v/<id>
+// clips only on cdn.squeelab.com (the wrong CDN answers 500). The shape picks
+// which CDN to probe first; the other stays as a fallback so a future
+// re-shuffle degrades to one extra probe instead of dead clips.
+static void SCResolveDubz(NSString *clipID, NSString *originalURL, void (^completion)(NSDictionary *)) {
+    NSURL *makevosMp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.makevos.com/videos/%@.mp4", clipID]];
+    NSURL *makevosPoster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.makevos.com/thumbnails/%@.jpg", clipID]];
+    NSURL *squeelabMp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/videos/%@.mp4", clipID]];
+    NSURL *squeelabPoster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/thumbnails/%@.jpg", clipID]];
+
+    // Bare dubz.link/<id> posts (no /v/ or /c/) get the makevos-first default.
+    // The shape is read from the URL's path only, so a query string that
+    // happens to contain "/v/" can't flip the CDN choice.
+    BOOL vShape = [SCURLFromString(originalURL).path hasPrefix:@"/v/"];
+    NSURL *firstMp4 = vShape ? squeelabMp4 : makevosMp4;
+    NSURL *firstPoster = vShape ? squeelabPoster : makevosPoster;
+    NSURL *secondMp4 = vShape ? makevosMp4 : squeelabMp4;
+    NSURL *secondPoster = vShape ? makevosPoster : squeelabPoster;
+
+    SCProbeVideoURL(firstMp4, ^(BOOL ok) {
         if (ok) {
-            ApolloLog(@"[SportsClips] dubz resolved mp4=%@ poster=yes", mp4.absoluteString);
-            completion(SCStreamableJSON(mp4, poster, 0, 0, 0));
+            ApolloLog(@"[SportsClips] dubz resolved mp4=%@ poster=yes", firstMp4.absoluteString);
+            completion(SCStreamableJSON(firstMp4, firstPoster, 0, 0, 0));
             return;
         }
-        NSURL *legacyMp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/videos/%@.mp4", clipID]];
-        NSURL *legacyPoster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/thumbnails/%@.jpg", clipID]];
-        SCFinishWithCandidate(@"dubz(legacy)", legacyMp4, legacyPoster, 0, 0, 0, completion);
+        SCFinishWithCandidate(@"dubz(altcdn)", secondMp4, secondPoster, 0, 0, 0, completion);
     });
 }
 
@@ -403,7 +439,12 @@ static void SCResolveStreamff(NSString *clipID, void (^completion)(NSDictionary 
 
 // streamain: the watch page only holds an iframe; the embed page's <video>
 // carries the CDN URL in a data-link attribute (path is unrelated to the id).
-static void SCResolveStreamain(NSString *clipID, void (^completion)(NSDictionary *)) {
+// The embed's poster="…" attribute vanished ~2026-08; when it's absent the
+// poster is recovered from the watch page's og:image (its
+// /thumbnails/<unixts>_thumb.jpg name isn't derivable from the data-link
+// filename, so a second fetch is the only source). Poster failure never
+// blocks playback.
+static void SCResolveStreamain(NSString *clipID, NSString *originalURL, void (^completion)(NSDictionary *)) {
     NSURL *embed = [NSURL URLWithString:[NSString stringWithFormat:@"https://streamain.com/embed/%@", clipID]];
     SCFetch(embed, @"GET", ^(NSData *data, NSHTTPURLResponse *http) {
         NSString *html = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
@@ -414,9 +455,45 @@ static void SCResolveStreamain(NSString *clipID, void (^completion)(NSDictionary
             completion(nil);
             return;
         }
-        NSURL *poster = SCURLFromString(SCFirstCapture(html, @"poster=[\"']([^\"']+)[\"']"));
         // streamain frequently serves vertical clips — never guess dimensions.
-        SCFinishWithCandidate(@"streamain", mp4, poster, 0, 0, 0, completion);
+        NSURL *poster = SCURLFromString(SCFirstCapture(html, @"poster=[\"']([^\"']+)[\"']"));
+        if (poster) {
+            SCFinishWithCandidate(@"streamain", mp4, poster, 0, 0, 0, completion);
+            return;
+        }
+        // No embed poster: fetch the watch page's og:image IN PARALLEL with the
+        // mp4 probe, on a short leash (4s vs the usual 12) — playback must
+        // never wait long on what is only a thumbnail. The poster does stay
+        // blocking up to that cap rather than fire-and-forget: a nil poster
+        // degrades fine (thumbnail_url falls back to the mp4 URL), but Apollo's
+        // VideoClient memoizes per launch and its paired mp4/thumbnail fetches
+        // resolve together, so a poster that misses the synthesized JSON here
+        // would never be re-requested — best-effort-async means no poster at
+        // all in practice. Typical cost over probe-only is one overlapping
+        // page RTT (~150ms); a dead watch page costs 4s once per clip per
+        // 10-minute cache window, then never blocks playback again.
+        // A streama.in original 301s to the watch page; NSURLSession follows it.
+        NSURL *watch = SCURLFromString(originalURL)
+            ?: [NSURL URLWithString:[NSString stringWithFormat:@"https://streamain.com/en/%@/watch", clipID]];
+        dispatch_group_t group = dispatch_group_create();
+        __block NSURL *ogPoster = nil;
+        __block BOOL probeOK = NO;
+        dispatch_group_enter(group);
+        SCFetchWithTimeout(watch, @"GET", 4.0, ^(NSData *watchData, NSHTTPURLResponse *watchHttp) {
+            NSString *watchHtml = watchData ? [[NSString alloc] initWithData:watchData encoding:NSUTF8StringEncoding] : nil;
+            ogPoster = SCURLFromString(SCMetaContent(watchHtml, @"og:image"));
+            dispatch_group_leave(group);
+        });
+        dispatch_group_enter(group);
+        SCProbeVideoURL(mp4, ^(BOOL ok) {
+            probeOK = ok;
+            dispatch_group_leave(group);
+        });
+        dispatch_group_notify(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            if (!probeOK) { completion(nil); return; }
+            ApolloLog(@"[SportsClips] streamain resolved mp4=%@ poster=%@", mp4.absoluteString, ogPoster ? @"yes" : @"no");
+            completion(SCStreamableJSON(mp4, ogPoster, 0, 0, 0));
+        });
     });
 }
 
@@ -454,9 +531,28 @@ static void SCResolveDropr(NSString *clipID, NSString *originalURL, void (^compl
     });
 }
 
-// MLB clip CDNs: the reddit post URL is already the mp4.
+// MLB clip CDNs: the reddit post URL is already the mp4. FORGE (cuts-diamond)
+// posts usually link the 16000K rendition (~100MB); a 4000K twin (~10-30MB,
+// same 720p frame per the filename) is published at the same name — verified
+// across multiple live clips 2026-08-14 — so it's probed first for feed
+// playback, with the posted URL as fallback if a clip lacks it.
 static void SCResolveMLBDirect(NSString *originalURL, void (^completion)(NSDictionary *)) {
     NSURL *mp4 = SCURLFromString(originalURL);
+    NSString *posted = mp4.absoluteString;
+    if ([posted hasSuffix:@"_16000K.mp4"]) {
+        NSString *smaller = [[posted substringToIndex:posted.length - (NSUInteger)[@"_16000K.mp4" length]]
+                             stringByAppendingString:@"_4000K.mp4"];
+        NSURL *smallerURL = [NSURL URLWithString:smaller];
+        SCProbeVideoURL(smallerURL, ^(BOOL ok) {
+            if (ok) {
+                ApolloLog(@"[SportsClips] mlb resolved mp4=%@ poster=no (4000K downshift)", smaller);
+                completion(SCStreamableJSON(smallerURL, nil, 0, 0, 0));
+            } else {
+                SCFinishWithCandidate(@"mlb", mp4, nil, 0, 0, 0, completion);
+            }
+        });
+        return;
+    }
     SCFinishWithCandidate(@"mlb", mp4, nil, 0, 0, 0, completion);
 }
 
@@ -495,9 +591,9 @@ static void SCResolveKindAndID(SCHostKind kind, NSString *clipID, NSString *orig
     switch (kind) {
         case SCHostStreamin:  SCResolveStreamin(clipID, cacheAndComplete); break;
         case SCHostStreamff:  SCResolveStreamff(clipID, cacheAndComplete); break;
-        case SCHostStreamain: SCResolveStreamain(clipID, cacheAndComplete); break;
+        case SCHostStreamain: SCResolveStreamain(clipID, originalURL, cacheAndComplete); break;
         case SCHostBangr:     SCResolveBangr(clipID, cacheAndComplete); break;
-        case SCHostDubz:      SCResolveDubz(clipID, cacheAndComplete); break;
+        case SCHostDubz:      SCResolveDubz(clipID, originalURL, cacheAndComplete); break;
         case SCHostDropr:     SCResolveDropr(clipID, originalURL, cacheAndComplete); break;
         case SCHostMLBDirect: SCResolveMLBDirect(originalURL, cacheAndComplete); break;
         case SCHostNone:
@@ -523,6 +619,11 @@ static SCHostKind SCKindAndIDForURL(NSURL *url, NSString **outID) {
     if ([host hasPrefix:@"www."]) host = [host substringFromIndex:4];
     SCHostKind kind = SCKindForHost(host);
     if (kind == SCHostNone) return SCHostNone;
+    // MLB posts are the media file itself; mirror the recognizer regex in
+    // rejecting the rare .m3u8 posts (the pipeline expects progressive mp4).
+    if (kind == SCHostMLBDirect && ![url.pathExtension.lowercaseString isEqualToString:@"mp4"]) {
+        return SCHostNone;
+    }
 
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     for (NSString *c in url.pathComponents) {
