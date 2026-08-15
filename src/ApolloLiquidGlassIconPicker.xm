@@ -1338,6 +1338,62 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
 
 #pragma mark - Icon grid cell (pack contents screen)
 
+static void LGSetAnimatedSelectionVisuals(UIView *selectionRing,
+                                          UIImageView *checkBadge,
+                                          BOOL selected,
+                                          BOOL animated) {
+    if (!selectionRing || !checkBadge) return;
+    [selectionRing.layer removeAllAnimations];
+    [checkBadge.layer removeAllAnimations];
+
+    if (!animated || UIAccessibilityIsReduceMotionEnabled()) {
+        selectionRing.hidden = !selected;
+        checkBadge.hidden = !selected;
+        selectionRing.alpha = 1.0;
+        checkBadge.alpha = 1.0;
+        selectionRing.transform = CGAffineTransformIdentity;
+        checkBadge.transform = CGAffineTransformIdentity;
+        return;
+    }
+
+    if (!selected) {
+        selectionRing.hidden = YES;
+        checkBadge.hidden = YES;
+        selectionRing.alpha = 1.0;
+        checkBadge.alpha = 1.0;
+        selectionRing.transform = CGAffineTransformIdentity;
+        checkBadge.transform = CGAffineTransformIdentity;
+        return;
+    }
+
+    selectionRing.hidden = NO;
+    checkBadge.hidden = NO;
+    selectionRing.alpha = 0.0;
+    selectionRing.transform = CGAffineTransformMakeScale(0.985, 0.985);
+    checkBadge.alpha = 0.0;
+    checkBadge.transform = CGAffineTransformMakeScale(0.55, 0.55);
+
+    [UIView animateWithDuration:0.22
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseOut |
+                                UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        selectionRing.alpha = 1.0;
+        selectionRing.transform = CGAffineTransformIdentity;
+    } completion:nil];
+    [UIView animateWithDuration:0.34
+                          delay:0.035
+         usingSpringWithDamping:0.68
+          initialSpringVelocity:0.45
+                        options:UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        checkBadge.alpha = 1.0;
+        checkBadge.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
 @interface LGIconGridCell : UICollectionViewCell
 - (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor cardBackgroundColor:(UIColor *)cardBackgroundColor;
 @end
@@ -1350,6 +1406,9 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
     UIView *_selectionRing;
     UIImageView *_checkBadge;
     LGPressAnimationState _pressAnimation;
+    NSString *_representedIconID;
+    BOOL _hasSelectionState;
+    BOOL _selectionState;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1467,15 +1526,18 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
         ? [NSString stringWithFormat:@"%@, by %@%@", row->displayName, row->designer, selected ? @", selected" : @""]
         : [NSString stringWithFormat:@"%@%@", row->displayName, selected ? @", selected" : @""];
 
-    _checkBadge.hidden = !selected;
-    _selectionRing.hidden = !selected;
-
     UIColor *accent = accentColor ?: UIColor.systemBlueColor;
     _checkBadge.tintColor = accent;
     // Selection ring border needs a resolved snapshot — .CGColor on a dynamic
     // provider color (custom theme accent) doesn't repaint itself later.
     UIColor *resolvedAccent = [accent resolvedColorWithTraitCollection:self.traitCollection];
     _selectionRing.layer.borderColor = resolvedAccent.CGColor;
+    BOOL animateSelection = _hasSelectionState &&
+        [_representedIconID isEqualToString:iconID] && _selectionState != selected;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animateSelection);
+    _representedIconID = [iconID copy];
+    _hasSelectionState = YES;
+    _selectionState = selected;
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -1488,6 +1550,9 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
 - (void)prepareForReuse {
     [super prepareForReuse];
     LGResetPressAnimation(self, &_pressAnimation);
+    _representedIconID = nil;
+    _hasSelectionState = NO;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, NO, NO);
 }
 
 @end
@@ -1543,6 +1608,7 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
       cardBackgroundColor:(UIColor *)cardBackgroundColor
      pressAnimationEnabled:(BOOL)pressAnimationEnabled
                tapHandler:(LGGroupCardTapHandler)tapHandler;
+- (void)updateForSelectedCardIndex:(NSInteger)selectedCardIndex animated:(BOOL)animated;
 @end
 
 @implementation LGPackCardView {
@@ -1558,6 +1624,9 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
     LGPressAnimationState _pressAnimation;
     BOOL _pressAnimationEnabled;
     UIColor *_selectionAccentColor;
+    BOOL _hasSelectionState;
+    BOOL _selectionState;
+    NSInteger _selectionCardIndex;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1705,6 +1774,8 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
        cardBackgroundColor:(UIColor *)cardBackgroundColor
       pressAnimationEnabled:(BOOL)pressAnimationEnabled
                 tapHandler:(LGGroupCardTapHandler)tapHandler {
+    BOOL animateSelection = _hasSelectionState && _selectionCardIndex == cardIndex &&
+        _selectionState != selected;
     _groupIndex = cardIndex;
     _tapHandler = [tapHandler copy];
     _pressAnimationEnabled = pressAnimationEnabled;
@@ -1722,8 +1793,10 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
     _selectionAccentColor = accent;
     _checkBadge.tintColor = accent;
     _selectionRing.layer.borderColor = [[accent resolvedColorWithTraitCollection:self.traitCollection] CGColor];
-    _checkBadge.hidden = !selected;
-    _selectionRing.hidden = !selected;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animateSelection);
+    _hasSelectionState = YES;
+    _selectionState = selected;
+    _selectionCardIndex = cardIndex;
     if (selected) self.accessibilityLabel = [self.accessibilityLabel stringByAppendingString:@", selected"];
 
     NSInteger sampleCount = MIN((NSInteger)_fanImageViews.count, (NSInteger)previewImages.count);
@@ -1765,6 +1838,23 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
     if (_tapHandler) _tapHandler(_groupIndex);
 }
 
+- (void)updateForSelectedCardIndex:(NSInteger)selectedCardIndex animated:(BOOL)animated {
+    BOOL selected = _groupIndex == selectedCardIndex;
+    // Changing an alternate icon can make UIKit rebuild the surrounding table
+    // before the setter's completion runs. In that case this cover has already
+    // been configured as selected, but that initial configuration correctly
+    // avoided animating. Replay only the active cover here so a deliberate
+    // selection still gets the same visible confirmation as its icon card.
+    if (_hasSelectionState && _selectionState == selected && !(animated && selected)) return;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animated && _hasSelectionState);
+    _hasSelectionState = YES;
+    _selectionState = selected;
+    _selectionCardIndex = _groupIndex;
+    self.accessibilityLabel = [NSString stringWithFormat:@"%@, %@%@",
+        _titleLabel.text ?: @"", _countLabel.text ?: @"", selected ? @", selected" : @""];
+    self.accessibilityTraits = UIAccessibilityTraitButton | (selected ? UIAccessibilityTraitSelected : 0);
+}
+
 @end
 
 @interface LGPackGridRowCell : UITableViewCell
@@ -1780,6 +1870,7 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
                                 accentColor:(UIColor *)accentColor
                         cardBackgroundColor:(UIColor *)cardBackgroundColor
                                  tapHandler:(LGGroupCardTapHandler)tapHandler;
+- (void)updateSelectedCardIndex:(NSInteger)selectedCardIndex animated:(BOOL)animated;
 @end
 
 @implementation LGPackGridRowCell {
@@ -1878,6 +1969,12 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
     }
 }
 
+- (void)updateSelectedCardIndex:(NSInteger)selectedCardIndex animated:(BOOL)animated {
+    for (LGPackCardView *card in _cards) {
+        if (!card.hidden) [card updateForSelectedCardIndex:selectedCardIndex animated:animated];
+    }
+}
+
 @end
 
 #pragma mark - Featured icon strip (main screen, above pack cards)
@@ -1890,6 +1987,7 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
               accentColor:(UIColor *)accentColor
       cardBackgroundColor:(UIColor *)cardBackgroundColor
                tapHandler:(LGFeaturedCardTapHandler)tapHandler;
+- (void)updateForSelectedIconID:(NSString *)selectedIconID animated:(BOOL)animated;
 @end
 
 
@@ -1902,6 +2000,9 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
     LGFeaturedCardTapHandler _tapHandler;
     LGPressAnimationState _pressAnimation;
     UIColor *_selectionAccentColor;
+    NSString *_representedIconID;
+    BOOL _hasSelectionState;
+    BOOL _selectionState;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1988,8 +2089,12 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
     UIColor *resolvedAccent = [accent resolvedColorWithTraitCollection:self.traitCollection];
     _checkBadge.tintColor = accent;
     _selectionRing.layer.borderColor = resolvedAccent.CGColor;
-    _checkBadge.hidden = !selected;
-    _selectionRing.hidden = !selected;
+    BOOL animateSelection = _hasSelectionState &&
+        [_representedIconID isEqualToString:row->iconID] && _selectionState != selected;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animateSelection);
+    _representedIconID = [row->iconID copy];
+    _hasSelectionState = YES;
+    _selectionState = selected;
 
     self.accessibilityLabel = row->designer.length
         ? [NSString stringWithFormat:@"%@, by %@%@", row->displayName, row->designer, selected ? @", selected" : @""]
@@ -2027,6 +2132,20 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
 
 - (void)lg_tapped {
     if (_tapHandler && _row) _tapHandler(_row);
+}
+
+- (void)updateForSelectedIconID:(NSString *)selectedIconID animated:(BOOL)animated {
+    if (!_row) return;
+    BOOL selected = selectedIconID.length && [_row->iconID isEqualToString:selectedIconID];
+    if (_hasSelectionState && _selectionState == selected) return;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animated && _hasSelectionState);
+    _hasSelectionState = YES;
+    _selectionState = selected;
+    self.accessibilityLabel = _row->designer.length
+        ? [NSString stringWithFormat:@"%@, by %@%@", _row->displayName, _row->designer,
+                                             selected ? @", selected" : @""]
+        : [NSString stringWithFormat:@"%@%@", _row->displayName, selected ? @", selected" : @""];
+    self.accessibilityTraits = UIAccessibilityTraitButton | (selected ? UIAccessibilityTraitSelected : 0);
 }
 
 @end
@@ -2115,6 +2234,7 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
                accentColor:(UIColor *)accentColor
        cardBackgroundColor:(UIColor *)cardBackgroundColor
                 tapHandler:(LGFeaturedCardTapHandler)tapHandler;
+- (void)updateSelectedIconID:(NSString *)selectedIconID animated:(BOOL)animated;
 @end
 
 @implementation LGFeaturedStripCell {
@@ -2237,7 +2357,38 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
     [self setNeedsLayout];
 }
 
+- (void)updateSelectedIconID:(NSString *)selectedIconID animated:(BOOL)animated {
+    for (UIView *view in _stack.arrangedSubviews) {
+        if ([view isKindOfClass:[LGFeaturedCardView class]])
+            [(LGFeaturedCardView *)view updateForSelectedIconID:selectedIconID animated:animated];
+    }
+}
+
 @end
+
+static void LGRefreshVisiblePickerSelection(UITableView *tableView, BOOL animated) {
+    if (!tableView) return;
+    NSString *activeIconID = LGActiveIconID();
+    LGStandardPack activeStandardPack = LGActiveStandardPack();
+    NSInteger selectedGroupIndex = activeStandardPack == LGStandardPackCount
+        ? LGGroupIndexForIconID(activeIconID) : NSNotFound;
+    NSInteger selectedStandardPack = activeStandardPack == LGStandardPackCount
+        ? NSNotFound : activeStandardPack;
+
+    for (NSIndexPath *indexPath in tableView.indexPathsForVisibleRows) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        if (LGHasFeaturedSection() && indexPath.section == LGFeaturedSectionIndex() &&
+            [cell isKindOfClass:[LGFeaturedStripCell class]]) {
+            [(LGFeaturedStripCell *)cell updateSelectedIconID:activeIconID animated:animated];
+        } else if (indexPath.section == LGPacksSectionIndex() &&
+                   [cell isKindOfClass:[LGPackGridRowCell class]]) {
+            [(LGPackGridRowCell *)cell updateSelectedCardIndex:selectedGroupIndex animated:animated];
+        } else if (indexPath.section == LGStandardPacksSectionIndex() &&
+                   [cell isKindOfClass:[LGPackGridRowCell class]]) {
+            [(LGPackGridRowCell *)cell updateSelectedCardIndex:selectedStandardPack animated:animated];
+        }
+    }
+}
 
 #pragma mark - Alternate icon application
 
@@ -3000,6 +3151,24 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     BOOL _didRevealInitialSelection;
 }
 
+- (void)lg_refreshVisibleSelection {
+    const LGRuntimeGroup *group = LGGroupAt(_gi);
+    if (!group) return;
+    NSString *activeID = LGActiveIconID();
+    UIColor *accent = ApolloThemeAccentColor() ?: self.view.tintColor ?: UIColor.systemBlueColor;
+    for (NSIndexPath *indexPath in self.collectionView.indexPathsForVisibleItems) {
+        if (indexPath.item >= group->count) continue;
+        LGIconGridCell *cell = (LGIconGridCell *)[self.collectionView cellForItemAtIndexPath:indexPath];
+        if (![cell isKindOfClass:LGIconGridCell.class]) continue;
+        const LGIconRow *row = &group->rows[indexPath.item];
+        BOOL selected = activeID.length && [row->iconID isEqualToString:activeID];
+        [cell configureWithRow:row
+                     selected:selected
+                  accentColor:accent
+          cardBackgroundColor:_cardBackgroundColor];
+    }
+}
+
 - (instancetype)initWithGroupIndex:(NSInteger)groupIndex {
     UICollectionViewCompositionalLayout *layout = [[UICollectionViewCompositionalLayout alloc]
         initWithSectionProvider:^NSCollectionLayoutSection *(NSInteger sectionIndex, id<NSCollectionLayoutEnvironment> env) {
@@ -3148,9 +3317,9 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     [collectionView deselectItemAtIndexPath:indexPath animated:YES];
     const LGRuntimeGroup *g = LGGroupAt(_gi);
     if (!g || indexPath.item >= g->count) return;
-    __weak UICollectionView *weakCV = collectionView;
+    __weak LGGroupIconsViewController *weakSelf = self;
     LGApplyIconUsingPreferredAppearance(collectionView, &g->rows[indexPath.item], ^(BOOL success) {
-        if (success) [weakCV reloadData];
+        if (success) [weakSelf lg_refreshVisibleSelection];
     });
 }
 
@@ -3264,6 +3433,7 @@ static void LGSetNativeIconCellCheckmark(UITableViewCell *cell, BOOL selected) {
 // hook blocks below — each instance gets its own slot.
 static char kLGRememberedTableViewKey;
 static char kLGDailyRolloverTimerKey;
+static char kLGPickerHasAppearedKey;
 static __weak UITableView *sLGAppIconPickerTableView;
 
 static void LGRememberTableView(id viewController, UITableView *tableView) {
@@ -3326,6 +3496,10 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
     UIViewController *controller = (UIViewController *)self;
     UITableView *tableView = LGRememberedTableView(self);
     if (tableView) sLGAppIconPickerTableView = tableView;
+    BOOL hasAppeared = [objc_getAssociatedObject(self, &kLGPickerHasAppearedKey) boolValue];
+    if (hasAppeared) LGRefreshVisiblePickerSelection(tableView, YES);
+    objc_setAssociatedObject(self, &kLGPickerHasAppearedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (LGRefreshDailyFeaturedRowsIfNeeded()) LGReloadDailyFeaturedSection(tableView, NO);
     LGScheduleDailyFeaturedRollover(self);
     __weak UITableView *weakTableView = tableView;
@@ -3387,7 +3561,7 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
             cardBackgroundColor:LGThemedCardBackgroundColor(sourceTable)
                      tapHandler:^(const LGIconRow *row) {
             LGApplyIconUsingPreferredAppearance(weakTableView, row, ^(BOOL success) {
-                if (success) [weakTableView reloadData];
+                if (success) LGRefreshVisiblePickerSelection(weakTableView, YES);
             });
         }];
         return cell;
