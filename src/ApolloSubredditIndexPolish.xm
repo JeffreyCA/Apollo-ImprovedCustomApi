@@ -27,6 +27,10 @@ static char kApolloSubredditSelectionTableKey;
 static char kApolloSubredditHeaderSeparatorKey;
 static char kApolloSubredditHeaderGradientLayerKey;
 static char kApolloSubredditHeaderLoggedKey;
+// Last background colour a real visible cell gave us for this table. Lets a header
+// styled while the table has no attached cells reuse the row colour instead of
+// falling through to the table's (darker) own background.
+static char kApolloSubredditRowSurfaceColorKey;
 // Section index this header is currently displayed for (stamped in willDisplayHeaderView)
 // plus the last pinned verdict, so the setFrame: hook only repaints on transitions.
 static char kApolloSubredditHeaderSectionKey;
@@ -131,6 +135,33 @@ static UIColor *ApolloSubredditIndexThemeListBackgroundColor(UITableView *tableV
     for (UITableViewCell *cell in tableView.visibleCells) {
         if (cell.contentView.backgroundColor) [candidates addObject:cell.contentView.backgroundColor];
         if (cell.backgroundColor) [candidates addObject:cell.backgroundColor];
+    }
+
+    // A row colour is the ONLY correct answer for a resting header: in most themes the
+    // table's own background is deliberately darker than the cells, so falling through
+    // to it paints a near-black band instead of a header that blends into the rows.
+    //
+    // UIKit re-lays out headers at moments when the table has no attached cells yet —
+    // during a fast fling, and right after reloadData — and this ran with
+    // visibleCells.count == 0, so every candidate above was missing and the chain fell
+    // through to tableView.backgroundColor. The wrong colour is opaque, so it isn't
+    // corrected by a later repaint, and it sticks until that header is restyled: the
+    // "black section header bands that show up now and then while scrolling".
+    //
+    // Remember the last colour a real cell gave us and reuse it when the table can't
+    // answer. Only used when there are no visible cells at all — if cells exist and
+    // are genuinely clear, the original fallback chain still applies, and the next
+    // pass with cells attached refreshes the cache (so a theme change re-derives).
+    for (UIColor *color in candidates) {
+        if (ApolloSubredditIndexColorIsVisible(color)) {
+            objc_setAssociatedObject(tableView, &kApolloSubredditRowSurfaceColorKey, color,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return color;
+        }
+    }
+    if (tableView.visibleCells.count == 0) {
+        UIColor *remembered = objc_getAssociatedObject(tableView, &kApolloSubredditRowSurfaceColorKey);
+        if (ApolloSubredditIndexColorIsVisible(remembered)) return remembered;
     }
 
     if (fallbackView.superview.backgroundColor) [candidates addObject:fallbackView.superview.backgroundColor];
