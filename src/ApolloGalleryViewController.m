@@ -360,9 +360,10 @@ static void ApolloGalleryApplyInheritedSort(ApolloGalleryViewController *gallery
                                             NSNumber *sortValue, NSNumber *topWindowValue) {
     if (!gallery || !sortValue) return;
     NSInteger sortRaw = sortValue.integerValue;
-    if (sortRaw < ApolloGallerySortHot || sortRaw > ApolloGallerySortRising) return;
+    if (sortRaw < ApolloGallerySortHot || sortRaw > ApolloGallerySortControversial) return;
     ApolloGallerySort sort = (ApolloGallerySort)sortRaw;
     if (sort == ApolloGallerySortRising && !gallery.feed.supportsRisingSort) return;
+    if (sort == ApolloGallerySortBest && !gallery.feed.supportsBestSort) return;
 
     ApolloGalleryTopWindow window = gallery.feed.topWindow;
     NSInteger windowRaw = topWindowValue ? topWindowValue.integerValue : -1;
@@ -807,50 +808,80 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     [self apollo_loadMoreIfNeededForIndex:(NSInteger)self.feed.items.count - 1];
 }
 
+// The same options, order, and iconography as Apollo's own subreddit sort
+// menu (Best / Hot / Top / New / Rising / Controversial), so the gallery
+// doesn't feel like a different app. Best and Rising drop off feeds whose
+// listing endpoint rejects them (user profiles).
 - (UIMenu *)apollo_buildSortMenu {
     __weak typeof(self) weakSelf = self;
-    UIAction * (^makeSort)(NSString *, ApolloGallerySort) = ^UIAction *(NSString *title, ApolloGallerySort sort) {
-        UIAction *action = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__kindof UIAction *a) {
+    UIAction * (^makeSort)(NSString *, NSString *, ApolloGallerySort) =
+        ^UIAction *(NSString *title, NSString *symbol, ApolloGallerySort sort) {
+        UIAction *action = [UIAction actionWithTitle:title
+                                               image:[UIImage systemImageNamed:symbol]
+                                          identifier:nil
+                                             handler:^(__kindof UIAction *a) {
             [weakSelf apollo_applySort:sort topWindow:weakSelf.feed.topWindow];
         }];
         if (weakSelf.feed.sort == sort) action.state = UIMenuElementStateOn;
         return action;
     };
 
-    NSArray<UIAction *> *topWindows = @[
-        [self apollo_topWindowActionWithTitle:@"Today" window:ApolloGalleryTopWindowDay],
-        [self apollo_topWindowActionWithTitle:@"This Week" window:ApolloGalleryTopWindowWeek],
-        [self apollo_topWindowActionWithTitle:@"This Month" window:ApolloGalleryTopWindowMonth],
-        [self apollo_topWindowActionWithTitle:@"This Year" window:ApolloGalleryTopWindowYear],
-        [self apollo_topWindowActionWithTitle:@"All Time" window:ApolloGalleryTopWindowAll],
-    ];
-    UIMenu *topMenu = [UIMenu menuWithTitle:@"Top" image:nil identifier:nil options:0 children:topWindows];
-
-    NSMutableArray<UIMenuElement *> *sorts = [NSMutableArray arrayWithObjects:
-        makeSort(@"Hot", ApolloGallerySortHot),
-        makeSort(@"New", ApolloGallerySortNew),
-        nil];
-    // User-profile listings don't accept rising, so don't offer it there.
-    if (self.feed.supportsRisingSort) {
-        [sorts addObject:makeSort(@"Rising", ApolloGallerySortRising)];
+    NSMutableArray<UIMenuElement *> *sorts = [NSMutableArray array];
+    if (self.feed.supportsBestSort) {
+        [sorts addObject:makeSort(@"Best", @"trophy", ApolloGallerySortBest)];
     }
-    [sorts addObject:topMenu];
+    [sorts addObject:makeSort(@"Hot", @"flame", ApolloGallerySortHot)];
+    [sorts addObject:[self apollo_windowedSortMenuWithTitle:@"Top"
+                                                     symbol:@"chart.bar"
+                                                       sort:ApolloGallerySortTop]];
+    [sorts addObject:makeSort(@"New", @"clock", ApolloGallerySortNew)];
+    if (self.feed.supportsRisingSort) {
+        [sorts addObject:makeSort(@"Rising", @"chart.line.uptrend.xyaxis", ApolloGallerySortRising)];
+    }
+    [sorts addObject:[self apollo_windowedSortMenuWithTitle:@"Controversial"
+                                                     symbol:@"plusminus"
+                                                       sort:ApolloGallerySortControversial]];
     return [UIMenu menuWithTitle:@"Sort" children:sorts];
 }
 
-- (UIAction *)apollo_topWindowActionWithTitle:(NSString *)title window:(ApolloGalleryTopWindow)window {
+// Top and Controversial both open the same time-window submenu, exactly like
+// Apollo's native menu.
+- (UIMenu *)apollo_windowedSortMenuWithTitle:(NSString *)title
+                                      symbol:(NSString *)symbol
+                                        sort:(ApolloGallerySort)sort {
+    NSArray<NSDictionary *> *windows = @[
+        @{ @"title": @"Today",      @"window": @(ApolloGalleryTopWindowDay) },
+        @{ @"title": @"This Week",  @"window": @(ApolloGalleryTopWindowWeek) },
+        @{ @"title": @"This Month", @"window": @(ApolloGalleryTopWindowMonth) },
+        @{ @"title": @"This Year",  @"window": @(ApolloGalleryTopWindowYear) },
+        @{ @"title": @"All Time",   @"window": @(ApolloGalleryTopWindowAll) },
+    ];
     __weak typeof(self) weakSelf = self;
-    UIAction *action = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__kindof UIAction *a) {
-        [weakSelf apollo_applySort:ApolloGallerySortTop topWindow:window];
-    }];
-    if (self.feed.sort == ApolloGallerySortTop && self.feed.topWindow == window) {
-        action.state = UIMenuElementStateOn;
+    NSMutableArray<UIAction *> *children = [NSMutableArray array];
+    for (NSDictionary *entry in windows) {
+        ApolloGalleryTopWindow window = (ApolloGalleryTopWindow)((NSNumber *)entry[@"window"]).integerValue;
+        UIAction *action = [UIAction actionWithTitle:entry[@"title"] image:nil identifier:nil
+                                             handler:^(__kindof UIAction *a) {
+            [weakSelf apollo_applySort:sort topWindow:window];
+        }];
+        if (self.feed.sort == sort && self.feed.topWindow == window) {
+            action.state = UIMenuElementStateOn;
+        }
+        [children addObject:action];
     }
-    return action;
+    return [UIMenu menuWithTitle:title
+                           image:[UIImage systemImageNamed:symbol]
+                      identifier:nil
+                         options:0
+                        children:children];
+}
+
+static BOOL ApolloGallerySortUsesWindow(ApolloGallerySort sort) {
+    return sort == ApolloGallerySortTop || sort == ApolloGallerySortControversial;
 }
 
 - (void)apollo_applySort:(ApolloGallerySort)sort topWindow:(ApolloGalleryTopWindow)window {
-    if (self.feed.sort == sort && (sort != ApolloGallerySortTop || self.feed.topWindow == window)) return;
+    if (self.feed.sort == sort && (!ApolloGallerySortUsesWindow(sort) || self.feed.topWindow == window)) return;
     [self.feed setSort:sort topWindow:window];
     [self apollo_setFooterText:nil];
     [self.collectionView reloadData];

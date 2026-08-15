@@ -163,18 +163,16 @@ static BOOL ApolloGalleryMenuReadOptionalEnumIvar(id object, const char *name, i
 // RDKLinkSortingMethod raw → gallery sort. Raw values measured in the
 // simulator by flipping Apollo's own sort menu and logging the ivar
 // (2026-08-14, r/aww): hot=1, best=2, new=3, rising=4, controversial=5,
-// top=6. Best maps onto Hot — the gallery's nearest ranked listing — and
-// controversial returns nil (the gallery has no controversial listing) so
-// the gallery keeps its default rather than showing something mislabeled
-// as inherited.
+// top=6. Every one of Apollo's sorts now has a gallery listing to match.
 static NSNumber *ApolloGalleryMenuGallerySortForLinkSortRaw(int64_t raw) {
     switch (raw) {
         case 1: return @(ApolloGallerySortHot);
-        case 2: return @(ApolloGallerySortHot);      // best
+        case 2: return @(ApolloGallerySortBest);
         case 3: return @(ApolloGallerySortNew);
         case 4: return @(ApolloGallerySortRising);
+        case 5: return @(ApolloGallerySortControversial);
         case 6: return @(ApolloGallerySortTop);
-        default: return nil;                          // controversial & unknowns
+        default: return nil;
     }
 }
 

@@ -299,6 +299,10 @@ static NSString *ApolloGalleryBearerForClient(id client) {
     return !self.sortsViaQueryParameter;
 }
 
+- (BOOL)supportsBestSort {
+    return !self.sortsViaQueryParameter;
+}
+
 - (void)configureWithListingPath:(NSString *)listingPath
                        subreddit:(NSString *)subreddit
                 sourceDescription:(NSString *)sourceDescription {
@@ -422,25 +426,28 @@ static NSString *ApolloGalleryBearerForClient(id client) {
 
 - (NSString *)sortPathComponent {
     switch (self.sort) {
-        case ApolloGallerySortNew:    return @"new";
-        case ApolloGallerySortTop:    return @"top";
-        case ApolloGallerySortRising: return @"rising";
+        case ApolloGallerySortNew:           return @"new";
+        case ApolloGallerySortTop:           return @"top";
+        case ApolloGallerySortRising:        return @"rising";
+        case ApolloGallerySortBest:          return @"best";
+        case ApolloGallerySortControversial: return @"controversial";
         case ApolloGallerySortHot:
-        default:                      return @"hot";
+        default:                             return @"hot";
     }
 }
 
-// The `?sort=` value for feeds that carry their sort in the query. Rising maps
-// to hot because Reddit's user listing endpoint doesn't accept it (the sort
-// menu never offers it for these feeds; this is only a backstop).
+// The `?sort=` value for feeds that carry their sort in the query. Rising and
+// best map to hot because Reddit's user listing endpoint doesn't accept them
+// (the sort menu never offers those for these feeds; this is only a backstop).
 - (NSString *)sortQueryValue {
     ApolloGallerySort sort = self.sort;
-    if (sort == ApolloGallerySortRising) sort = ApolloGallerySortHot;
+    if (sort == ApolloGallerySortRising || sort == ApolloGallerySortBest) sort = ApolloGallerySortHot;
     switch (sort) {
-        case ApolloGallerySortNew: return @"new";
-        case ApolloGallerySortTop: return @"top";
+        case ApolloGallerySortNew:           return @"new";
+        case ApolloGallerySortTop:           return @"top";
+        case ApolloGallerySortControversial: return @"controversial";
         case ApolloGallerySortHot:
-        default:                   return @"hot";
+        default:                             return @"hot";
     }
 }
 
@@ -467,6 +474,17 @@ static NSString *ApolloGalleryBearerForClient(id client) {
                 case ApolloGalleryTopWindowAll:   return @"Top: All Time";
                 case ApolloGalleryTopWindowWeek:
                 default:                          return @"Top: This Week";
+            }
+        }
+        case ApolloGallerySortBest:   return @"Best";
+        case ApolloGallerySortControversial: {
+            switch (self.topWindow) {
+                case ApolloGalleryTopWindowDay:   return @"Controversial: Today";
+                case ApolloGalleryTopWindowMonth: return @"Controversial: This Month";
+                case ApolloGalleryTopWindowYear:  return @"Controversial: This Year";
+                case ApolloGalleryTopWindowAll:   return @"Controversial: All Time";
+                case ApolloGalleryTopWindowWeek:
+                default:                          return @"Controversial: This Week";
             }
         }
         case ApolloGallerySortHot:
@@ -525,7 +543,7 @@ static NSString *ApolloGalleryBearerForClient(id client) {
     if (self.sortsViaQueryParameter) {
         [query appendFormat:@"&sort=%@", [self sortQueryValue]];
     }
-    if (self.sort == ApolloGallerySortTop) {
+    if (self.sort == ApolloGallerySortTop || self.sort == ApolloGallerySortControversial) {
         [query appendFormat:@"&t=%@", [self topWindowParameter]];
     }
     if (after.length > 0) {

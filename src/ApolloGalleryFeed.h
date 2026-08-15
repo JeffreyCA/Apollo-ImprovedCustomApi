@@ -106,13 +106,16 @@ static ApolloGalleryMediaKind const ApolloGalleryMediaKindAll =
 
 @end
 
-// Listing sorts offered by the gallery's own sort menu. `top` and `controversial`
-// carry a time window; the others ignore it.
+// Listing sorts offered by the gallery's own sort menu — the same set
+// Apollo's subreddit sort menu offers. `top` and `controversial` carry a
+// time window; the others ignore it.
 typedef NS_ENUM(NSInteger, ApolloGallerySort) {
     ApolloGallerySortHot = 0,
     ApolloGallerySortNew,
     ApolloGallerySortTop,
     ApolloGallerySortRising,
+    ApolloGallerySortBest,
+    ApolloGallerySortControversial,
 };
 
 typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
@@ -154,8 +157,10 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
 - (NSUInteger)countOfKind:(ApolloGalleryMediaKind)kind;
 
 // NO for user-profile feeds: Reddit's user listing endpoint accepts
-// hot/new/top but not rising, so the sort menu drops that entry.
+// hot/new/top/controversial but not rising or best, so the sort menu drops
+// those entries there.
 @property (nonatomic, readonly) BOOL supportsRisingSort;
+@property (nonatomic, readonly) BOOL supportsBestSort;
 
 // Changing either resets the feed (items cleared, cursor dropped). Use
 // -setSort:topWindow: to change both at once so only one reset happens.
