@@ -3040,8 +3040,10 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     // appear to change. End only the table's transient pressed state.
     if (LGStandardPackRowIsActive(_pack, indexPath.row)) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        [tableView reloadRowsAtIndexPaths:@[ indexPath ]
-                         withRowAnimation:UITableViewRowAnimationNone];
+        // Do not reload the row while its press-release transform is still
+        // animating. In some dark custom themes UIKit keeps the outgoing cell
+        // snapshot visible, which looks like a duplicated expanding row.
+        [self lg_reassertVisibleNativeRows];
         return;
     }
 
@@ -3862,8 +3864,8 @@ static void LGStyleCommunityIconCell(UITableViewCell *cell,
         // Match the tweak-owned Standard packs: an already-active row keeps
         // its checkmark and ends only the table's temporary pressed state.
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        [tableView reloadRowsAtIndexPaths:@[ indexPath ]
-                         withRowAnimation:UITableViewRowAnimationNone];
+        LGStyleCommunityIconCell([tableView cellForRowAtIndexPath:indexPath],
+                                 tableView, indexPath);
         return;
     }
 
