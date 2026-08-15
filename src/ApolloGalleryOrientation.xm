@@ -17,11 +17,12 @@
 //
 // These hooks widen the supported mask to AllButUpsideDown — as a UNION with
 // whatever Apollo answers, so iPad masks only ever gain — precisely while a
-// gallery screen (grid or viewer) is the visible top of the hierarchy.
-// Everything else keeps Apollo's stock behavior, and leaving the gallery
-// restores the lock (the grid pokes UIKit to re-evaluate on appear/disappear,
-// which is what snaps a landscape grid back to portrait when popping to the
-// portrait-locked feed).
+// gallery screen (grid or viewer) is on screen, INCLUDING while the gallery
+// has something of its own up over it; see the visibility test below for why
+// that distinction matters. Everything else keeps Apollo's stock behavior,
+// and leaving the gallery restores the lock (the grid pokes UIKit to
+// re-evaluate on appear/disappear, which is what snaps a landscape grid back
+// to portrait when popping to the portrait-locked feed).
 
 #import <UIKit/UIKit.h>
 
@@ -29,53 +30,49 @@
 #import "ApolloGalleryImageViewer.h"
 #import "ApolloGalleryViewController.h"
 
-// The view controller that would answer for orientations if UIKit drilled
-// down from `container`: follow presented view controllers, then container
-// selection/top. Dismissals-in-flight are skipped so the mask snaps back to
-// Apollo's the moment the gallery starts going away.
-static UIViewController *ApolloGalleryOrientationVisibleLeaf(UIViewController *container) {
-    UIViewController *viewController = container;
-    while (viewController.presentedViewController &&
-           !viewController.presentedViewController.isBeingDismissed) {
-        viewController = viewController.presentedViewController;
+// Is a gallery screen — the grid, or the fullscreen viewer presented over it
+// — currently ON SCREEN anywhere in `container`'s visible hierarchy?
+//
+// Deliberately "visible anywhere" rather than "is the visible leaf". Anything
+// the gallery puts on top of itself makes ITSELF the leaf: the fullscreen
+// viewer, a share sheet, and — the case that made this obvious — the sort and
+// filter pull-downs, which present a private menu controller. With a leaf
+// test, opening the filter menu in landscape stopped counting as a gallery
+// screen, the mask fell back to Apollo's portrait lock mid-tap, and the app
+// visibly rotated to portrait and back as the menu opened and closed.
+//
+// Both branches have to be walked, not just one: presentedViewController is
+// answered by every ancestor of the presenter, so following presentations
+// first would jump straight from the window's root to the menu and never
+// visit the grid sitting underneath it.
+static BOOL ApolloGalleryOrientationGalleryIsVisible(UIViewController *viewController) {
+    if (!viewController) return NO;
+    if ([viewController isKindOfClass:[ApolloGalleryViewController class]] ||
+        [viewController isKindOfClass:[ApolloGalleryImageViewer class]]) {
+        return YES;
     }
-    for (;;) {
-        if ([viewController isKindOfClass:[UINavigationController class]]) {
-            UIViewController *top = ((UINavigationController *)viewController).topViewController;
-            if (!top) break;
-            viewController = top;
-            continue;
-        }
-        if ([viewController isKindOfClass:[UITabBarController class]]) {
-            UIViewController *selected = ((UITabBarController *)viewController).selectedViewController;
-            if (!selected) break;
-            viewController = selected;
-            continue;
-        }
-        break;
+    if ([viewController isKindOfClass:[UINavigationController class]] &&
+        ApolloGalleryOrientationGalleryIsVisible(((UINavigationController *)viewController).topViewController)) {
+        return YES;
     }
-    return viewController;
-}
-
-// Both gallery screens rotate: the grid, and the fullscreen viewer presented
-// on top of it. The viewer matters as its own case because it is PRESENTED —
-// the leaf walk above follows presentedViewController, so while it is up the
-// leaf is the viewer and never the grid. Recognising only the grid was what
-// made a landscape-capable video snap back to portrait the moment it opened
-// (and refuse to rotate while playing) even though the viewer itself answers
-// AllButUpsideDown: the app-delegate window mask is intersected with that
-// answer, and it was still handing back Apollo's portrait-only lock.
-static BOOL ApolloGalleryOrientationScreenIsTopmost(UIViewController *container) {
-    UIViewController *leaf = ApolloGalleryOrientationVisibleLeaf(container);
-    return [leaf isKindOfClass:[ApolloGalleryViewController class]] ||
-           [leaf isKindOfClass:[ApolloGalleryImageViewer class]];
+    if ([viewController isKindOfClass:[UITabBarController class]] &&
+        ApolloGalleryOrientationGalleryIsVisible(((UITabBarController *)viewController).selectedViewController)) {
+        return YES;
+    }
+    // Dismissals in flight are skipped so the mask narrows the moment the
+    // gallery starts going away, rather than after the animation lands.
+    UIViewController *presented = viewController.presentedViewController;
+    if (presented && presented != viewController && !presented.isBeingDismissed) {
+        return ApolloGalleryOrientationGalleryIsVisible(presented);
+    }
+    return NO;
 }
 
 %hook _TtC6Apollo22ApolloTabBarController
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     UIInterfaceOrientationMask mask = %orig;
-    if (ApolloGalleryOrientationScreenIsTopmost((UIViewController *)self)) {
+    if (ApolloGalleryOrientationGalleryIsVisible((UIViewController *)self)) {
         mask |= UIInterfaceOrientationMaskAllButUpsideDown;
     }
     return mask;
@@ -87,7 +84,7 @@ static BOOL ApolloGalleryOrientationScreenIsTopmost(UIViewController *container)
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
     UIInterfaceOrientationMask mask = %orig;
-    if (ApolloGalleryOrientationScreenIsTopmost((UIViewController *)self)) {
+    if (ApolloGalleryOrientationGalleryIsVisible((UIViewController *)self)) {
         mask |= UIInterfaceOrientationMaskAllButUpsideDown;
     }
     return mask;
@@ -103,8 +100,22 @@ static BOOL ApolloGalleryOrientationScreenIsTopmost(UIViewController *container)
     supportedInterfaceOrientationsForWindow:(UIWindow *)window {
     UIInterfaceOrientationMask mask = %orig;
     UIViewController *root = window.rootViewController;
-    if (root && ApolloGalleryOrientationScreenIsTopmost(root)) {
+    BOOL galleryVisible = root && ApolloGalleryOrientationGalleryIsVisible(root);
+    if (galleryVisible) {
         mask |= UIInterfaceOrientationMaskAllButUpsideDown;
+    }
+    // Transitions only, so this is a handful of lines per gallery visit rather
+    // than a line per orientation query. UIKit re-asks whenever anything is
+    // presented, and a spurious NO here is exactly what rotates the app out
+    // from under a menu — worth being able to see in a log.
+    static BOOL lastAnswer = NO;
+    static BOOL haveLastAnswer = NO;
+    if (!haveLastAnswer || galleryVisible != lastAnswer) {
+        lastAnswer = galleryVisible;
+        haveLastAnswer = YES;
+        ApolloLog(@"[GalleryOrientation] window mask %@ (gallery visible=%@)",
+                  galleryVisible ? @"widened" : @"left as Apollo's",
+                  galleryVisible ? @"YES" : @"NO");
     }
     return mask;
 }
