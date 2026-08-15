@@ -109,6 +109,8 @@ typedef struct {
 static char kLGIconSelectionFeedbackKey;
 static char kLGAppearanceSelectionFeedbackKey;
 static char kLGCommunitySelectionReplayKey;
+static char kLGCommunityCardBackgroundColorKey;
+static char kLGPickerCardBackgroundColorKey;
 static char kLGNativeIconCellSelectedKey;
 static char kLGNativeIconCellCheckBadgeKey;
 static char kLGNativeIconCellPressAnimationKey;
@@ -2736,48 +2738,12 @@ static void LGFixLegacyUltraPreview(UITableViewCell *cell, NSInteger row) {
 
 static void LGSetNativeIconCellCheckmark(UITableViewCell *cell, BOOL selected);
 
-static BOOL LGColorsAreVisuallyEqual(UIColor *first, UIColor *second,
-                                     UITraitCollection *traits) {
-    if (!first || !second) return NO;
-    UIColor *a = [first resolvedColorWithTraitCollection:traits];
-    UIColor *b = [second resolvedColorWithTraitCollection:traits];
-    CGFloat ar, ag, ab, aa, br, bg, bb, ba;
-    if (![a getRed:&ar green:&ag blue:&ab alpha:&aa] ||
-        ![b getRed:&br green:&bg blue:&bb alpha:&ba]) return NO;
-    const CGFloat tolerance = 0.015;
-    return fabs(ar - br) <= tolerance && fabs(ag - bg) <= tolerance &&
-        fabs(ab - bb) <= tolerance && fabs(aa - ba) <= tolerance;
-}
-
-static BOOL LGColorIsNearlyBlack(UIColor *color, UITraitCollection *traits) {
-    if (!color) return NO;
-    CGFloat red, green, blue, alpha;
-    UIColor *resolved = [color resolvedColorWithTraitCollection:traits];
-    return [resolved getRed:&red green:&green blue:&blue alpha:&alpha] &&
-        red <= 0.02 && green <= 0.02 && blue <= 0.02 && alpha >= 0.95;
-}
-
-static UIColor *LGRaisedNativeCardFallbackColor(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
-        // A translucent lift keeps custom-theme hue visible while separating
-        // the card from an otherwise identical page background.
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
-            ? [UIColor colorWithWhite:1.0 alpha:0.09]
-            : [UIColor colorWithWhite:1.0 alpha:0.82];
-    }];
-}
-
 static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
-                                                UIColor *pageBackgroundColor,
+                                                UIColor *cardBackgroundColor,
                                                 BOOL firstRow,
                                                 BOOL lastRow) {
     if (!cell) return;
-    UIColor *color = LGThemedCardBackgroundColor(nil);
-    if (LGColorsAreVisuallyEqual(color, pageBackgroundColor, cell.traitCollection) ||
-        (cell.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark &&
-         LGColorIsNearlyBlack(color, cell.traitCollection))) {
-        color = LGRaisedNativeCardFallbackColor();
-    }
+    UIColor *color = cardBackgroundColor ?: LGThemedCardBackgroundColor(nil);
     // Apollo can replace its cell-level background after willDisplay, so keep
     // a picker-owned fill inside contentView instead of relying on it.
     cell.backgroundColor = UIColor.clearColor;
@@ -2813,16 +2779,23 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 @interface LGNativeIconPackViewController : ApolloSettingsTableViewController
 - (instancetype)initWithSourceController:(id)sourceController
                               sourceTable:(UITableView *)sourceTable
+                     cardBackgroundColor:(UIColor *)cardBackgroundColor
                                      pack:(LGStandardPack)pack;
 @end
 
 @implementation LGNativeIconPackViewController {
     __weak id _sourceController;
     __weak UITableView *_sourceTable;
+    UIColor *_cardBackgroundColor;
     LGStandardPack _pack;
     NSInteger _nativeSection;
     id _changedIconObserver;
     id _didBecomeActiveObserver;
+}
+
+- (UIColor *)lg_pageBackgroundColor {
+    UITableView *liveSource = ApolloThemeSourceTableIsStale(_sourceTable) ? nil : _sourceTable;
+    return LGThemedPageBackgroundColor(liveSource);
 }
 
 - (void)lg_reassertVisibleNativeRows {
@@ -2831,7 +2804,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     for (NSIndexPath *indexPath in tableView.indexPathsForVisibleRows) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         if (!cell) continue;
-        LGNormalizeNativeIconCellBackground(cell, LGThemedPageBackgroundColor(_sourceTable),
+        LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                             indexPath.row == 0,
                                             indexPath.row == rowCount - 1);
         LGSetNativeIconCellCheckmark(cell,
@@ -2850,6 +2823,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 
 - (instancetype)initWithSourceController:(id)sourceController
                               sourceTable:(UITableView *)sourceTable
+                     cardBackgroundColor:(UIColor *)cardBackgroundColor
                                      pack:(LGStandardPack)pack {
     // Community uses an inset-grouped table, which draws the icon rows as one
     // rounded card. Match that native geometry without constructing Apollo's
@@ -2858,6 +2832,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     if (!self) return nil;
     _sourceController = sourceController;
     _sourceTable = sourceTable;
+    _cardBackgroundColor = cardBackgroundColor ?: LGThemedCardBackgroundColor(sourceTable);
     _pack = pack;
     _nativeSection = LGNativeSectionForStandardPack(pack);
     self.title = LGStandardPackTitle(pack);
@@ -2869,7 +2844,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     UITableView *tableView = self.tableView;
     objc_setAssociatedObject(tableView, &kLGNativeDetailTableSectionKey,
                              @(_nativeSection), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    tableView.backgroundColor = LGThemedPageBackgroundColor(_sourceTable);
+    tableView.backgroundColor = [self lg_pageBackgroundColor];
     __weak LGNativeIconPackViewController *weakSelf = self;
     _changedIconObserver = [NSNotificationCenter.defaultCenter
         addObserverForName:kLGChangedIconNotification
@@ -2891,7 +2866,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
         LGNativeIconPackViewController *strongSelf = weakSelf;
         if (!strongSelf) return;
         UITableView *visibleTable = strongSelf.tableView;
-        visibleTable.backgroundColor = LGThemedPageBackgroundColor(strongSelf->_sourceTable);
+        visibleTable.backgroundColor = [strongSelf lg_pageBackgroundColor];
         [strongSelf lg_reloadAndReassertAfterNativeRefresh];
     }];
 }
@@ -2908,7 +2883,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     UITableView *tableView = self.tableView;
-    tableView.backgroundColor = LGThemedPageBackgroundColor(_sourceTable);
+    tableView.backgroundColor = [self lg_pageBackgroundColor];
     [tableView reloadData];
     __weak UITableView *weakTable = tableView;
     LGInstallAppearanceMenu(self, tableView, ^{ [weakTable reloadData]; });
@@ -2922,8 +2897,12 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
     if (previousTraitCollection.userInterfaceStyle == self.traitCollection.userInterfaceStyle) return;
+    // The cover color sampled while this screen was pushed can be a resolved
+    // (non-dynamic) UIColor. Refresh from the active Apollo/custom theme when
+    // the system appearance changes so the card does not retain its old mode.
+    _cardBackgroundColor = LGThemedCardBackgroundColor(nil);
     UITableView *tableView = self.tableView;
-    tableView.backgroundColor = LGThemedPageBackgroundColor(_sourceTable);
+    tableView.backgroundColor = [self lg_pageBackgroundColor];
     [tableView reloadData];
 }
 
@@ -2953,7 +2932,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     // producing a visibly shorter/tinted first row. Let the cell itself own
     // one continuous card fill, matching every other Standard icon row.
     NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
-    LGNormalizeNativeIconCellBackground(cell, LGThemedPageBackgroundColor(_sourceTable),
+    LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                         indexPath.row == 0, indexPath.row == rowCount - 1);
     BOOL selected = LGStandardPackRowIsActive(_pack, indexPath.row);
     LGSetNativeIconCellCheckmark(cell, selected);
@@ -2977,7 +2956,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     // Normalize after both native styling passes so every Standard pack keeps
     // the Community-style rounded card from its first presentation onward.
     NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
-    LGNormalizeNativeIconCellBackground(cell, LGThemedPageBackgroundColor(_sourceTable),
+    LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                         indexPath.row == 0, indexPath.row == rowCount - 1);
     // Apollo rebuilds its private accessory during willDisplay. Reassert the
     // persisted selection afterward so backgrounding cannot visually revert
@@ -3599,6 +3578,9 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
 
         NSInteger columnCount = LGMainPackColumnCount(CGRectGetWidth(tableView.bounds));
         UITableView *sourceTable = ApolloInheritedSettingsThemeSourceTableView((UITableViewController *)(id)self);
+        UIColor *cardBackgroundColor = LGThemedCardBackgroundColor(sourceTable);
+        objc_setAssociatedObject(self, &kLGPickerCardBackgroundColorKey, cardBackgroundColor,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         __weak UIViewController *weakController = (UIViewController *)self;
         __weak id weakSourceController = self;
         __weak UITableView *weakSourceTable = tableView;
@@ -3606,7 +3588,7 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
                                       columnCount:columnCount
                               selectedStandardPack:LGDisplayedActiveStandardPack()
                                       accentColor:ApolloThemeAccentColor() ?: tableView.tintColor
-                              cardBackgroundColor:LGThemedCardBackgroundColor(sourceTable)
+                              cardBackgroundColor:cardBackgroundColor
                                        tapHandler:^(NSInteger cardIndex) {
             LGStandardPack pack = (LGStandardPack)cardIndex;
             UIViewController *destination = nil;
@@ -3623,6 +3605,7 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
             } else {
                 destination = [[LGNativeIconPackViewController alloc] initWithSourceController:weakSourceController
                                                                                    sourceTable:weakSourceTable
+                                                                           cardBackgroundColor:cardBackgroundColor
                                                                                           pack:pack];
             }
             if (destination) [weakController.navigationController pushViewController:destination animated:YES];
@@ -3826,7 +3809,30 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
 
 %end
 
-static void LGStyleCommunityIconCell(UITableViewCell *cell,
+static UIColor *LGCommunityCardBackgroundColor(id controller) {
+    UIColor *stored = objc_getAssociatedObject(controller, &kLGCommunityCardBackgroundColorKey);
+    if (stored) return stored;
+
+    UIViewController *viewController = (UIViewController *)controller;
+    NSArray<UIViewController *> *stack = viewController.navigationController.viewControllers;
+    NSUInteger index = [stack indexOfObject:viewController];
+    if (index != NSNotFound && index > 0) {
+        UIColor *pickerColor = objc_getAssociatedObject(stack[index - 1],
+                                                        &kLGPickerCardBackgroundColorKey);
+        if (pickerColor) stored = pickerColor;
+    }
+    UITableView *sourceTable = ApolloInheritedSettingsThemeSourceTableView(
+        (UITableViewController *)(id)controller);
+    if (!stored && !ApolloThemeSourceTableIsStale(sourceTable)) {
+        stored = LGThemedCardBackgroundColor(sourceTable);
+    }
+    if (stored) objc_setAssociatedObject(controller, &kLGCommunityCardBackgroundColorKey, stored,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return stored ?: LGThemedCardBackgroundColor(nil);
+}
+
+static void LGStyleCommunityIconCell(id controller,
+                                     UITableViewCell *cell,
                                      UITableView *tableView,
                                      NSIndexPath *indexPath) {
     if (!cell || !tableView || !indexPath) return;
@@ -3836,7 +3842,7 @@ static void LGStyleCommunityIconCell(UITableViewCell *cell,
     for (UIView *subview in cell.contentView.subviews) subview.tintColor = accent;
 
     NSInteger rowCount = [tableView numberOfRowsInSection:indexPath.section];
-    LGNormalizeNativeIconCellBackground(cell, LGThemedPageBackgroundColor(tableView),
+    LGNormalizeNativeIconCellBackground(cell, LGCommunityCardBackgroundColor(controller),
                                         indexPath.row == 0,
                                         indexPath.row == rowCount - 1);
     LGSetNativeIconCellCheckmark(cell,
@@ -3848,7 +3854,7 @@ static void LGStyleCommunityIconCell(UITableViewCell *cell,
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     LGRememberTableView(self, tableView);
     UITableViewCell *cell = %orig;
-    LGStyleCommunityIconCell(cell, tableView, indexPath);
+    LGStyleCommunityIconCell(self, cell, tableView, indexPath);
     return cell;
 }
 
@@ -3858,7 +3864,7 @@ static void LGStyleCommunityIconCell(UITableViewCell *cell,
     // Apollo's custom-theme pass runs during willDisplay and can overwrite
     // cellForRow's card color. Reassert the same picker-owned fill used by
     // Apollo Originals, Ultra, and Sekrit after that native pass completes.
-    LGStyleCommunityIconCell(cell, tableView, indexPath);
+    LGStyleCommunityIconCell(self, cell, tableView, indexPath);
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -3871,7 +3877,8 @@ static void LGStyleCommunityIconCell(UITableViewCell *cell,
         LGPerformNativeIconSelectionWithFeedback(tableView, ^{
             UITableView *strongTable = weakTable;
             if (!strongTable) return;
-            LGStyleCommunityIconCell([strongTable cellForRowAtIndexPath:indexPath],
+            LGStyleCommunityIconCell(self,
+                                     [strongTable cellForRowAtIndexPath:indexPath],
                                      strongTable, indexPath);
         });
         return;
@@ -3903,6 +3910,9 @@ static void LGStyleCommunityIconCell(UITableViewCell *cell,
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     %orig;
     if (previousTraitCollection.userInterfaceStyle == ((UIViewController *)self).traitCollection.userInterfaceStyle) return;
+    objc_setAssociatedObject(self, &kLGCommunityCardBackgroundColorKey,
+                             LGThemedCardBackgroundColor(nil),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UITableView *tableView = LGRememberedTableView(self);
     tableView.backgroundColor = LGThemedPageBackgroundColor(nil);
     [tableView reloadData];
