@@ -42,6 +42,20 @@ static void ApolloGalleryViewerSetVideosMuted(BOOL muted) {
     [[NSUserDefaults standardUserDefaults] setBool:muted forKey:kApolloGalleryViewerMutedKey];
 }
 
+// Whether the bottom post-info card is shown. Sticky like the mute state:
+// someone who dismissed it once wants it gone for the next video too. The
+// share menu carries the row that brings it back, so hiding it is never a
+// one-way door.
+static NSString *const kApolloGalleryViewerHideInfoKey = @"ApolloGalleryHidePostInfo";
+
+static BOOL ApolloGalleryViewerInfoPanelHidden(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kApolloGalleryViewerHideInfoKey];
+}
+
+static void ApolloGalleryViewerSetInfoPanelHidden(BOOL hidden) {
+    [[NSUserDefaults standardUserDefaults] setBool:hidden forKey:kApolloGalleryViewerHideInfoKey];
+}
+
 // Apollo parks the shared session on Ambient, which is silenced by the ringer
 // switch — so an unmuted clip would still play silently without this.
 static void ApolloGalleryViewerActivateAudioSession(void) {
@@ -499,6 +513,8 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 @property (nonatomic, strong) ApolloGalleryChromePillView *counterPill;
 @property (nonatomic, strong) UIView *infoPanel;
 @property (nonatomic, strong, nullable) UIView *infoPanelMaterial;
+@property (nonatomic, strong) UIButton *infoCloseButton;
+@property (nonatomic, strong) UITapGestureRecognizer *infoTap;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -827,9 +843,24 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     self.subtitleLabel.numberOfLines = 1;
     [self.infoPanel addSubview:self.subtitleLabel];
 
-    UITapGestureRecognizer *infoTap = [[UITapGestureRecognizer alloc] initWithTarget:self
-                                                                              action:@selector(apollo_infoPanelTapped)];
-    [self.infoPanel addGestureRecognizer:infoTap];
+    self.infoTap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                           action:@selector(apollo_infoPanelTapped)];
+    self.infoTap.delegate = self;
+    [self.infoPanel addGestureRecognizer:self.infoTap];
+
+    // Dismissing the card is what makes the transport usable on its own: the
+    // title block is the tallest piece of chrome, and on a wide video it is
+    // the part most likely to be in the way.
+    self.infoCloseButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.infoCloseButton.tintColor = [UIColor colorWithWhite:1.0 alpha:0.75];
+    [self.infoCloseButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"
+                                            withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:17.0
+                                                                                                              weight:UIImageSymbolWeightSemibold]]
+                          forState:UIControlStateNormal];
+    self.infoCloseButton.accessibilityLabel = @"Hide Post Info";
+    [self.infoCloseButton addTarget:self action:@selector(apollo_hideInfoPanelTapped)
+                   forControlEvents:UIControlEventTouchUpInside];
+    [self.infoPanel addSubview:self.infoCloseButton];
 
     self.statusLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.statusLabel.textColor = UIColor.whiteColor;
@@ -1066,6 +1097,12 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
     CGFloat videoBarWidth = availableWidth;
     CGFloat textWidth = panelWidth - 24.0;
 
+    // The close button eats into the title's line, so the text measures
+    // against the narrower column.
+    CGFloat const closeSize = 28.0;
+    CGFloat closeInset = closeSize + 8.0;
+    textWidth -= closeInset;
+
     CGSize titleSize = CGSizeZero;
     if (self.titleLabel.text.length > 0) {
         titleSize = [self.titleLabel sizeThatFits:CGSizeMake(textWidth, CGFLOAT_MAX)];
@@ -1078,20 +1115,22 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
     }
     CGFloat gap = (titleSize.height > 0.0 && subtitleSize.height > 0.0) ? 3.0 : 0.0;
     CGFloat panelHeight = 20.0 + titleSize.height + gap + subtitleSize.height;
-    BOOL hasText = (titleSize.height + subtitleSize.height) > 0.0;
-    self.infoPanel.hidden = !hasText;
-    self.infoPanel.frame = CGRectMake(side, bounds.size.height - bottom - panelHeight, panelWidth, panelHeight);
+    BOOL showsInfo = (titleSize.height + subtitleSize.height) > 0.0 && !ApolloGalleryViewerInfoPanelHidden();
+    self.infoPanel.hidden = !showsInfo;
     self.titleLabel.frame = CGRectMake(12.0, 10.0, titleSize.width, titleSize.height);
     self.subtitleLabel.frame = CGRectMake(12.0, 10.0 + titleSize.height + gap, subtitleSize.width, subtitleSize.height);
+    self.infoCloseButton.frame = CGRectMake(panelWidth - closeSize - 8.0,
+                                            (panelHeight - closeSize) / 2.0, closeSize, closeSize);
 
-    // Transport bar: above the info panel (or where the panel would sit when
-    // it has no text). Children are laid out here, in the pill's coordinate
-    // space, because the pill re-fits its content view to its own bounds.
-    CGFloat chromeBottom = hasText ? CGRectGetMinY(self.infoPanel.frame)
-                                   : (bounds.size.height - bottom);
     CGFloat const videoBarHeight = 44.0;
-    self.videoBarPill.frame = CGRectMake(side, chromeBottom - 8.0 - videoBarHeight,
-                                         videoBarWidth, videoBarHeight);
+    BOOL showsBar = !self.videoBarPill.hidden;
+    // The transport owns the bottom edge in both orientations — where a video
+    // player's controls belong — with the post card stacked above it. On a
+    // still image there is no transport, so the card takes the bottom itself.
+    CGFloat barY = bounds.size.height - bottom - videoBarHeight;
+    self.videoBarPill.frame = CGRectMake(side, barY, videoBarWidth, videoBarHeight);
+    CGFloat infoBottom = showsBar ? (barY - 8.0) : (bounds.size.height - bottom);
+    self.infoPanel.frame = CGRectMake(side, infoBottom - panelHeight, panelWidth, panelHeight);
     {
         CGFloat const buttonSize = 36.0;
         CGFloat const buttonGap = 2.0;
@@ -1124,8 +1163,11 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
                                                 top + controlHeight + 12.0, offerWidth, 40.0);
     }
 
-    CGFloat toastAnchor = self.videoBarPill.hidden ? CGRectGetMinY(self.infoPanel.frame)
-                                                   : CGRectGetMinY(self.videoBarPill.frame);
+    // Above whichever bottom pill is highest, so the toast never lands on the
+    // controls in either orientation.
+    CGFloat toastAnchor = bounds.size.height - bottom;
+    if (showsBar) toastAnchor = MIN(toastAnchor, CGRectGetMinY(self.videoBarPill.frame));
+    if (showsInfo) toastAnchor = MIN(toastAnchor, CGRectGetMinY(self.infoPanel.frame));
     self.toastPill.frame = CGRectMake((bounds.size.width - 220.0) / 2.0,
                                        toastAnchor - 46.0,
                                        220.0, 32.0);
@@ -1758,6 +1800,11 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
        shouldReceiveTouch:(UITouch *)touch {
+    // The card's own tap (open post) must not fire when the touch is on its
+    // × — that button dismisses the card instead.
+    if (gestureRecognizer == self.infoTap) {
+        return ![touch.view isDescendantOfView:self.infoCloseButton];
+    }
     // Let the info panel's own tap handle taps that land on it.
     if ([touch.view isDescendantOfView:self.infoPanel] && self.chromeVisible) {
         return ![gestureRecognizer isKindOfClass:[UITapGestureRecognizer class]];
@@ -1801,6 +1848,20 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 
 - (void)apollo_infoPanelTapped {
     [self apollo_openCurrentPost];
+}
+
+- (void)apollo_hideInfoPanelTapped {
+    [self apollo_setInfoPanelHidden:YES];
+}
+
+- (void)apollo_setInfoPanelHidden:(BOOL)hidden {
+    ApolloGalleryViewerSetInfoPanelHidden(hidden);
+    // Rebuilds the share menu so its row reads the other way round now.
+    [self apollo_updateChromeContent];
+    [UIView animateWithDuration:0.2 animations:^{
+        [self.view layoutIfNeeded];
+    }];
+    if (hidden) [self apollo_showToast:@"Post info hidden"];
 }
 
 // The share button's actions as a UIMenu. Same set as the long-press sheet;
@@ -1853,6 +1914,15 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
                                            identifier:nil
                                               handler:^(__kindof UIAction *a) { [weakSelf apollo_openCurrentPost]; }]];
     }
+    // The way back from the card's × (and the way to dismiss it without
+    // hunting for that button).
+    BOOL infoHidden = ApolloGalleryViewerInfoPanelHidden();
+    [children addObject:[UIAction actionWithTitle:(infoHidden ? @"Show Post Info" : @"Hide Post Info")
+                                            image:[UIImage systemImageNamed:(infoHidden ? @"info.circle" : @"info.circle.fill")]
+                                       identifier:nil
+                                          handler:^(__kindof UIAction *a) {
+        [weakSelf apollo_setInfoPanelHidden:!infoHidden];
+    }]];
     return [UIMenu menuWithTitle:item.postTitle ?: @"" children:children];
 }
 
