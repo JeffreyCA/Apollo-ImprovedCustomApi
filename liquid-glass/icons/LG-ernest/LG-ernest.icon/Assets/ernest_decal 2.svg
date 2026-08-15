@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Creator: CorelDRAW 2026 -->
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="306px" height="210px" version="1.1" style="shape-rendering:geometricPrecision; text-rendering:geometricPrecision; image-rendering:optimizeQuality; fill-rule:evenodd; clip-rule:evenodd"
+viewBox="0 0 26.9 18.47"
+ xmlns:xlink="http://www.w3.org/1999/xlink"
+ xmlns:xodm="http://www.corel.com/coreldraw/odm/2003">
+ <defs>
+  <style type="text/css">
+   <![CDATA[
+    .fil0 {fill:#7CC3AA}
+   ]]>
+  </style>
+ </defs>
+ <g id="Layer_x0020_1">
+  <metadata id="CorelCorpID_0Corel-Layer"/>
+  <g id="ernest_decal">
+   <ellipse class="fil0" transform="matrix(0.914986 0.403487 -4.03487E-001 0.914986 14.27 6.26766)" rx="1.54" ry="2.26"/>
+   <ellipse class="fil0" transform="matrix(0.914986 0.403487 -4.03487E-001 0.914986 19.7437 11.9797)" rx="1.54" ry="2.26"/>
+   <ellipse class="fil0" transform="matrix(0.914986 0.403487 -4.03487E-001 0.914986 25.2175 16.3053)" rx="1.54" ry="2.26"/>
+   <ellipse class="fil0" transform="matrix(0.914986 0.403487 -4.03487E-001 0.914986 6.61652 6.26766)" rx="1.54" ry="2.26"/>
+   <path class="fil0" d="M1.56 0c0.93,0.04 1.49,1.69 0.98,2.83 -0.5,1.15 -2.08,1.69 -2.42,1.01 -0.35,-0.67 0.18,-2.26 0.18,-2.26 0,0 0.32,-1.62 1.26,-1.58z"/>
+  </g>
+ </g>
+</svg>

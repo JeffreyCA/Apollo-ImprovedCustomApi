@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Creator: CorelDRAW 2026 -->
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="300px" height="112px" version="1.1" style="shape-rendering:geometricPrecision; text-rendering:geometricPrecision; image-rendering:optimizeQuality; fill-rule:evenodd; clip-rule:evenodd"
+viewBox="0 0 23.87 8.94"
+ xmlns:xlink="http://www.w3.org/1999/xlink"
+ xmlns:xodm="http://www.corel.com/coreldraw/odm/2003">
+ <defs>
+  <style type="text/css">
+   <![CDATA[
+    .fil0 {fill:url(#id0)}
+   ]]>
+  </style>
+  <radialGradient id="id0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(0.999989 -8.4176E-005 8.4176E-005 0.999989 0 0)" cx="19.4" cy="4.47" r="4.25" fx="19.4" fy="4.47">
+   <stop offset="0" style="stop-opacity:1; stop-color:#FF9A00"/>
+   <stop offset="0.45098" style="stop-opacity:1; stop-color:#FF8400"/>
+   <stop offset="1" style="stop-opacity:1; stop-color:#FF6F00"/>
+  </radialGradient>
+ </defs>
+ <g id="Layer_x0020_1">
+  <metadata id="CorelCorpID_0Corel-Layer"/>
+  <g id="ernest_eyes">
+   <circle class="fil0" cx="19.4" cy="4.47" r="4.47"/>
+   <circle class="fil0" cx="4.47" cy="4.47" r="4.47"/>
+  </g>
+ </g>
+</svg>
