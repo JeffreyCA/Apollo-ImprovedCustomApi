@@ -531,6 +531,13 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 // the thumb (Apollo's doNotUpdateVideoPositionSlider, same idea).
 @property (nonatomic) BOOL videoScrubbing;
 @property (nonatomic) BOOL videoResumeAfterScrub;
+// Scrub seeks are coalesced (Apple QA1820, Apollo's seekInProgress): at most
+// one seek in flight, remembering only the LATEST finger position. Firing a
+// seek per slider tick instead made fast drags queue up requests the player
+// chewed through one keyframe at a time — the picture trailed the finger.
+@property (nonatomic) BOOL videoSeekInFlight;
+@property (nonatomic) BOOL videoHasPendingSeek;
+@property (nonatomic) NSTimeInterval videoPendingSeekSeconds;
 // Hold-and-drag scrubbing on the video itself (Apollo's MediaViewer has the
 // same gesture as scrubPanGestureRecognizer): the long-press arms on a video
 // page, and horizontal movement past a small slop turns it into a scrub. A
@@ -683,6 +690,12 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
         [self.collectionView setContentOffset:CGPointMake(size.width * index, 0.0) animated:NO];
         self.currentIndex = index;
         [self apollo_updateChromeContent];
+        // A video opens CLEAN — the clip is the point, and every control it
+        // needs lives behind the same tap that toggles chrome everywhere
+        // else. Still pictures keep the chrome up on arrival as before.
+        if ([self apollo_currentItem].playsAsVideo && self.chromeVisible) {
+            [self apollo_setChromeVisible:NO animated:NO];
+        }
         [self apollo_syncPlayback];
         // That sync ran before the jumped-to page's cell existed (cells for
         // the new offset materialize on the NEXT layout pass), so a video
@@ -1012,6 +1025,36 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
     self.playPauseButton.accessibilityLabel = playing ? @"Pause" : @"Play";
 }
 
+// The one entry point for scrub-time seeks (slider and hold-drag both).
+// Loose tolerance keeps the preview frame cheap; the coalescing keeps the
+// player working on exactly one position — the newest — instead of a backlog.
+- (void)apollo_scrubSeekToSeconds:(NSTimeInterval)target {
+    AVPlayer *player = self.observedPlayer;
+    if (!player) return;
+    if (self.videoSeekInFlight) {
+        self.videoPendingSeekSeconds = target;
+        self.videoHasPendingSeek = YES;
+        return;
+    }
+    self.videoSeekInFlight = YES;
+    __weak typeof(self) weakSelf = self;
+    [player seekToTime:CMTimeMakeWithSeconds(target, 600)
+       toleranceBefore:kCMTimePositiveInfinity
+        toleranceAfter:kCMTimePositiveInfinity
+     completionHandler:^(BOOL finished) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.videoSeekInFlight = NO;
+            if (strongSelf.videoHasPendingSeek) {
+                strongSelf.videoHasPendingSeek = NO;
+                [strongSelf apollo_scrubSeekToSeconds:strongSelf.videoPendingSeekSeconds];
+            }
+        });
+        (void)finished;
+    }];
+}
+
 - (void)apollo_playPauseTapped {
     AVPlayer *player = self.observedPlayer;
     if (!player) return;
@@ -1056,17 +1099,11 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
 }
 
 - (void)apollo_sliderValueChanged {
-    AVPlayer *player = self.observedPlayer;
     NSTimeInterval duration = [self apollo_currentVideoDuration];
-    if (!player || duration <= 0.0) return;
+    if (!self.observedPlayer || duration <= 0.0) return;
     NSTimeInterval target = self.videoSlider.value * duration;
     self.currentTimeLabel.text = ApolloGalleryTimeString(target);
-    // Loose tolerance while the thumb is moving keeps the preview frame
-    // tracking the finger; the precise seek happens on touch-up.
-    [player seekToTime:CMTimeMakeWithSeconds(target, 600)
-       toleranceBefore:kCMTimePositiveInfinity
-        toleranceAfter:kCMTimePositiveInfinity
-     completionHandler:^(BOOL finished) { (void)finished; }];
+    [self apollo_scrubSeekToSeconds:target];
 }
 
 - (void)apollo_sliderTouchEnded {
@@ -1077,6 +1114,8 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
         // Landing exactly on the very end would fire the loop's
         // did-play-to-end and snap back to 0 — stop a whisker short instead.
         target = MIN(target, MAX(duration - 0.1, 0.0));
+        // The precise landing seek supersedes anything still coalescing.
+        self.videoHasPendingSeek = NO;
         __weak typeof(self) weakSelf = self;
         [player seekToTime:CMTimeMakeWithSeconds(target, 600)
            toleranceBefore:kCMTimeZero
@@ -1377,10 +1416,7 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
             target = MAX(0.0, MIN(target, MAX(duration - 0.1, 0.0)));
             self.videoSlider.value = (float)(target / duration);
             self.currentTimeLabel.text = ApolloGalleryTimeString(target);
-            [player seekToTime:CMTimeMakeWithSeconds(target, 600)
-               toleranceBefore:kCMTimePositiveInfinity
-                toleranceAfter:kCMTimePositiveInfinity
-             completionHandler:^(BOOL finished) { (void)finished; }];
+            [self apollo_scrubSeekToSeconds:target];
             break;
         }
         case UIGestureRecognizerStateEnded:
@@ -1402,6 +1438,8 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
             NSTimeInterval target = self.videoSlider.value * duration;
             target = MIN(target, MAX(duration - 0.1, 0.0));
             BOOL resume = self.gestureScrubWasPlaying;
+            // The precise landing seek supersedes anything still coalescing.
+            self.videoHasPendingSeek = NO;
             __weak typeof(self) weakSelf = self;
             [player seekToTime:CMTimeMakeWithSeconds(target, 600)
                toleranceBefore:kCMTimeZero
