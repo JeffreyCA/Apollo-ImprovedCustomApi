@@ -64,25 +64,74 @@
 #import "ApolloTextureDecls.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloDirectChatWeb.h"
+#import "ApolloDevvitPosts.h"
 
 static void ApolloDevvitHeightDidChangeForFullName(NSString *fullName);
+
+NSString *const ApolloDevvitFeedOwnershipChangedNotification = @"ApolloDevvitFeedOwnershipChangedNotification";
 
 #pragma mark - Detection
 
 // A devvit custom post is detectable ONLY by its old-Reddit fallback body
-// (there is no dedicated field anywhere in the classic JSON). Both markers
-// must be present so an ordinary post QUOTING the fallback text is unlikely
-// to false-positive.
+// (there is no dedicated field anywhere in the classic JSON):
+//
+//   This post contains content not supported on old Reddit.
+//   [Click here to view the full post](https://sh.reddit.com/r/<sub>/comments/<id>)
+//
+// Both markers must be present AND ADJACENT. Proximity (not a length cap) is
+// what keeps a post that merely QUOTES the fallback from matching, and unlike a
+// cap it survives a rich fallback body: an app may put a full markdown post
+// ABOVE the fallback block, and r/soccer's daily discussion does exactly that —
+// 5.2KB of rules with the fallback appended at the end (markers 72 chars apart).
+// The old 4096-char cap silently failed there in COMMENTS while the shorter
+// listing copy still matched in the feed, so the widget appeared in the feed and
+// not in the thread. The bound that remains is Reddit's own selftext ceiling.
+// Exported (via ApolloDevvitPosts.h) so Community Highlights applies the exact
+// same test to its raw JSON.
+static const NSUInteger kApolloDevvitMarkerWindow = 300;
+
+BOOL ApolloDevvitSelfTextIsInteractive(NSString *body) {
+    if (body.length < 40 || body.length > 40000) return NO;
+    NSRange fallback = [body rangeOfString:@"not supported on old Reddit"
+                                   options:NSCaseInsensitiveSearch];
+    if (fallback.location == NSNotFound) return NO;
+    NSUInteger from = fallback.location > kApolloDevvitMarkerWindow
+                    ? fallback.location - kApolloDevvitMarkerWindow : 0;
+    NSUInteger to = MIN(body.length, NSMaxRange(fallback) + kApolloDevvitMarkerWindow);
+    return [body rangeOfString:@"sh.reddit.com/r/"
+                       options:0
+                         range:NSMakeRange(from, to - from)].location != NSNotFound;
+}
+
+BOOL ApolloDevvitPostDataIsInteractive(NSDictionary *postData) {
+    if (![postData isKindOfClass:[NSDictionary class]]) return NO;
+    id isSelf = postData[@"is_self"];
+    if (![isSelf respondsToSelector:@selector(boolValue)] || ![isSelf boolValue]) return NO;
+    id body = postData[@"selftext"];
+    return [body isKindOfClass:[NSString class]] && ApolloDevvitSelfTextIsInteractive(body);
+}
+
 static BOOL ApolloDevvitLinkIsInteractive(RDKLink *link) {
     if (!sDevvitInteractivePosts || !link) return NO;
     @try {
         if (![link isSelfPost]) return NO;
-        NSString *body = link.selfText;
-        if (body.length < 40 || body.length > 4096) return NO;
-        if (![body containsString:@"sh.reddit.com/r/"]) return NO;
-        return [body rangeOfString:@"not supported on old Reddit"
-                           options:NSCaseInsensitiveSearch].location != NSNotFound;
+        return ApolloDevvitSelfTextIsInteractive(link.selfText);
     } @catch (__unused id e) { return NO; }
+}
+
+// A pinned interactive post can live in EITHER the feed (as its live widget)
+// or the Community Highlights carousel (as a static card) — never usefully in
+// both. The feed wins whenever the widget is actually rendered there, which is
+// exactly the "Show in Feed" sub-toggle: the widget is the richer surface, and
+// duplicating the post as a card right above itself just wastes a row. With
+// feed widgets off, the inline post would be nothing but Reddit's fallback
+// text, so the carousel keeps owning it (unchanged pre-existing behavior).
+BOOL ApolloDevvitFeedOwnsInteractivePosts(void) {
+    return sDevvitInteractivePosts && sDevvitFeedWidgets;
+}
+
+BOOL ApolloDevvitFeedOwnsLink(id link) {
+    return ApolloDevvitFeedOwnsInteractivePosts() && ApolloDevvitLinkIsInteractive((RDKLink *)link);
 }
 
 // RDKLink.permalink is NSString on some paths and a relative NSURL on others
