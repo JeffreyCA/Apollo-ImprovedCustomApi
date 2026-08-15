@@ -7,6 +7,7 @@
 #import "ApolloCommon.h"
 #import "ApolloBarkNotifications.h"
 #import "ApolloLiquidGlassIconIDs.h"
+#import "ApolloLiquidGlassIconSelectionState.h"
 #import "ApolloThemeRuntime.h"
 #import "settings/ApolloSettingsTableViewController.h"
 
@@ -945,6 +946,56 @@ static void LGPersistActiveStandardPackRow(LGStandardPack pack, NSInteger row) {
                                                  forKey:kLGActiveStandardPackRowDefaultsKey];
     } else {
         [NSUserDefaults.standardUserDefaults removeObjectForKey:kLGActiveStandardPackRowDefaultsKey];
+    }
+}
+
+// Apollo owns the setter for Standard icons, so a tap only tells us what the
+// user intends to select. Keep that intent in memory until UIApplication's
+// completion confirms success. This prevents a stray forwarded selection or
+// a failed request from erasing a still-active Liquid Glass icon.
+static LGStandardPack sLGPendingStandardPack = LGStandardPackCount;
+static NSInteger sLGPendingStandardPackRow = NSNotFound;
+static NSUInteger sLGPendingStandardSelectionGeneration = 0;
+
+static void LGBeginPendingStandardPackSelection(LGStandardPack pack, NSInteger row) {
+    if (pack < 0 || pack >= LGStandardPackCount || row < 0) return;
+    sLGPendingStandardPack = pack;
+    sLGPendingStandardPackRow = row;
+    NSUInteger generation = ++sLGPendingStandardSelectionGeneration;
+
+    // Do not let an Apollo path that never reaches the icon setter leave an
+    // intent around for an unrelated icon change later in the session.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (sLGPendingStandardSelectionGeneration != generation) return;
+        ApolloLog(@"[LGIconPicker] pending Standard icon selection expired");
+        sLGPendingStandardPack = LGStandardPackCount;
+        sLGPendingStandardPackRow = NSNotFound;
+    });
+}
+
+void ApolloLGConfirmSuccessfulSystemIconChange(__unused NSString *iconName) {
+    void (^commit)(void) = ^{
+        LGStandardPack pack = sLGPendingStandardPack;
+        NSInteger row = sLGPendingStandardPackRow;
+        if (pack < 0 || pack >= LGStandardPackCount || row < 0) return;
+
+        ++sLGPendingStandardSelectionGeneration;
+        sLGPendingStandardPack = LGStandardPackCount;
+        sLGPendingStandardPackRow = NSNotFound;
+        LGClearPersistedActiveIconID();
+        LGPersistActiveStandardPackRow(pack, row);
+        ApolloLog(@"[LGIconPicker] confirmed Standard pack=%ld row=%ld",
+                  (long)pack, (long)row);
+    };
+
+    // Persist before Apollo's original completion handler redraws its cells.
+    // UIApplication normally completes on the main thread, but preserve that
+    // ordering if a future iOS version invokes the callback elsewhere.
+    if (NSThread.isMainThread) {
+        commit();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), commit);
     }
 }
 
@@ -2614,14 +2665,6 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
                                      pack:(LGStandardPack)pack;
 @end
 
-static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
-    // A Standard icon is now the intended active choice. Clear any Liquid
-    // Glass fallback immediately instead of polling alternateIconName later,
-    // when iOS may still report the icon that was active before this tap.
-    LGClearPersistedActiveIconID();
-    LGPersistActiveStandardPackRow(pack, row);
-}
-
 @implementation LGNativeIconPackViewController {
     __weak id _sourceController;
     __weak UITableView *_sourceTable;
@@ -2893,15 +2936,10 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
         UITableView *strongTable = weakTable;
         if (!strongSource || !strongTable) return;
         LGSetForwardedNativeSection(strongSource, nativeSection);
+        LGBeginPendingStandardPackSelection(pack, indexPath.row);
         ((void (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(
             strongSource, @selector(tableView:didSelectRowAtIndexPath:), strongTable, indexPath);
         LGSetForwardedNativeSection(strongSource, NSNotFound);
-        LGNoteNativePackSelection(pack, indexPath.row);
-        // The source controller owns Apollo's asynchronous icon setter, but
-        // this visible table owns the selection indicator. Refresh directly
-        // from our persisted row instead of depending on notification order
-        // between two different controllers.
-        [strongTable reloadData];
     });
 }
 
@@ -3517,7 +3555,6 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         }
         LG_REMAP_SCOPE(tableView, forwardedSection, 0);
         %orig(tableView, nativeIndexPath);
-        LGClearPersistedActiveIconID();
         return;
     }
     if (LGAlternateIconsAvailable() && LGHasFeaturedSection() && indexPath.section == LGFeaturedSectionIndex()) {
@@ -3552,11 +3589,6 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         }
         LG_REMAP_SCOPE(tableView, r.section, indexPath.section);
         %orig(tableView, r);
-        // The tapped row belongs to Apollo's own (non-glass) icon list, so
-        // whatever it just selected is no longer one of ours — drop our
-        // fallback so LGActiveIconID() doesn't keep reporting a stale LG
-        // icon on systems where the system API itself can't be trusted.
-        LGClearPersistedActiveIconID();
         return;
     }
     %orig;
@@ -3647,9 +3679,8 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
     if (replayingSelection) {
         objc_setAssociatedObject(self, &kLGCommunitySelectionReplayKey, nil,
                                  OBJC_ASSOCIATION_ASSIGN);
+        LGBeginPendingStandardPackSelection(LGStandardPackCommunity, indexPath.row);
         %orig;
-        LGNoteNativePackSelection(LGStandardPackCommunity, indexPath.row);
-        [tableView reloadData];
         return;
     }
 
