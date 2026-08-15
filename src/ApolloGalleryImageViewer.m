@@ -548,6 +548,18 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 @property (nonatomic) NSTimeInterval gestureScrubStartTime;
 @property (nonatomic) BOOL gestureScrubWasPlaying;
 
+// Smart Rotation Lock (Apollo's `SmartRotationLockEnabled` setting): with
+// iOS's own Portrait Orientation Lock on, UIKit will not auto-rotate no
+// matter what mask we answer — so, exactly like Apollo's media viewer, we
+// watch the PHYSICAL device orientation and offer a tap to rotate the media
+// anyway. Nothing rotates without that tap, so an untouched orientation lock
+// still behaves like an orientation lock.
+@property (nonatomic, strong) UIButton *rotateOfferButton;
+@property (nonatomic, strong) UIView *rotateOfferHost;
+@property (nonatomic) UIInterfaceOrientation rotateOfferTargetOrientation;
+@property (nonatomic) BOOL isForciblyRotated;
+@property (nonatomic) NSUInteger rotateOfferGeneration;
+
 @property (nonatomic, strong) UIPanGestureRecognizer *dismissPan;
 @property (nonatomic) BOOL isDismissing;
 // Full-res look-ahead: how deep (see kApolloGalleryViewerPrefetchRadius), and
@@ -639,10 +651,38 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     [self.view addGestureRecognizer:self.dismissPan];
 
     [self apollo_updateChromeContent];
+
+    // Physical device orientation keeps reporting while the INTERFACE is
+    // locked, which is what makes the smart-rotation offer possible.
+    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(apollo_deviceOrientationChanged:)
+                                                 name:UIDeviceOrientationDidChangeNotification
+                                               object:nil];
+}
+
+// Presented on top of Apollo's portrait-locked stack, so the mask the
+// container hierarchy answers only widens once ApolloGalleryOrientation sees
+// THIS controller as the visible leaf. Poking on appear is what lets a wide
+// video adopt the orientation the device is already being held at, instead of
+// waiting for the next physical rotation.
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (@available(iOS 16.0, *)) {
+        [self setNeedsUpdateOfSupportedInterfaceOrientations];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    // A forced rotation belongs to the viewer only: hand the app back to
+    // portrait on the way out, or the feed underneath is left sideways while
+    // the user's orientation lock says otherwise. Guarded on isBeingDismissed
+    // so presenting a share sheet over the viewer doesn't unrotate it.
+    if (self.isForciblyRotated && (self.isBeingDismissed || self.isDismissing)) {
+        self.isForciblyRotated = NO;
+        [self apollo_requestInterfaceOrientation:UIInterfaceOrientationPortrait];
+    }
     // Nothing should keep playing behind or after the viewer.
     for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
         if ([cell isMemberOfClass:[ApolloGalleryViewerCell class]]) {
@@ -657,6 +697,10 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     if (_observedPlayer && _videoTimeObserverToken) {
         [_observedPlayer removeTimeObserver:_videoTimeObserverToken];
     }
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:UIDeviceOrientationDidChangeNotification
+                                                  object:nil];
+    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
 }
 
 - (void)didReceiveMemoryWarning {
@@ -804,6 +848,134 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     [self.view addSubview:self.toastPill];
 
     [self apollo_buildVideoBar];
+
+    self.rotateOfferButton = ApolloGalleryChromeButton(ApolloGalleryChromeSymbol(@"rotate.right"),
+                                                       @"Tap to Rotate", &_rotateOfferHost);
+    [self.rotateOfferButton addTarget:self action:@selector(apollo_rotateOfferTapped)
+                     forControlEvents:UIControlEventTouchUpInside];
+    self.rotateOfferHost.hidden = YES;
+    [self.view addSubview:self.rotateOfferHost];
+}
+
+#pragma mark Smart Rotation Lock
+
+// Apollo's own setting, read live so toggling it in Settings takes effect on
+// the next page. Absent means on: that is how Apollo ships it.
+static BOOL ApolloGallerySmartRotationLockEnabled(void) {
+    id stored = [[NSUserDefaults standardUserDefaults] objectForKey:@"SmartRotationLockEnabled"];
+    return stored ? [stored boolValue] : YES;
+}
+
+static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDeviceOrientation device) {
+    // The landscape cases are deliberately crossed: a device rotated left
+    // presents a right-hand-side-up interface.
+    switch (device) {
+        case UIDeviceOrientationLandscapeLeft:  return UIInterfaceOrientationLandscapeRight;
+        case UIDeviceOrientationLandscapeRight: return UIInterfaceOrientationLandscapeLeft;
+        case UIDeviceOrientationPortrait:       return UIInterfaceOrientationPortrait;
+        default:                                return UIInterfaceOrientationUnknown;
+    }
+}
+
+- (UIInterfaceOrientation)apollo_currentInterfaceOrientation {
+    if (@available(iOS 13.0, *)) {
+        UIWindowScene *scene = self.view.window.windowScene;
+        if (scene) return scene.interfaceOrientation;
+    }
+    return UIInterfaceOrientationPortrait;
+}
+
+// Debounced: a physical turn passes through several intermediate readings
+// (including face-up/face-down), and UIKit needs a beat to settle its own
+// rotation when the lock is OFF — offering a button mid-turn would flash it
+// on every unlocked rotation too.
+- (void)apollo_deviceOrientationChanged:(NSNotification *)notification {
+    NSUInteger generation = ++self.rotateOfferGeneration;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.rotateOfferGeneration != generation) return;
+        [strongSelf apollo_updateRotationOffer];
+    });
+    (void)notification;
+}
+
+- (void)apollo_updateRotationOffer {
+    if (self.isDismissing || !ApolloGallerySmartRotationLockEnabled()) {
+        [self apollo_hideRotationOffer];
+        return;
+    }
+
+    UIInterfaceOrientation wanted = ApolloGalleryInterfaceOrientationForDevice(UIDevice.currentDevice.orientation);
+    if (wanted == UIInterfaceOrientationUnknown) return;   // flat on a table: keep whatever is showing
+    UIInterfaceOrientation current = [self apollo_currentInterfaceOrientation];
+    // Already agreeing means the lock is off (UIKit rotated by itself) or the
+    // user already accepted an offer — either way there is nothing to offer.
+    if (wanted == current) {
+        [self apollo_hideRotationOffer];
+        return;
+    }
+
+    ApolloGalleryItem *item = [self apollo_currentItem];
+    NSString *noun = @"Image";
+    if (item.playsAsVideo) noun = @"Video";
+    else if (item.kind == ApolloGalleryMediaKindGIF) noun = @"GIF";
+    BOOL rotatingBack = UIInterfaceOrientationIsPortrait(wanted) && self.isForciblyRotated;
+    NSString *title = rotatingBack ? @"Tap to Rotate Back"
+                                   : [NSString stringWithFormat:@"Tap to Rotate %@", noun];
+
+    self.rotateOfferTargetOrientation = wanted;
+    [self.rotateOfferButton setTitle:title forState:UIControlStateNormal];
+    if (self.rotateOfferButton.configuration) {
+        UIButtonConfiguration *configuration = self.rotateOfferButton.configuration;
+        configuration.title = title;
+        self.rotateOfferButton.configuration = configuration;
+    }
+    if (self.rotateOfferHost.hidden) {
+        self.rotateOfferHost.hidden = NO;
+        self.rotateOfferHost.alpha = 0.0;
+        [UIView animateWithDuration:0.2 animations:^{ self.rotateOfferHost.alpha = 1.0; }];
+    }
+    [self.view setNeedsLayout];
+}
+
+- (void)apollo_hideRotationOffer {
+    if (self.rotateOfferHost.hidden) return;
+    [UIView animateWithDuration:0.2 animations:^{
+        self.rotateOfferHost.alpha = 0.0;
+    } completion:^(BOOL finished) {
+        self.rotateOfferHost.hidden = YES;
+        (void)finished;
+    }];
+}
+
+- (void)apollo_rotateOfferTapped {
+    UIInterfaceOrientation target = self.rotateOfferTargetOrientation;
+    if (target == UIInterfaceOrientationUnknown) return;
+    [self apollo_hideRotationOffer];
+    // Forcing geometry is the ONLY thing that moves a locked interface, which
+    // is why this lives behind an explicit tap.
+    self.isForciblyRotated = !UIInterfaceOrientationIsPortrait(target);
+    [self apollo_requestInterfaceOrientation:target];
+}
+
+- (void)apollo_requestInterfaceOrientation:(UIInterfaceOrientation)orientation {
+    if (@available(iOS 16.0, *)) {
+        UIWindowScene *scene = self.view.window.windowScene;
+        if (!scene) return;
+        UIInterfaceOrientationMask mask;
+        switch (orientation) {
+            case UIInterfaceOrientationLandscapeLeft:  mask = UIInterfaceOrientationMaskLandscapeLeft; break;
+            case UIInterfaceOrientationLandscapeRight: mask = UIInterfaceOrientationMaskLandscapeRight; break;
+            default:                                   mask = UIInterfaceOrientationMaskPortrait; break;
+        }
+        [self setNeedsUpdateOfSupportedInterfaceOrientations];
+        UIWindowSceneGeometryPreferencesIOS *preferences =
+            [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:mask];
+        [scene requestGeometryUpdateWithPreferences:preferences errorHandler:^(NSError *error) {
+            ApolloLog(@"[Gallery] rotate request failed: %@", error.localizedDescription);
+        }];
+    }
 }
 
 // One capsule holding the whole transport row; children are frame-positioned
@@ -935,6 +1107,15 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
         CGFloat sliderRight = CGRectGetMinX(self.durationLabel.frame) - 6.0;
         self.videoSlider.frame = CGRectMake(sliderLeft, barMidY - 16.0,
                                             MAX(sliderRight - sliderLeft, 40.0), 32.0);
+    }
+
+    // Rotation offer: centered just under the top chrome, clear of the
+    // controls at the bottom.
+    if (!self.rotateOfferHost.hidden) {
+        CGSize offerSize = [self.rotateOfferHost sizeThatFits:CGSizeMake(bounds.size.width - 2.0 * side, 44.0)];
+        CGFloat offerWidth = MIN(MAX(offerSize.width, 180.0), bounds.size.width - 2.0 * side);
+        self.rotateOfferHost.frame = CGRectMake((bounds.size.width - offerWidth) / 2.0,
+                                                top + controlHeight + 12.0, offerWidth, 40.0);
     }
 
     CGFloat toastAnchor = self.videoBarPill.hidden ? CGRectGetMinY(self.infoPanel.frame)
