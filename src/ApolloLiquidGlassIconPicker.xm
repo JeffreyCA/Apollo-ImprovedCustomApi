@@ -3647,22 +3647,39 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
 
 %end
 
+static void LGStyleCommunityIconCell(UITableViewCell *cell,
+                                     UITableView *tableView,
+                                     NSIndexPath *indexPath) {
+    if (!cell || !tableView || !indexPath) return;
+    UIColor *accent = ApolloThemeAccentColor() ?: tableView.tintColor;
+    cell.tintColor = accent;
+    cell.accessoryView.tintColor = accent;
+    for (UIView *subview in cell.contentView.subviews) subview.tintColor = accent;
+
+    NSInteger rowCount = [tableView numberOfRowsInSection:indexPath.section];
+    LGNormalizeNativeIconCellBackground(cell, LGThemedPageBackgroundColor(tableView),
+                                        indexPath.row == 0,
+                                        indexPath.row == rowCount - 1);
+    LGSetNativeIconCellCheckmark(cell,
+        LGActiveStandardPackRow(LGStandardPackCommunity) == indexPath.row);
+}
+
 %hook _TtC6Apollo39SettingsCommunityIconPackViewController
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     LGRememberTableView(self, tableView);
     UITableViewCell *cell = %orig;
-    // Match the rendering pass used by the tweak-owned Standard pack tables:
-    // the same card fill, dynamic accent tint, and persisted checkmark state.
-    UIColor *cellColor = LGThemedCardBackgroundColor(nil);
-    UIColor *accent = ApolloThemeAccentColor() ?: tableView.tintColor;
-    cell.backgroundColor = cellColor;
-    cell.tintColor = accent;
-    cell.accessoryView.tintColor = accent;
-    for (UIView *subview in cell.contentView.subviews) subview.tintColor = accent;
-    LGSetNativeIconCellCheckmark(cell,
-        LGActiveStandardPackRow(LGStandardPackCommunity) == indexPath.row);
+    LGStyleCommunityIconCell(cell, tableView, indexPath);
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell
+                                      forRowAtIndexPath:(NSIndexPath *)indexPath {
+    %orig;
+    // Apollo's custom-theme pass runs during willDisplay and can overwrite
+    // cellForRow's card color. Reassert the same picker-owned fill used by
+    // Apollo Originals, Ultra, and Sekrit after that native pass completes.
+    LGStyleCommunityIconCell(cell, tableView, indexPath);
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
