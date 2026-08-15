@@ -310,8 +310,8 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
 
 - (void)saveDiskCacheLocked {
     [self pruneDiskInfoLocked];
-    [self publishInfoSnapshotLocked];
     NSDictionary<NSString *, ApolloSubredditInfo *> *snapshot = [self.diskInfo copy] ?: @{};
+    self.infoSnapshot = snapshot;
     dispatch_async(self.ioQueue, ^{
         // Model-to-plist conversion can walk hundreds of entries and allocate
         // heavily. The state queue publishes the immutable object snapshot;

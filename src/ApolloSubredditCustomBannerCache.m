@@ -48,9 +48,10 @@ static NSUInteger const ApolloSubredditCustomBannerMaxBytes = 1572864; // 1.5 MB
         NSString *cacheRoot = paths.firstObject ?: NSTemporaryDirectory();
         _storagePath = [cacheRoot stringByAppendingPathComponent:@"ApolloFix/SubredditCustomBanners"];
 
-        // Discover what is stored without decoding every wide banner at launch.
-        // A visible subreddit lazily rehydrates its own image on the serial I/O
-        // queue, preserving NSCache's memory-pressure behavior.
+        // Inventory filenames away from the first header render. The previous
+        // path decoded only the requested file on a cache miss, but did its file
+        // read and decode synchronously on the caller. A visible subreddit now
+        // rehydrates lazily on this serial I/O queue.
         dispatch_async(_ioQueue, ^{
             [self ensureStorageDirectory];
             NSArray<NSString *> *files = [[NSFileManager defaultManager]
@@ -285,18 +286,20 @@ static NSUInteger const ApolloSubredditCustomBannerMaxBytes = 1572864; // 1.5 MB
             removed = YES;
         }
         if (!removed) {
-            if (existed) {
-                [self publishStoredKey:key present:YES];
-                [self postChangedNotificationForSubreddit:key];
-            }
+            [self publishStoredKey:key present:YES];
             ApolloLog(@"[SubredditHeaders] failed to remove custom banner subreddit=%@ error=%@",
                 key, removeError.localizedDescription ?: @"unknown");
+            // Always publish the final state. Startup inventory may have run
+            // between the optimistic update and this queued mutation even when
+            // the caller's initial `existed` snapshot was false.
+            [self postChangedNotificationForSubreddit:key];
             return;
         }
         // The startup inventory block may have published this key after the
         // caller's optimistic removal but before this queued delete ran.
         [self publishStoredKey:key present:NO];
         ApolloLog(@"[SubredditHeaders] removed custom banner subreddit=%@", key);
+        [self postChangedNotificationForSubreddit:key];
     });
     return existed;
 }
@@ -330,7 +333,9 @@ static NSUInteger const ApolloSubredditCustomBannerMaxBytes = 1572864; // 1.5 MB
         }
         for (NSString *key in failedKeys) [self publishStoredKey:key present:YES];
         ApolloLog(@"[SubredditHeaders] cleared all custom banners");
-        if (failedKeys.count > 0) [self postChangedNotificationForSubreddit:nil];
+        // Correct any startup-inventory notification that reached the main
+        // queue before deletion completed, regardless of the optimistic state.
+        [self postChangedNotificationForSubreddit:nil];
     });
 }
 

@@ -47,11 +47,10 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
         NSString *cacheRoot = paths.firstObject ?: NSTemporaryDirectory();
         _storagePath = [cacheRoot stringByAppendingPathComponent:@"ApolloFix/SubredditCustomIcons"];
 
-        // Inventory the filenames away from the first header/chat-cell render,
-        // but do not decode every custom icon at launch. NSCache is deliberately
-        // bounded and purgeable; eager decoding would immediately refill it
-        // with images the user may never view. Individual misses rehydrate on
-        // this same serial queue below.
+        // Inventory filenames away from the first header/chat-cell render. The
+        // previous path decoded only the requested file on a cache miss, but it
+        // performed that file read and decode synchronously on the caller. Keep
+        // decoding lazy while moving each miss onto this serial I/O queue.
         dispatch_async(_ioQueue, ^{
             [self ensureStorageDirectory];
             NSArray<NSString *> *files = [[NSFileManager defaultManager]
@@ -279,18 +278,20 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
             removed = YES;
         }
         if (!removed) {
-            if (existed) {
-                [self publishStoredKey:key present:YES];
-                [self postChangedNotificationForSubreddit:key];
-            }
+            [self publishStoredKey:key present:YES];
             ApolloLog(@"[SubredditHeaders] failed to remove custom icon subreddit=%@ error=%@",
                 key, removeError.localizedDescription ?: @"unknown");
+            // Always publish the final state. Startup inventory may have run
+            // between the optimistic update and this queued mutation even when
+            // the caller's initial `existed` snapshot was false.
+            [self postChangedNotificationForSubreddit:key];
             return;
         }
         // The startup inventory block may have published this key after the
         // caller's optimistic removal but before this queued delete ran.
         [self publishStoredKey:key present:NO];
         ApolloLog(@"[SubredditHeaders] removed custom icon subreddit=%@", key);
+        [self postChangedNotificationForSubreddit:key];
     });
     return existed;
 }
@@ -324,7 +325,9 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
         }
         for (NSString *key in failedKeys) [self publishStoredKey:key present:YES];
         ApolloLog(@"[SubredditHeaders] cleared all custom icons");
-        if (failedKeys.count > 0) [self postChangedNotificationForSubreddit:nil];
+        // Correct any startup-inventory notification that reached the main
+        // queue before deletion completed, regardless of the optimistic state.
+        [self postChangedNotificationForSubreddit:nil];
     });
 }
 

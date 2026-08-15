@@ -6991,7 +6991,7 @@ static void ApolloScheduleThreadTranslationReconcileForController(UIViewControll
             } else {
                 ApolloRestoreVisibleCommentsForController(strongVC);
                 // The restore helper takes one cheap empty-registry snapshot.
-                // Avoid a separate lock-free hint: publishing a marker and a
+                // Avoid a separate unsynchronized hint: publishing a marker and a
                 // weak-table membership are one logical state transition.
                 ApolloRestoreAllOwnedTextNodes();
                 ApolloClearVisibleTranslationApplied(strongVC);

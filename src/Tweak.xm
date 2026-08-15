@@ -332,26 +332,34 @@ static NSData *ApolloMirrorGet(NSString *service, NSString *account) {
 // the fingerprint of a broken keychain and should be visible in an uploaded log. failStatus is
 // the OSStatus from the real keychain's final rejection, so a log distinguishes an
 // entitlement rejection (-34018) from a still-colliding orphan (-25299) or other cause.
-static void ApolloMirrorPut(NSString *service, NSString *account, NSData *data, OSStatus failStatus) {
-    if (![data isKindOfClass:[NSData class]]) return;
+static BOOL ApolloMirrorPut(NSString *service, NSString *account, NSData *data, OSStatus failStatus) {
+    if (![data isKindOfClass:[NSData class]]) return NO;
     NSString *key = ApolloKeychainMirrorKey(service, account);
     __block BOOL persisted = NO;
     dispatch_sync(ApolloMirrorQueue(), ^{
-        ApolloMirrorLoadOnQueue()[key] = @{
+        NSMutableDictionary *store = ApolloMirrorLoadOnQueue();
+        NSDictionary *previousEntry = store[key];
+        store[key] = @{
             @"service": service ?: @"",
             @"account": account ?: @"",
             @"data":    data,
         };
         persisted = ApolloMirrorPersistOnQueue();
+        // Never expose a value that Valet was told failed and that cannot
+        // survive a cold launch. Restore the last durable authority (if any).
+        if (!persisted) {
+            if (previousEntry) store[key] = previousEntry;
+            else [store removeObjectForKey:key];
+        }
     });
-    // If this fails the mirror is memory-only and the account is gone on the
-    // next cold launch with no on-disk fingerprint — keep that failure loud.
     if (!persisted) {
-        ApolloLoginDiag(@"[KeychainMirror] FAILED to write mirror to %@ — mirror is memory-only this session",
-                        ApolloKeychainMirrorPath());
+        ApolloLoginDiag(@"[KeychainMirror] FAILED to persist fallback to %@; returning original keychain status=%d service=%@ account=%@",
+                        ApolloKeychainMirrorPath(), (int)failStatus, service, account);
+        return NO;
     }
     ApolloLoginDiag(@"[KeychainMirror] real keychain could not persist item (status=%d); mirrored %lu bytes to container service=%@ account=%@",
                     (int)failStatus, (unsigned long)data.length, service, account);
+    return YES;
 }
 
 // A real write for this key finally landed — drop the mirror entry so the real keychain is
@@ -365,20 +373,18 @@ static BOOL ApolloMirrorRemove(NSString *service, NSString *account) {
         NSMutableDictionary *store = ApolloMirrorLoadOnQueue();
         had = store[key] != nil;
         if (had) {
-            NSDictionary *removedEntry = store[key];
             [store removeObjectForKey:key];
             persisted = ApolloMirrorPersistOnQueue();
-            // Keep memory and disk semantics aligned when persistence fails.
-            // Returning success here would let a stale on-disk credential
-            // reappear on the next cold launch.
-            if (!persisted && removedEntry) store[key] = removedEntry;
+            // A successful real-keychain write is the newest authority. Even
+            // if stale-file cleanup fails, never restore the older mirror into
+            // this process's read path and shadow the value that just landed.
         }
     });
     if (had && persisted) {
         ApolloLoginDiag(@"[KeychainMirror] real keychain took over item; dropped mirror service=%@ account=%@",
                         service, account);
     } else if (had) {
-        ApolloLoginDiag(@"[KeychainMirror] real keychain took over item, but mirror removal could not be persisted service=%@ account=%@",
+        ApolloLoginDiag(@"[KeychainMirror] real keychain took over item; stale disk cleanup failed but mirror remains suppressed in this process service=%@ account=%@",
                         service, account);
     }
     return had && persisted;
@@ -1255,9 +1261,10 @@ static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result)
     // Fall back to the container mirror so the account still persists across launches.
     NSData *value = strippedQuery[(__bridge id)kSecValueData];
     if ([value isKindOfClass:[NSData class]]) {
-        ApolloMirrorPut(service, account, value, status);
-        if (result) ApolloMirrorServe(strippedQuery, value, result);
-        return errSecSuccess;
+        if (ApolloMirrorPut(service, account, value, status)) {
+            if (result) ApolloMirrorServe(strippedQuery, value, result);
+            return errSecSuccess;
+        }
     }
     return status;
 }
@@ -1476,8 +1483,7 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
     // Real keychain still can't hold it — mirror the new value (see SecItemAdd_replacement).
     NSData *value = attrs[(__bridge id)kSecValueData];
     if ([value isKindOfClass:[NSData class]]) {
-        ApolloMirrorPut(service, account, value, status);
-        return errSecSuccess;
+        if (ApolloMirrorPut(service, account, value, status)) return errSecSuccess;
     }
     return status;
 }

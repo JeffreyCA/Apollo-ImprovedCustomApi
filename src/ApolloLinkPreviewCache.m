@@ -230,6 +230,11 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
         self.entries[key] = entry;
         [self evictIfNeededLocked];
         self.entriesSnapshot = [self.entries copy];
+        // Reassert the ordered store after publishing its snapshot. A caller
+        // may have decoded the previous snapshot between the eager memory put
+        // above and this state-queue block; this final put makes the newest
+        // store the eventual memory-cache winner as well.
+        if (self.entries[key] == entry) [self.memoryCache setObject:preview forKey:key];
         [self markDiskDirtyLocked];
     });
 }
@@ -240,7 +245,8 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
 
     // Invalidations are rare user/account events. Make the state publication
     // synchronous so the method's return remains a real ordering boundary;
-    // layout lookups themselves stay lock-free through entriesSnapshot.
+    // layout lookups avoid dispatch_sync to the state queue through
+    // entriesSnapshot.
     dispatch_sync(self.queue, ^{
         if (self.entries[key]) {
             [self.entries removeObjectForKey:key];
