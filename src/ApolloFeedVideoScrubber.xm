@@ -157,6 +157,40 @@ static void RestoreCompetingPans(NSArray<UIGestureRecognizer *> *disabled) {
     for (UIGestureRecognizer *g in disabled) g.enabled = YES;
 }
 
+// The AVPlayerLayer showing this video, so the overlay can be sized to the
+// picture itself rather than to the node that hosts it.
+static AVPlayerLayer *PlayerLayerInLayer(CALayer *layer) {
+    if (!layer) return nil;
+    if ([layer isKindOfClass:[AVPlayerLayer class]]) return (AVPlayerLayer *)layer;
+    for (CALayer *sub in layer.sublayers) {
+        AVPlayerLayer *found = PlayerLayerInLayer(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
+// The rect the video actually occupies, in `host` coordinates. A 16:9 clip in a
+// taller node is letterboxed, so the node's frame is wider (or taller) than the
+// picture — laying the bar out against the frame leaves it overhanging the
+// video, which reads as misaligned. AVPlayerLayer.videoRect is the picture's
+// real rect once the layer is ready; fall back to the node's own bounds before
+// then (and for anything without a player layer).
+static CGRect VideoContentRectInHost(UIView *videoView, UIView *host) {
+    CGRect fallback = [videoView convertRect:videoView.bounds toView:host];
+    AVPlayerLayer *playerLayer = PlayerLayerInLayer(videoView.layer);
+    if (!playerLayer) return fallback;
+
+    CGRect videoRect = playerLayer.videoRect;
+    if (CGRectIsEmpty(videoRect) || videoRect.size.width < 1 || videoRect.size.height < 1) {
+        return fallback;
+    }
+    CGRect inVideoView = [videoView.layer convertRect:videoRect fromLayer:playerLayer];
+    CGRect inHost = [videoView convertRect:inVideoView toView:host];
+    // Guard against a stale/oversized videoRect during a resize: never grow
+    // beyond the node itself.
+    return CGRectIsEmpty(inHost) ? fallback : CGRectIntersection(inHost, fallback);
+}
+
 static NSString *FormatPlaybackTime(NSTimeInterval seconds) {
     if (!isfinite(seconds) || seconds < 0) seconds = 0;
     NSInteger total = (NSInteger)llround(seconds);
@@ -433,7 +467,9 @@ static char kFeedScrubOverlayKey;
 - (void)positionInHost:(UIView *)host videoView:(UIView *)videoView {
     if (!host || !videoView) return;
 
-    CGRect videoFrame = [videoView convertRect:videoView.bounds toView:host];
+    // Track the picture, not the node: a letterboxed clip must not have the bar
+    // hanging off its edges.
+    CGRect videoFrame = VideoContentRectInHost(videoView, host);
     if (CGRectIsEmpty(videoFrame)) return;
 
     CGFloat width = MAX(0.0, videoFrame.size.width - kOverlaySideInset * 2.0);
