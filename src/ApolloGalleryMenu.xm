@@ -31,6 +31,7 @@
 
 #import "ApolloActionMenu.h"
 #import "ApolloCommon.h"
+#import "ApolloGalleryFeed.h"
 #import "ApolloGalleryViewController.h"
 #import "ApolloNativeActionMenus.h"
 
@@ -129,6 +130,101 @@ static NSString *ApolloGalleryMenuSourceDescription(NSString *listingIdentifier)
     return listingIdentifier.length > 0 ? [@"r/" stringByAppendingString:listingIdentifier] : @"feed";
 }
 
+#pragma mark - Source sort inheritance
+
+// Apollo's PostsViewController keeps its active listing sort in Swift
+// optional-enum ivars — `currentSort` (RDKLinkSortingMethod?) and
+// `currentTimeSort` (RDKTimeSortingMethod?): Int64 raw at +0, is-nil byte at
+// +8. Same Optional layout ApolloPerPostCommentSort reads on the comments
+// screen; reads are defensive so a layout surprise just means "nothing to
+// inherit".
+static ptrdiff_t ApolloGalleryMenuIvarOffset(id object, const char *name) {
+    Class cls = object ? object_getClass(object) : Nil;
+    while (cls) {
+        Ivar ivar = class_getInstanceVariable(cls, name);
+        if (ivar) return ivar_getOffset(ivar);
+        cls = class_getSuperclass(cls);
+    }
+    return -1;
+}
+
+static BOOL ApolloGalleryMenuReadOptionalEnumIvar(id object, const char *name, int64_t *outRaw) {
+    ptrdiff_t offset = ApolloGalleryMenuIvarOffset(object, name);
+    if (offset < 0) return NO;
+    if ((size_t)(offset + 9) > class_getInstanceSize(object_getClass(object))) return NO;
+    const uint8_t *base = (const uint8_t *)(__bridge const void *)object;
+    if ((*(base + offset + 8)) & 0x1) return NO;   // Optional is .none
+    int64_t raw = 0;
+    memcpy(&raw, base + offset, sizeof(raw));
+    if (outRaw) *outRaw = raw;
+    return YES;
+}
+
+// RDKLinkSortingMethod raw → gallery sort. Raw values measured in the
+// simulator by flipping Apollo's own sort menu and logging the ivar
+// (2026-08-14, r/aww): hot=1, best=2, new=3, rising=4, controversial=5,
+// top=6. Best maps onto Hot — the gallery's nearest ranked listing — and
+// controversial returns nil (the gallery has no controversial listing) so
+// the gallery keeps its default rather than showing something mislabeled
+// as inherited.
+static NSNumber *ApolloGalleryMenuGallerySortForLinkSortRaw(int64_t raw) {
+    switch (raw) {
+        case 1: return @(ApolloGallerySortHot);
+        case 2: return @(ApolloGallerySortHot);      // best
+        case 3: return @(ApolloGallerySortNew);
+        case 4: return @(ApolloGallerySortRising);
+        case 6: return @(ApolloGallerySortTop);
+        default: return nil;                          // controversial & unknowns
+    }
+}
+
+// RDKTimeSortingMethod raw → gallery top window. Measured the same way:
+// day=2, week=3, month=4, year=6, all time=7 (hour=1 inferred as the only
+// slot below day; 5 never appears in Apollo's UI). "This hour" collapses to
+// Today — the gallery's smallest window — and the unobserved 5 leans Year,
+// the nearer neighbour of the 4/6 values around it.
+static NSNumber *ApolloGalleryMenuTopWindowForTimeSortRaw(int64_t raw) {
+    switch (raw) {
+        case 1: return @(ApolloGalleryTopWindowDay);
+        case 2: return @(ApolloGalleryTopWindowDay);
+        case 3: return @(ApolloGalleryTopWindowWeek);
+        case 4: return @(ApolloGalleryTopWindowMonth);
+        case 5: return @(ApolloGalleryTopWindowYear);
+        case 6: return @(ApolloGalleryTopWindowYear);
+        case 7: return @(ApolloGalleryTopWindowAll);
+        default: return nil;
+    }
+}
+
+// The source feed's sort, mapped for the gallery. Only PostsViewController
+// carries these ivars (profiles have no listing sort to read); everywhere
+// else both out-params stay nil and the gallery opens on its defaults.
+static void ApolloGalleryMenuResolveInheritedSort(UIViewController *owner,
+                                                  NSNumber **outSort,
+                                                  NSNumber **outWindow) {
+    if (outSort) *outSort = nil;
+    if (outWindow) *outWindow = nil;
+    static Class postsClass = Nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        postsClass = objc_getClass("_TtC6Apollo19PostsViewController");
+    });
+    if (!postsClass || ![owner isKindOfClass:postsClass]) return;
+
+    int64_t sortRaw = 0;
+    if (!ApolloGalleryMenuReadOptionalEnumIvar(owner, "currentSort", &sortRaw)) return;
+    NSNumber *sort = ApolloGalleryMenuGallerySortForLinkSortRaw(sortRaw);
+
+    int64_t timeRaw = 0;
+    BOOL hasTime = ApolloGalleryMenuReadOptionalEnumIvar(owner, "currentTimeSort", &timeRaw);
+    NSNumber *window = hasTime ? ApolloGalleryMenuTopWindowForTimeSortRaw(timeRaw) : nil;
+
+    ApolloLog(@"[GalleryMenu] source sort raw=%lld timeRaw=%lld -> gallery sort=%@ window=%@",
+              (long long)sortRaw, (long long)(hasTime ? timeRaw : -1), sort, window);
+    if (outSort) *outSort = sort;
+    if (outWindow) *outWindow = window;
+}
+
 static void ApolloGalleryMenuOpenForController(id actionController) {
     UIViewController *owner = ApolloGalleryMenuOwnerForController(actionController);
     NSString *subreddit = owner ? ApolloSubredditNameFromViewController(owner) : nil;
@@ -145,9 +241,18 @@ static void ApolloGalleryMenuOpenForController(id actionController) {
         return;
     }
 
+    // Resolved now, not inside the block: the sort should reflect what the
+    // feed showed when the row was tapped, and the owner is guaranteed alive
+    // here.
+    NSNumber *inheritedSort = nil;
+    NSNumber *inheritedWindow = nil;
+    ApolloGalleryMenuResolveInheritedSort(owner, &inheritedSort, &inheritedWindow);
+
     dispatch_block_t openGallery = ^{
         [ApolloGalleryViewController presentGalleryForSubreddit:subreddit
-                                             fromViewController:owner];
+                                             fromViewController:owner
+                                             inheritedSortValue:inheritedSort
+                                        inheritedTopWindowValue:inheritedWindow];
     };
     if (ApolloNativeActionMenuPerformAfterDismissal(actionController, openGallery)) {
         ApolloLog(@"[GalleryMenu] Waiting for the glass menu to dismiss before opening %@",

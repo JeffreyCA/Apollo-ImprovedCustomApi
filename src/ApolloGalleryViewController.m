@@ -350,6 +350,29 @@ static NSString *ApolloGalleryNormalizedMultiredditPath(NSString *value) {
     return [@"/" stringByAppendingString:[components componentsJoinedByString:@"/"]];
 }
 
+// Seed the freshly built (not yet pushed) gallery with the sort the source
+// feed was showing. Runs before viewDidLoad's first fetch, so no reload is
+// wasted. Values the feed can't honor are dropped: an unknown raw keeps the
+// default, and rising quietly stands down on feeds whose listing endpoint
+// rejects it — inheriting a sort should never produce an error the user
+// didn't cause.
+static void ApolloGalleryApplyInheritedSort(ApolloGalleryViewController *gallery,
+                                            NSNumber *sortValue, NSNumber *topWindowValue) {
+    if (!gallery || !sortValue) return;
+    NSInteger sortRaw = sortValue.integerValue;
+    if (sortRaw < ApolloGallerySortHot || sortRaw > ApolloGallerySortRising) return;
+    ApolloGallerySort sort = (ApolloGallerySort)sortRaw;
+    if (sort == ApolloGallerySortRising && !gallery.feed.supportsRisingSort) return;
+
+    ApolloGalleryTopWindow window = gallery.feed.topWindow;
+    NSInteger windowRaw = topWindowValue ? topWindowValue.integerValue : -1;
+    if (windowRaw >= ApolloGalleryTopWindowDay && windowRaw <= ApolloGalleryTopWindowAll) {
+        window = (ApolloGalleryTopWindow)windowRaw;
+    }
+    [gallery.feed setSort:sort topWindow:window];
+    ApolloLog(@"[Gallery] inherited sort from source feed -> %@", gallery.feed.sortDisplayName);
+}
+
 static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
                               UIViewController *sourceViewController) {
     if (!gallery || !sourceViewController) return NO;
@@ -367,6 +390,16 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
 }
 
 + (BOOL)presentGalleryForSubreddit:(NSString *)subreddit fromViewController:(UIViewController *)sourceViewController {
+    return [self presentGalleryForSubreddit:subreddit
+                         fromViewController:sourceViewController
+                         inheritedSortValue:nil
+                    inheritedTopWindowValue:nil];
+}
+
++ (BOOL)presentGalleryForSubreddit:(NSString *)subreddit
+                fromViewController:(UIViewController *)sourceViewController
+                inheritedSortValue:(NSNumber *)sortValue
+           inheritedTopWindowValue:(NSNumber *)topWindowValue {
     // GalleryMenu deliberately keeps its established call site so open PRs
     // that defer this presentation until a Liquid Glass menu has dismissed
     // continue to cover every feed type. A canonical multireddit path and an
@@ -374,12 +407,16 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     // accepted here (a bare name with no prefix is always a subreddit slug).
     NSString *multiredditPath = ApolloGalleryNormalizedMultiredditPath(subreddit);
     if (multiredditPath.length > 0) {
-        return [self presentGalleryForMultiredditPath:multiredditPath
-                                   fromViewController:sourceViewController];
+        return [self apollo_presentGalleryForMultiredditPath:multiredditPath
+                                          fromViewController:sourceViewController
+                                          inheritedSortValue:sortValue
+                                     inheritedTopWindowValue:topWindowValue];
     }
     NSString *prefixCheck = [subreddit stringByTrimmingCharactersInSet:
                              [NSCharacterSet characterSetWithCharactersInString:@" \t/"]].lowercaseString;
     if ([prefixCheck hasPrefix:@"u/"] || [prefixCheck hasPrefix:@"user/"]) {
+        // Profile feeds have no source sort to inherit — Apollo's profile
+        // screen doesn't expose one — so the seed deliberately stops here.
         return [self presentGalleryForUsername:subreddit
                             fromViewController:sourceViewController];
     }
@@ -392,6 +429,7 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     }
 
     ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithSubreddit:slug];
+    ApolloGalleryApplyInheritedSort(gallery, sortValue, topWindowValue);
     if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
     ApolloLog(@"[Gallery] opened for r/%@", slug);
     return YES;
@@ -399,6 +437,16 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
 
 + (BOOL)presentGalleryForMultiredditPath:(NSString *)multiredditPath
                       fromViewController:(UIViewController *)sourceViewController {
+    return [self apollo_presentGalleryForMultiredditPath:multiredditPath
+                                      fromViewController:sourceViewController
+                                      inheritedSortValue:nil
+                                 inheritedTopWindowValue:nil];
+}
+
++ (BOOL)apollo_presentGalleryForMultiredditPath:(NSString *)multiredditPath
+                             fromViewController:(UIViewController *)sourceViewController
+                             inheritedSortValue:(NSNumber *)sortValue
+                        inheritedTopWindowValue:(NSNumber *)topWindowValue {
     NSString *path = ApolloGalleryNormalizedMultiredditPath(multiredditPath);
     if (path.length == 0 || !sourceViewController) {
         ApolloLog(@"[Gallery] refusing to open: multireddit=%@ source=%@",
@@ -407,6 +455,7 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     }
 
     ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithMultiredditPath:path];
+    ApolloGalleryApplyInheritedSort(gallery, sortValue, topWindowValue);
     if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
     ApolloLog(@"[Gallery] opened for %@", gallery.sourceDescription);
     return YES;
@@ -504,6 +553,27 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+// The grid is the one screen on Apollo's otherwise portrait-locked phone
+// stack that supports landscape (ApolloGalleryOrientation.xm widens the
+// container masks while it's topmost). UIKit only re-reads those masks when
+// poked, so poke it on the way in — a device already held sideways rotates
+// the freshly opened gallery — and on the way out, where the nav's top has
+// already flipped to the portrait-only feed, so the same poke is what snaps
+// a landscape grid back upright as it pops.
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (@available(iOS 16.0, *)) {
+        [self setNeedsUpdateOfSupportedInterfaceOrientations];
+    }
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    if (@available(iOS 16.0, *)) {
+        [self.navigationController setNeedsUpdateOfSupportedInterfaceOrientations];
+    }
+}
+
 - (void)apollo_nsfwBlurInputsChanged:(NSNotification *)notification {
     // The captured Reddit preference can arrive after Gallery's initial cells
     // were configured, or change when the active account switches; the Tag
@@ -547,9 +617,12 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
 
 // Rotation reshuffles the whole waterfall — a different column count and
 // column width move every tile to a new y — so carrying the raw point offset
-// across lands the user on unrelated tiles. Anchor on the topmost visible tile
-// (lowest index still on screen: the waterfall places items in listing order)
-// and put it back at the same relative position in the new layout.
+// across lands the user on unrelated tiles. Anchor on the tile nearest the
+// MIDDLE of the viewport — the one the user is actually looking at — and put
+// its center back at the same relative height of the new viewport. Keeping
+// that relative height (rather than snapping the anchor to the exact center)
+// is what makes portrait → landscape → portrait land back on the original
+// offset instead of drifting a little on every round trip.
 - (void)viewWillTransitionToSize:(CGSize)size
        withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
     [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
@@ -557,38 +630,47 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     UICollectionView *collectionView = self.collectionView;
     if (!collectionView || self.feed.items.count == 0) return;
 
-    CGFloat visibleTop = collectionView.contentOffset.y + collectionView.adjustedContentInset.top;
+    UIEdgeInsets insets = collectionView.adjustedContentInset;
+    CGFloat visibleTop = collectionView.contentOffset.y + insets.top;
     // Pinned at the top: leave the offset to UIKit so the grid stays flush
     // under the bar instead of anchoring partway into tile 0.
     if (visibleTop <= 1.0) return;
+    CGFloat visibleHeight = MAX(collectionView.bounds.size.height - insets.top - insets.bottom, 1.0);
+    CGFloat visibleCenter = visibleTop + visibleHeight / 2.0;
 
     NSIndexPath *anchorPath = nil;
-    CGFloat anchorFraction = 0.0;
+    CGFloat anchorDistance = CGFLOAT_MAX;
+    CGFloat anchorRelative = 0.5;
     for (NSIndexPath *indexPath in [collectionView indexPathsForVisibleItems]) {
-        if (anchorPath && indexPath.item >= anchorPath.item) continue;
         UICollectionViewLayoutAttributes *attributes =
             [self.waterfallLayout layoutAttributesForItemAtIndexPath:indexPath];
         // "Visible" includes cells fully underneath the nav bar; skip those.
         if (!attributes || CGRectGetMaxY(attributes.frame) <= visibleTop) continue;
-        anchorPath = indexPath;
-        CGFloat height = MAX(CGRectGetHeight(attributes.frame), 1.0);
-        anchorFraction = (visibleTop - CGRectGetMinY(attributes.frame)) / height;
-        anchorFraction = MAX(0.0, MIN(anchorFraction, 1.0));
+        CGFloat itemCenter = CGRectGetMidY(attributes.frame);
+        CGFloat distance = fabs(itemCenter - visibleCenter);
+        // Ties (two side-by-side tiles equally near the center) go to the
+        // lower index so the pick is deterministic across round trips.
+        if (distance + 0.5 < anchorDistance ||
+            (fabs(distance - anchorDistance) <= 0.5 && indexPath.item < anchorPath.item)) {
+            anchorPath = indexPath;
+            anchorDistance = distance;
+            anchorRelative = (itemCenter - visibleTop) / visibleHeight;
+        }
     }
     if (!anchorPath) return;
 
     NSIndexPath *path = anchorPath;
-    CGFloat fraction = anchorFraction;
+    CGFloat relative = anchorRelative;
     __weak typeof(self) weakSelf = self;
     [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
-        [weakSelf apollo_scrollToAnchorItem:path fraction:fraction forWidth:size.width];
+        [weakSelf apollo_scrollToAnchorItem:path relativeCenter:relative forSize:size];
         (void)context;
     } completion:nil];
 }
 
 - (void)apollo_scrollToAnchorItem:(NSIndexPath *)anchorPath
-                         fraction:(CGFloat)fraction
-                         forWidth:(CGFloat)width {
+                   relativeCenter:(CGFloat)relative
+                          forSize:(CGSize)size {
     UICollectionView *collectionView = self.collectionView;
     if (anchorPath.item >= [collectionView numberOfItemsInSection:0]) return;
 
@@ -596,7 +678,7 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     // Setting the column count here (rather than waiting for
     // viewDidLayoutSubviews) makes the single layoutIfNeeded below produce the
     // final tile positions instead of an intermediate old-column-count pass.
-    NSInteger columns = [self apollo_columnCountForWidth:width];
+    NSInteger columns = [self apollo_columnCountForWidth:size.width];
     if (columns != self.waterfallLayout.columnCount) {
         self.waterfallLayout.columnCount = columns;
         [self.waterfallLayout invalidateLayout];
@@ -608,8 +690,9 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     if (!attributes) return;
 
     UIEdgeInsets insets = collectionView.adjustedContentInset;
-    CGFloat target = CGRectGetMinY(attributes.frame)
-                     + fraction * CGRectGetHeight(attributes.frame)
+    CGFloat visibleHeight = MAX(collectionView.bounds.size.height - insets.top - insets.bottom, 1.0);
+    CGFloat target = CGRectGetMidY(attributes.frame)
+                     - relative * visibleHeight
                      - insets.top;
     CGFloat maxOffset = collectionView.collectionViewLayout.collectionViewContentSize.height
                         - collectionView.bounds.size.height + insets.bottom;
