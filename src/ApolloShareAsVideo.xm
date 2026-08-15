@@ -776,7 +776,7 @@ static void ApolloSVComposeAndExport(id vc, UIImage *card, CGRect mediaNorm,
                              [[NSProcessInfo processInfo] globallyUniqueString]];
         NSString *outPath = [NSTemporaryDirectory() stringByAppendingPathComponent:outName];
         [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
-        NSURL *outURL = [NSURL fileURLWithPath:outPath];
+        NSURL *outURL = [NSURL fileURLWithPath:outPath isDirectory:NO];
 
         AVAssetExportSession *ex = [[AVAssetExportSession alloc] initWithAsset:comp
                                                                    presetName:AVAssetExportPresetHighestQuality];
@@ -792,12 +792,10 @@ static void ApolloSVComposeAndExport(id vc, UIImage *card, CGRect mediaNorm,
         });
 
         // Progress polling.
-        __block BOOL finished = NO;
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
             dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), (uint64_t)(0.1 * NSEC_PER_SEC), (uint64_t)(0.05 * NSEC_PER_SEC));
         dispatch_source_set_event_handler(timer, ^{
-            if (finished) return;
             float p = ex.progress;
             dispatch_async(dispatch_get_main_queue(), ^{ if (progress) progress(p); });
         });
@@ -808,7 +806,9 @@ static void ApolloSVComposeAndExport(id vc, UIImage *card, CGRect mediaNorm,
                   CMTimeGetSeconds(range.duration), srcAudio != nil);
 
         [ex exportAsynchronouslyWithCompletionHandler:^{
-            finished = YES;
+            // Cancellation is thread-safe and is the timer's synchronization
+            // boundary. Avoid a separate cross-queue BOOL data race; at worst
+            // one already-enqueued progress update reaches the main queue.
             dispatch_source_cancel(timer);
             AVAssetExportSessionStatus st = ex.status;
             // No shared compositor state to tear down — the instruction (and its
@@ -857,9 +857,10 @@ static void ApolloSVDownloadToTemp(NSURL *url, void (^cb)(NSURL *localURL)) {
                       (long)status, error.localizedDescription);
             cb(nil); return;
         }
-        NSURL *dest = [[NSURL fileURLWithPath:NSTemporaryDirectory()]
+        NSURL *dest = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
             URLByAppendingPathComponent:[NSString stringWithFormat:@"ApolloShareVideoSrc-%@.mp4",
-                                         [[NSUUID UUID] UUIDString]]];
+                                         [[NSUUID UUID] UUIDString]]
+                             isDirectory:NO];
         [[NSFileManager defaultManager] removeItemAtURL:dest error:nil];
         NSError *moveErr = nil;
         if (![[NSFileManager defaultManager] moveItemAtURL:tmp toURL:dest error:&moveErr]) {

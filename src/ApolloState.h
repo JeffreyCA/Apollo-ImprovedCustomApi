@@ -363,10 +363,10 @@ extern NSInteger sLinkPreviewCardColor;
 // the packed snapshot below instead. Both are updated together via
 // ApolloSetLinkPreviewCardColorHex().
 extern NSString *sLinkPreviewCardColorHex;
-// Render-safe snapshot of the card color, readable from any thread (an aligned
-// 32-bit volatile load is atomic on arm64). 0 = Default; otherwise
+// Render-safe snapshot of the card color, readable from any thread through the
+// __atomic load/store helpers. 0 = Default; otherwise
 // (1<<24) | (R<<16) | (G<<8) | B.
-extern volatile uint32_t sLinkPreviewCardColorPacked;
+extern uint32_t sLinkPreviewCardColorPacked;
 
 // Media upload host selection. Imgur is the default; Reddit uses Apollo's signed-in
 // session to upload directly to Reddit's media storage; ImgChest uploads to

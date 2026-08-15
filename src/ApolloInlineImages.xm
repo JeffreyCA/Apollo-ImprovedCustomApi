@@ -1040,34 +1040,55 @@ static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL, CGSize targ
                 __block UIImage *darkFallback = nil;
                 __block NSInteger remaining = (NSInteger)times.count;
                 __block AVAssetImageGenerator *retainedGen = gen;
+                NSObject *generationLock = [NSObject new];
 
                 [gen generateCGImagesAsynchronouslyForTimes:times
                     completionHandler:^(CMTime requested, CGImageRef cgImage,
                                         CMTime actualT, AVAssetImageGeneratorResult res,
                                         NSError *genError) {
-                    @synchronized (retainedGen ?: (id)@"x") {
+                    // Most callbacks arrive after an earlier candidate won.
+                    // Check first so those callbacks do not build and inspect
+                    // UIImages that can no longer affect the result.
+                    @synchronized (generationLock) {
+                        if (delivered) return;
+                    }
+                    UIImage *candidate = (res == AVAssetImageGeneratorSucceeded && cgImage)
+                        ? [UIImage imageWithCGImage:cgImage]
+                        : nil;
+                    BOOL candidateIsDark = candidate ? ApolloImageIsMostlyBlack(candidate) : NO;
+                    BOOL shouldDeliver = NO;
+                    BOOL shouldCancel = NO;
+                    UIImage *imageToDeliver = nil;
+                    NS_VALID_UNTIL_END_OF_SCOPE AVAssetImageGenerator *retiredGenerator = nil;
+                    @synchronized (generationLock) {
                         if (delivered) return;
                         remaining--;
-                        if (res == AVAssetImageGeneratorSucceeded && cgImage) {
-                            UIImage *ui = [UIImage imageWithCGImage:cgImage];
-                            BOOL dark = ApolloImageIsMostlyBlack(ui);
-                            if (!dark) {
+                        if (candidate) {
+                            if (!candidateIsDark) {
                                 delivered = YES;
-                                // Stop unused candidate decodes before the
-                                // next queued pipeline claims this slot.
-                                [retainedGen cancelAllCGImageGeneration];
+                                shouldDeliver = YES;
+                                shouldCancel = YES;
+                                imageToDeliver = candidate;
+                                retiredGenerator = retainedGen;
                                 retainedGen = nil;
-                                deliver(ui);
-                                return;
+                            } else if (!darkFallback) {
+                                darkFallback = candidate;
                             }
-                            if (!darkFallback) darkFallback = ui;
                         }
                         if (remaining <= 0 && !delivered) {
                             delivered = YES;
+                            shouldDeliver = YES;
+                            imageToDeliver = darkFallback;
+                            retiredGenerator = retainedGen;
                             retainedGen = nil;
-                            deliver(darkFallback);
                         }
                     }
+                    // AVFoundation cancellation and the caller's delivery
+                    // callback are external work. Keep both outside the state
+                    // monitor so neither can re-enter this completion path
+                    // while its bookkeeping is protected.
+                    if (shouldCancel) [retiredGenerator cancelAllCGImageGeneration];
+                    if (shouldDeliver) deliver(imageToDeliver);
                 }];
                 }];
             }];
@@ -1512,7 +1533,7 @@ static UIImage *ApolloAlbumCreateDisplayImage(NSURL *fileURL, NSUInteger maximum
     self.downloadWaiters = [NSMutableArray array];
     self.downloadCoordinator = [ApolloAlbumDownloadCoordinator new];
     self.viewerDirectoryURL = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
-        URLByAppendingPathComponent:[NSString stringWithFormat:@"ApolloImageViewer-%@", [NSUUID UUID].UUIDString]
+        URLByAppendingPathComponent:[@"ApolloImageViewer-" stringByAppendingString:[NSUUID UUID].UUIDString]
                          isDirectory:YES];
     NSError *directoryError = nil;
     if (![[NSFileManager defaultManager] createDirectoryAtURL:self.viewerDirectoryURL
@@ -1687,7 +1708,7 @@ static UIImage *ApolloAlbumCreateDisplayImage(NSURL *fileURL, NSUInteger maximum
 
 - (NSURL *)apollo_destinationURLForPage:(NSInteger)page {
     NSString *name = [NSString stringWithFormat:@"%@-%@", [NSUUID UUID].UUIDString, [self apollo_filenameForPage:page]];
-    return [self.viewerDirectoryURL URLByAppendingPathComponent:name];
+    return [self.viewerDirectoryURL URLByAppendingPathComponent:name isDirectory:NO];
 }
 
 - (void)apollo_removeAcceptedFileAtURL:(NSURL *)fileURL {

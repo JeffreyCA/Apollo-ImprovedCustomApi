@@ -583,6 +583,32 @@ BOOL IsLiquidGlass(void) {
     return available;
 }
 
+// --- Liquid Glass trailing-cluster reservation (see ApolloCommon.h) ---
+// Plain associated storage on the navigation item; the recenter in
+// ApolloLiquidGlass.xm is the only reader and sole inset writer.
+static char kApolloNavItemTrailingHoldKey;
+static char kApolloNavItemTrailingInsetKey;
+
+void ApolloNavItemSetTrailingReservationHold(UINavigationItem *item, BOOL hold) {
+    if (!item) return;
+    objc_setAssociatedObject(item, &kApolloNavItemTrailingHoldKey,
+                             hold ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+BOOL ApolloNavItemTrailingReservationHold(UINavigationItem *item) {
+    return [objc_getAssociatedObject(item, &kApolloNavItemTrailingHoldKey) boolValue];
+}
+
+void ApolloNavItemNoteTrailingContentInset(UINavigationItem *item, CGFloat inset) {
+    if (!item || inset <= 0) return;
+    objc_setAssociatedObject(item, &kApolloNavItemTrailingInsetKey,
+                             @(inset), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+CGFloat ApolloNavItemTrailingContentInset(UINavigationItem *item) {
+    return [objc_getAssociatedObject(item, &kApolloNavItemTrailingInsetKey) doubleValue];
+}
+
 // Route a URL through Apollo's own URL handler, bypassing iOS URL dispatch.
 //
 // On iOS 13+ with scenes, the SceneDelegate owns the tabBarController while
@@ -1309,9 +1335,11 @@ void ApolloSetLinkPreviewCardColorHex(NSString *hex) {
     UIColor *color = ApolloColorFromHexString(hex);
     // Canonicalize to "RRGGBB" uppercase so persistence + UI display stay tidy.
     sLinkPreviewCardColorHex = color ? ApolloHexStringFromColor(color) : nil;
-    // Publish the render snapshot AFTER the string, so a background reader that
-    // observes a non-zero packed value already has a consistent RGB to draw.
-    sLinkPreviewCardColorPacked = color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0;
+    // Background renderers consume only this self-contained packed value; the
+    // NSString remains main-thread settings state.
+    __atomic_store_n(&sLinkPreviewCardColorPacked,
+                     color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0,
+                     __ATOMIC_RELAXED);
 }
 
 double ApolloPerfNowMs(void) {

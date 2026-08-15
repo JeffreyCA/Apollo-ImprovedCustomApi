@@ -259,11 +259,24 @@ static NSString *ApolloKeychainMirrorKey(NSString *service, NSString *account) {
     return [NSString stringWithFormat:@"%@\n%@", service ?: @"", account ?: @""];
 }
 
-static os_unfair_lock sMirrorLock = OS_UNFAIR_LOCK_INIT;
-// Guarded by sMirrorLock. Each entry: mirrorKey -> { "service", "account", "data" }.
+// The mirror owns durable keychain fallback state, so reads and mutations stay
+// serialized through one private queue. The write must complete before Valet is
+// told it succeeded; making it asynchronous would risk acknowledging an account
+// token that can still be lost on immediate process termination. A queue keeps
+// that necessary file I/O out of an os_unfair_lock critical section.
+static dispatch_queue_t ApolloMirrorQueue(void) {
+    static dispatch_queue_t queue = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.apolloreborn.keychain-mirror", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+// Queue-owned. Each entry: mirrorKey -> { "service", "account", "data" }.
 static NSMutableDictionary<NSString *, NSDictionary *> *sMirror;
 
-static NSMutableDictionary *ApolloMirrorLoadLocked(void) {
+static NSMutableDictionary *ApolloMirrorLoadOnQueue(void) {
     if (!sMirror) {
         NSDictionary *disk = [NSDictionary dictionaryWithContentsOfFile:ApolloKeychainMirrorPath()];
         sMirror = disk ? [disk mutableCopy] : [NSMutableDictionary dictionary];
@@ -271,11 +284,27 @@ static NSMutableDictionary *ApolloMirrorLoadLocked(void) {
     return sMirror;
 }
 
-static void ApolloMirrorPersistLocked(void) {
+static BOOL ApolloMirrorPersistOnQueue(void) {
     NSString *path = ApolloKeychainMirrorPath();
     if (sMirror.count == 0) {
-        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-        return;
+        NSError *removeError = nil;
+        BOOL removed = [[NSFileManager defaultManager] removeItemAtPath:path error:&removeError];
+        if (removed || ([removeError.domain isEqualToString:NSCocoaErrorDomain] &&
+                        removeError.code == NSFileNoSuchFileError)) {
+            return YES;
+        }
+        // If unlink is denied but atomic replacement is still permitted, an
+        // empty plist is equally safe on the next launch and avoids reviving
+        // credentials from the previous file contents.
+        if ([@{} writeToFile:path atomically:YES]) {
+            [[NSFileManager defaultManager]
+                setAttributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
+                 ofItemAtPath:path error:nil];
+            return YES;
+        }
+        ApolloLoginDiag(@"[KeychainMirror] failed to remove empty mirror error=%@",
+                        removeError.localizedDescription ?: @"unknown");
+        return NO;
     }
     if ([sMirror writeToFile:path atomically:YES]) {
         // The mirror deliberately rides along in device backups (unlike keychain items, which
@@ -284,19 +313,18 @@ static void ApolloMirrorPersistLocked(void) {
         [[NSFileManager defaultManager]
             setAttributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
              ofItemAtPath:path error:nil];
-    } else {
-        // If this fails the mirror is memory-only and the account is gone on the next cold
-        // launch with no on-disk fingerprint — loud, since a mirror engagement is our only
-        // trace of a broken keychain.
-        ApolloLoginDiag(@"[KeychainMirror] FAILED to write mirror to %@ — mirror is memory-only this session", path);
+        return YES;
     }
+    return NO;
 }
 
 static NSData *ApolloMirrorGet(NSString *service, NSString *account) {
-    os_unfair_lock_lock(&sMirrorLock);
-    NSDictionary *entry = ApolloMirrorLoadLocked()[ApolloKeychainMirrorKey(service, account)];
-    NSData *data = [entry[@"data"] isKindOfClass:[NSData class]] ? entry[@"data"] : nil;
-    os_unfair_lock_unlock(&sMirrorLock);
+    NSString *key = ApolloKeychainMirrorKey(service, account);
+    __block NSData *data = nil;
+    dispatch_sync(ApolloMirrorQueue(), ^{
+        NSDictionary *entry = ApolloMirrorLoadOnQueue()[key];
+        data = [entry[@"data"] isKindOfClass:[NSData class]] ? entry[@"data"] : nil;
+    });
     return data;
 }
 
@@ -304,19 +332,34 @@ static NSData *ApolloMirrorGet(NSString *service, NSString *account) {
 // the fingerprint of a broken keychain and should be visible in an uploaded log. failStatus is
 // the OSStatus from the real keychain's final rejection, so a log distinguishes an
 // entitlement rejection (-34018) from a still-colliding orphan (-25299) or other cause.
-static void ApolloMirrorPut(NSString *service, NSString *account, NSData *data, OSStatus failStatus) {
-    if (![data isKindOfClass:[NSData class]]) return;
-    os_unfair_lock_lock(&sMirrorLock);
-    NSMutableDictionary *store = ApolloMirrorLoadLocked();
-    store[ApolloKeychainMirrorKey(service, account)] = @{
-        @"service": service ?: @"",
-        @"account": account ?: @"",
-        @"data":    data,
-    };
-    ApolloMirrorPersistLocked();
-    os_unfair_lock_unlock(&sMirrorLock);
+static BOOL ApolloMirrorPut(NSString *service, NSString *account, NSData *data, OSStatus failStatus) {
+    if (![data isKindOfClass:[NSData class]]) return NO;
+    NSString *key = ApolloKeychainMirrorKey(service, account);
+    __block BOOL persisted = NO;
+    dispatch_sync(ApolloMirrorQueue(), ^{
+        NSMutableDictionary *store = ApolloMirrorLoadOnQueue();
+        NSDictionary *previousEntry = store[key];
+        store[key] = @{
+            @"service": service ?: @"",
+            @"account": account ?: @"",
+            @"data":    data,
+        };
+        persisted = ApolloMirrorPersistOnQueue();
+        // Never expose a value that Valet was told failed and that cannot
+        // survive a cold launch. Restore the last durable authority (if any).
+        if (!persisted) {
+            if (previousEntry) store[key] = previousEntry;
+            else [store removeObjectForKey:key];
+        }
+    });
+    if (!persisted) {
+        ApolloLoginDiag(@"[KeychainMirror] FAILED to persist fallback to %@; returning original keychain status=%d service=%@ account=%@",
+                        ApolloKeychainMirrorPath(), (int)failStatus, service, account);
+        return NO;
+    }
     ApolloLoginDiag(@"[KeychainMirror] real keychain could not persist item (status=%d); mirrored %lu bytes to container service=%@ account=%@",
                     (int)failStatus, (unsigned long)data.length, service, account);
+    return YES;
 }
 
 // A real write for this key finally landed — drop the mirror entry so the real keychain is
@@ -324,26 +367,37 @@ static void ApolloMirrorPut(NSString *service, NSString *account, NSData *data, 
 // Returns YES if a mirror entry was actually dropped.
 static BOOL ApolloMirrorRemove(NSString *service, NSString *account) {
     NSString *key = ApolloKeychainMirrorKey(service, account);
-    os_unfair_lock_lock(&sMirrorLock);
-    NSMutableDictionary *store = ApolloMirrorLoadLocked();
-    BOOL had = store[key] != nil;
-    if (had) {
-        [store removeObjectForKey:key];
-        ApolloMirrorPersistLocked();
+    __block BOOL had = NO;
+    __block BOOL persisted = YES;
+    dispatch_sync(ApolloMirrorQueue(), ^{
+        NSMutableDictionary *store = ApolloMirrorLoadOnQueue();
+        had = store[key] != nil;
+        if (had) {
+            [store removeObjectForKey:key];
+            persisted = ApolloMirrorPersistOnQueue();
+            // A successful real-keychain write is the newest authority. Even
+            // if stale-file cleanup fails, never restore the older mirror into
+            // this process's read path and shadow the value that just landed.
+        }
+    });
+    if (had && persisted) {
+        ApolloLoginDiag(@"[KeychainMirror] real keychain took over item; dropped mirror service=%@ account=%@",
+                        service, account);
+    } else if (had) {
+        ApolloLoginDiag(@"[KeychainMirror] real keychain took over item; stale disk cleanup failed but mirror remains suppressed in this process service=%@ account=%@",
+                        service, account);
     }
-    os_unfair_lock_unlock(&sMirrorLock);
-    if (had) ApolloLoginDiag(@"[KeychainMirror] real keychain took over item; dropped mirror service=%@ account=%@",
-                             service, account);
-    return had;
+    return had && persisted;
 }
 
 // Snapshot for Backup Settings, so a backup taken on a keychain-broken device still carries
 // the account (the mirror is the only place the item exists there). Non-static: used by
 // CustomAPIViewController's backup capture.
 NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void) {
-    os_unfair_lock_lock(&sMirrorLock);
-    NSArray *values = [ApolloMirrorLoadLocked() allValues];
-    os_unfair_lock_unlock(&sMirrorLock);
+    __block NSArray *values = nil;
+    dispatch_sync(ApolloMirrorQueue(), ^{
+        values = [ApolloMirrorLoadOnQueue() allValues];
+    });
     return values ?: @[];
 }
 
@@ -395,13 +449,24 @@ static BOOL ApolloIsSingleItemValetQuery(NSDictionary *query) {
 // cache keeps the tight websession-cookie read loop from re-enumerating on every call; any Valet
 // write invalidates it so a later read reflects the newest value (incl. a genuine sign-out).
 static os_unfair_lock sRecoverLock = OS_UNFAIR_LOCK_INIT;
-static NSMutableDictionary<NSString *, NSData *> *sRecoverCache;      // "service\naccount" -> newest data
-static NSMutableDictionary<NSString *, NSString *> *sRecoverGroupCache; // "service\naccount" -> its access group
-static NSMutableDictionary<NSString *, NSDictionary *> *sRecoverAttrCache; // "service\naccount" -> its attributes (never the value)
+static NSDictionary<NSString *, NSData *> *sRecoverCache;      // "service\naccount" -> newest data
+static NSDictionary<NSString *, NSString *> *sRecoverGroupCache; // "service\naccount" -> its access group
+static NSDictionary<NSString *, NSDictionary *> *sRecoverAttrCache; // "service\naccount" -> its attributes (never the value)
 static CFAbsoluteTime sRecoverCacheBuiltAt = 0;
+// Incremented by every Valet write. A keychain enumeration that began before
+// an invalidation must not publish its now-stale result afterward.
+static uint64_t sRecoverCacheGeneration = 0;
+// Protected by sRecoverLock. Only one thread enumerates Security.framework at
+// a time; other readers wait outside the unfair lock and retry the fresh cache.
+static dispatch_group_t sRecoverRebuildGroup = nil;
 static const CFTimeInterval kRecoverCacheTTL = 1.5;
 
-static void ApolloRebuildRecoverCacheLocked(void) {
+// Security-framework enumeration can block and can itself enter system/runtime
+// code. Build a completely independent snapshot without holding sRecoverLock;
+// the caller generation-checks it before publication.
+static void ApolloBuildRecoverCache(NSDictionary<NSString *, NSData *> **outCache,
+                                    NSDictionary<NSString *, NSString *> **outGroups,
+                                    NSDictionary<NSString *, NSDictionary *> **outAttrs) {
     NSMutableDictionary<NSString *, NSData *> *cache = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *groups = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSDictionary *> *attrs = [NSMutableDictionary dictionary];
@@ -427,18 +492,18 @@ static void ApolloRebuildRecoverCacheLocked(void) {
             // fetched these; we were throwing them away.
             NSMutableDictionary *itemAttrs = [item mutableCopy];
             [itemAttrs removeObjectForKey:(__bridge id)kSecValueData];
-            attrs[key] = itemAttrs;
+            attrs[key] = [itemAttrs copy];
             newest[key] = mod;
         }
     }
-    sRecoverCache = cache;
-    sRecoverGroupCache = groups;
-    sRecoverAttrCache = attrs;
-    sRecoverCacheBuiltAt = CFAbsoluteTimeGetCurrent();
+    if (outCache) *outCache = [cache copy];
+    if (outGroups) *outGroups = [groups copy];
+    if (outAttrs) *outAttrs = [attrs copy];
 }
 
 static void ApolloInvalidateRecoverCache(void) {
     os_unfair_lock_lock(&sRecoverLock);
+    sRecoverCacheGeneration++;
     sRecoverCacheBuiltAt = 0;
     os_unfair_lock_unlock(&sRecoverLock);
 }
@@ -454,14 +519,82 @@ static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result, N
     NSString *account = query[(__bridge id)kSecAttrAccount];
     if (![service isKindOfClass:[NSString class]] || ![account isKindOfClass:[NSString class]]) return errSecItemNotFound;
     NSString *key = [NSString stringWithFormat:@"%@\n%@", service, account];
-    os_unfair_lock_lock(&sRecoverLock);
-    if (!sRecoverCache || CFAbsoluteTimeGetCurrent() - sRecoverCacheBuiltAt > kRecoverCacheTTL) {
-        ApolloRebuildRecoverCacheLocked();
+
+    NSData *data = nil;
+    NSString *group = nil;
+    NSDictionary *foundAttrs = nil;
+    for (;;) {
+        uint64_t generation = 0;
+        BOOL needsRebuild = NO;
+        BOOL ownsRebuild = NO;
+        dispatch_group_t rebuildGroup = nil;
+
+        os_unfair_lock_lock(&sRecoverLock);
+        needsRebuild = !sRecoverCache ||
+            CFAbsoluteTimeGetCurrent() - sRecoverCacheBuiltAt > kRecoverCacheTTL;
+        if (!needsRebuild) {
+            data = sRecoverCache[key];
+            group = sRecoverGroupCache[key];
+            foundAttrs = sRecoverAttrCache[key];
+        } else {
+            generation = sRecoverCacheGeneration;
+            rebuildGroup = sRecoverRebuildGroup;
+            if (!rebuildGroup) {
+                rebuildGroup = dispatch_group_create();
+                dispatch_group_enter(rebuildGroup);
+                sRecoverRebuildGroup = rebuildGroup;
+                ownsRebuild = YES;
+            }
+        }
+        os_unfair_lock_unlock(&sRecoverLock);
+        if (!needsRebuild) break;
+
+        if (!ownsRebuild) {
+            // Security enumeration can be slow. Wait without occupying the
+            // unfair-lock critical section, then re-check generation/freshness.
+            dispatch_group_wait(rebuildGroup, DISPATCH_TIME_FOREVER);
+            continue;
+        }
+
+        NSDictionary<NSString *, NSData *> *newCache = nil;
+        NSDictionary<NSString *, NSString *> *newGroups = nil;
+        NSDictionary<NSString *, NSDictionary *> *newAttrs = nil;
+        ApolloBuildRecoverCache(&newCache, &newGroups, &newAttrs);
+        CFAbsoluteTime builtAt = CFAbsoluteTimeGetCurrent();
+
+        // Explicitly retain replaced snapshots across the protected stores;
+        // balance those ownerships after unlock so collection teardown cannot
+        // execute inside the unfair-lock critical section.
+        NS_VALID_UNTIL_END_OF_SCOPE NSDictionary *retiredCache = nil;
+        NS_VALID_UNTIL_END_OF_SCOPE NSDictionary *retiredGroups = nil;
+        NS_VALID_UNTIL_END_OF_SCOPE NSDictionary *retiredAttrs = nil;
+        BOOL generationIsCurrent = NO;
+        os_unfair_lock_lock(&sRecoverLock);
+        generationIsCurrent = generation == sRecoverCacheGeneration;
+        if (generationIsCurrent) {
+            retiredCache = sRecoverCache;
+            retiredGroups = sRecoverGroupCache;
+            retiredAttrs = sRecoverAttrCache;
+            sRecoverCache = newCache ?: @{};
+            sRecoverGroupCache = newGroups ?: @{};
+            sRecoverAttrCache = newAttrs ?: @{};
+            sRecoverCacheBuiltAt = builtAt;
+            data = sRecoverCache[key];
+            group = sRecoverGroupCache[key];
+            foundAttrs = sRecoverAttrCache[key];
+        }
+        if (sRecoverRebuildGroup == rebuildGroup) sRecoverRebuildGroup = nil;
+        os_unfair_lock_unlock(&sRecoverLock);
+
+        // Wake waiters only after the new snapshots and in-flight marker have
+        // been published. A stale builder loops and starts the next generation.
+        dispatch_group_leave(rebuildGroup);
+        if (!generationIsCurrent) continue;
+        break;
     }
-    NSData *data = sRecoverCache[key];
-    if (outGroup) *outGroup = sRecoverGroupCache[key];
-    if (outAttrs) *outAttrs = sRecoverAttrCache[key];
-    os_unfair_lock_unlock(&sRecoverLock);
+
+    if (outGroup) *outGroup = group;
+    if (outAttrs) *outAttrs = foundAttrs;
     if (!data) return errSecItemNotFound;
     return ApolloMirrorServe(query, data, result);
 }
@@ -1128,9 +1261,10 @@ static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result)
     // Fall back to the container mirror so the account still persists across launches.
     NSData *value = strippedQuery[(__bridge id)kSecValueData];
     if ([value isKindOfClass:[NSData class]]) {
-        ApolloMirrorPut(service, account, value, status);
-        if (result) ApolloMirrorServe(strippedQuery, value, result);
-        return errSecSuccess;
+        if (ApolloMirrorPut(service, account, value, status)) {
+            if (result) ApolloMirrorServe(strippedQuery, value, result);
+            return errSecSuccess;
+        }
     }
     return status;
 }
@@ -1349,8 +1483,7 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
     // Real keychain still can't hold it — mirror the new value (see SecItemAdd_replacement).
     NSData *value = attrs[(__bridge id)kSecValueData];
     if ([value isKindOfClass:[NSData class]]) {
-        ApolloMirrorPut(service, account, value, status);
-        return errSecSuccess;
+        if (ApolloMirrorPut(service, account, value, status)) return errSecSuccess;
     }
     return status;
 }
@@ -2071,7 +2204,7 @@ static const char kARCompletion = '\0';
             NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"trending-custom.plist"];
             [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil]; // remove in case it exists
             [d writeToFile:tempPath atomically:YES];
-            return [NSURL fileURLWithPath:tempPath];
+            return [NSURL fileURLWithPath:tempPath isDirectory:NO];
         };
 
         // Constructor prefetch normally has this ready. On a cold/slow network,
@@ -2127,7 +2260,7 @@ static const char kARCompletion = '\0';
         [[NSData dataWithBytes:bytes length:sizeof(bytes)] writeToFile:dummyPath atomically:YES];
     }
     ApolloLogDebug(@"[StoreKit] Spoofing appStoreReceiptURL -> %@", dummyPath);
-    return [NSURL fileURLWithPath:dummyPath];
+    return [NSURL fileURLWithPath:dummyPath isDirectory:NO];
 }
 %end
 

@@ -87,11 +87,15 @@ static dispatch_queue_t ApolloImgChestMultipartQueue(void) {
 }
 
 - (BOOL)adoptTaskIfActive:(NSURLSessionTask *)task {
+    NS_VALID_UNTIL_END_OF_SCOPE NSURLSessionTask *retiredTask = nil;
     @synchronized (self) {
         if (self.cancelled || self.finished) return NO;
-        self.activeTask = task;
-        return YES;
+        if (self.activeTask != task) {
+            retiredTask = self.activeTask;
+            self.activeTask = task;
+        }
     }
+    return YES;
 }
 
 - (void)addCleanupFile:(NSURL *)fileURL {
@@ -110,12 +114,14 @@ static dispatch_queue_t ApolloImgChestMultipartQueue(void) {
 }
 
 - (BOOL)finishOnce {
+    NS_VALID_UNTIL_END_OF_SCOPE NSURLSessionTask *retiredTask = nil;
     @synchronized (self) {
         if (self.finished) return NO;
         self.finished = YES;
+        retiredTask = self.activeTask;
         self.activeTask = nil;
-        return YES;
     }
+    return YES;
 }
 
 @end
@@ -259,7 +265,7 @@ static NSURL *ApolloImgChestUniqueManagedURL(NSString *filename) {
     NSString *extension = filename.lastPathComponent.pathExtension;
     NSString *name = [NSUUID UUID].UUIDString;
     if (extension.length > 0) name = [name stringByAppendingPathExtension:extension];
-    return [ApolloImgChestManagedDirectory() URLByAppendingPathComponent:name];
+    return [ApolloImgChestManagedDirectory() URLByAppendingPathComponent:name isDirectory:NO];
 }
 
 static NSURL *ApolloImgChestCopyFileIntoManagedStorage(NSURL *sourceURL, NSString *filename,
@@ -615,8 +621,9 @@ static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
                                           NSArray<NSDictionary *> *imageParts,
                                           ApolloImgChestUploadOperation *operation,
                                           NSError **outError) {
-    NSURL *bodyURL = [ApolloImgChestManagedDirectory() URLByAppendingPathComponent:
-        [[NSUUID UUID].UUIDString stringByAppendingPathExtension:@"multipart"]];
+    NSURL *bodyURL = [ApolloImgChestManagedDirectory()
+        URLByAppendingPathComponent:[[NSUUID UUID].UUIDString stringByAppendingPathExtension:@"multipart"]
+                         isDirectory:NO];
     if (![[NSFileManager defaultManager] createFileAtPath:bodyURL.path contents:nil attributes:nil]) {
         if (outError) *outError = ApolloImgChestError(@"Could not create multipart body file");
         return nil;
@@ -634,7 +641,7 @@ static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
         }
         success = ApolloImgChestAppendString(output, [NSString stringWithFormat:@"--%@\r\n", boundary], outError)
             && ApolloImgChestAppendString(output, [NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"\r\n\r\n", name], outError)
-            && ApolloImgChestAppendString(output, [NSString stringWithFormat:@"%@\r\n", fields[name]], outError);
+            && ApolloImgChestAppendString(output, [fields[name] stringByAppendingString:@"\r\n"], outError);
     }
     for (NSDictionary *part in imageParts) {
         if (!success) break;
@@ -705,13 +712,13 @@ static void ApolloImgChestCreatePost(NSArray<NSDictionary *> *imageParts,
         if ([operation finishOnce]) completion(nil, ApolloImgChestError(@"No Image Chest API key configured"));
         return;
     }
-    NSString *boundary = [NSString stringWithFormat:@"apollo-imgchest-%@", [NSUUID UUID].UUIDString];
+    NSString *boundary = [@"apollo-imgchest-" stringByAppendingString:[NSUUID UUID].UUIDString];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[kImgChestAPIBase stringByAppendingString:@"/post"]]];
     request.HTTPMethod = @"POST";
     request.timeoutInterval = 120.0;
     [request setValue:[@"Bearer " stringByAppendingString:sImageChestAPIToken] forHTTPHeaderField:@"Authorization"];
     [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-    [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary] forHTTPHeaderField:@"Content-Type"];
+    [request setValue:[@"multipart/form-data; boundary=" stringByAppendingString:boundary] forHTTPHeaderField:@"Content-Type"];
     // "hidden" = unlisted: reachable by link, not listed publicly.
     NSError *bodyError = nil;
     NSURL *multipartURL = ApolloImgChestMultipartFile(boundary, @{ @"privacy": @"hidden" }, imageParts, operation, &bodyError);

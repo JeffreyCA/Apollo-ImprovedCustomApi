@@ -126,6 +126,7 @@ typedef NS_ENUM(unsigned char, ApolloLinkPreviewStackAlignItems) {
 struct CDStruct_90e057aa { CGSize min; CGSize max; };
 
 static char kApolloLinkPreviewNodesKey;
+static char kApolloLinkPreviewNodeRegisteredKey;
 static char kApolloLinkPreviewFetchInFlightKey;
 static char kApolloLinkPreviewOriginalHostShellKey;
 static char kApolloLinkPreviewRenderedPlaceholderKey;
@@ -150,7 +151,7 @@ static char kApolloLinkPreviewRenderSignaturesKey;
 static char kApolloLinkPreviewCropContextKey;
 
 static NSHashTable<id> *sApolloLPRegisteredLinkNodes = nil;
-static dispatch_queue_t sApolloLPRegisteredLinkNodesQueue = NULL;
+static NSObject *sApolloLPRegisteredLinkNodesLock = nil;
 
 typedef struct {
     NSUInteger nodes;
@@ -914,6 +915,13 @@ static dispatch_queue_t ApolloLPImageResizeQueue(void) {
     return queue;
 }
 
+static NSObject *ApolloLPImageResizeStateLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
 static BOOL ApolloLPImageNeedsDisplayResize(UIImage *image) {
     if (![image isKindOfClass:[UIImage class]]) return NO;
     CGFloat w = image.size.width * image.scale;
@@ -997,26 +1005,34 @@ static void ApolloLPRememberRenderedImageForURL(ASNetworkImageNode *imageNode, N
     // layoutSpecThatFits: calls this path on every measurement. Never wait for
     // an oversized bitmap to rasterize there: one queued resize feeds the cache,
     // while the ASNetworkImageNode keeps displaying its already-loaded image.
-    @synchronized (sourceImage) {
-        UIImage *scaled = objc_getAssociatedObject(sourceImage, &kApolloLPDisplaySizedImageCacheKey);
+    UIImage *readyScaledImage = nil;
+    BOOL shouldScheduleResize = NO;
+    @synchronized (ApolloLPImageResizeStateLock()) {
+        id scaled = objc_getAssociatedObject(sourceImage, &kApolloLPDisplaySizedImageCacheKey);
         if ([scaled isKindOfClass:[UIImage class]]) {
-            NSUInteger cost = (NSUInteger)(scaled.size.width * scaled.size.height * scaled.scale * scaled.scale * 4.0);
-            [ApolloLPFallbackImageCache() setObject:scaled forKey:key cost:cost];
-            ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, scaled);
-            return;
+            readyScaledImage = scaled;
+        } else if (![objc_getAssociatedObject(sourceImage, &kApolloLPDisplaySizedImagePendingKey) boolValue]) {
+            objc_setAssociatedObject(sourceImage,
+                                     &kApolloLPDisplaySizedImagePendingKey,
+                                     @YES,
+                                     OBJC_ASSOCIATION_RETAIN);
+            shouldScheduleResize = YES;
         }
-        if ([objc_getAssociatedObject(sourceImage, &kApolloLPDisplaySizedImagePendingKey) boolValue]) return;
-        objc_setAssociatedObject(sourceImage,
-                                 &kApolloLPDisplaySizedImagePendingKey,
-                                 @YES,
-                                 OBJC_ASSOCIATION_RETAIN);
     }
+    if (readyScaledImage) {
+        NSUInteger cost = (NSUInteger)(readyScaledImage.size.width * readyScaledImage.size.height *
+                                       readyScaledImage.scale * readyScaledImage.scale * 4.0);
+        [ApolloLPFallbackImageCache() setObject:readyScaledImage forKey:key cost:cost];
+        ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, readyScaledImage);
+        return;
+    }
+    if (!shouldScheduleResize) return;
 
     __weak ASNetworkImageNode *weakImageNode = imageNode;
     NSURL *imageURLCopy = imageURL;
     dispatch_async(ApolloLPImageResizeQueue(), ^{
         UIImage *scaled = ApolloLPDisplaySizedImage(sourceImage);
-        @synchronized (sourceImage) {
+        @synchronized (ApolloLPImageResizeStateLock()) {
             objc_setAssociatedObject(sourceImage,
                                      &kApolloLPDisplaySizedImagePendingKey,
                                      nil,
@@ -1821,10 +1837,14 @@ static UIColor *ApolloLPBlendColor(UIColor *foreground, UIColor *background, CGF
 // Resolves the user's free-form card color from the render-safe packed snapshot
 // (sLinkPreviewCardColorPacked). Returns nil when no custom color is set
 // ("Default"), in which case the card keeps the standard neutral background.
-// Reads the volatile uint32 (atomic aligned load on arm64) — never the NSString
-// global, which the settings UI reassigns on the main thread.
+// Reads the atomic packed snapshot — never the NSString global, which the
+// settings UI reassigns on the main thread.
+static inline uint32_t ApolloLPCardColorPackedSnapshot(void) {
+    return __atomic_load_n(&sLinkPreviewCardColorPacked, __ATOMIC_RELAXED);
+}
+
 static UIColor *ApolloLPCustomCardColor(void) {
-    uint32_t packed = sLinkPreviewCardColorPacked;
+    uint32_t packed = ApolloLPCardColorPackedSnapshot();
     if ((packed & (1u << 24)) == 0) return nil;
     CGFloat r = ((packed >> 16) & 0xFF) / 255.0;
     CGFloat g = ((packed >> 8) & 0xFF) / 255.0;
@@ -1883,18 +1903,22 @@ static UIColor *ApolloLPCardBackgroundColorForNode(ASDisplayNode *hostNode, NSUR
 }
 
 static void ApolloLPRegisterLinkPreviewNode(ASDisplayNode *node) {
-    if (!node || !sApolloLPRegisteredLinkNodes || !sApolloLPRegisteredLinkNodesQueue) return;
-    dispatch_async(sApolloLPRegisteredLinkNodesQueue, ^{
+    if (!node || !sApolloLPRegisteredLinkNodes || !sApolloLPRegisteredLinkNodesLock) return;
+    if ([objc_getAssociatedObject(node, &kApolloLinkPreviewNodeRegisteredKey) boolValue]) return;
+    @synchronized (sApolloLPRegisteredLinkNodesLock) {
+        if ([objc_getAssociatedObject(node, &kApolloLinkPreviewNodeRegisteredKey) boolValue]) return;
         [sApolloLPRegisteredLinkNodes addObject:node];
-    });
+        objc_setAssociatedObject(node, &kApolloLinkPreviewNodeRegisteredKey,
+                                 (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 }
 
 static NSArray *ApolloLPRegisteredLinkPreviewNodesSnapshot(void) {
-    if (!sApolloLPRegisteredLinkNodes || !sApolloLPRegisteredLinkNodesQueue) return @[];
-    __block NSArray *snapshot = nil;
-    dispatch_sync(sApolloLPRegisteredLinkNodesQueue, ^{
+    if (!sApolloLPRegisteredLinkNodes || !sApolloLPRegisteredLinkNodesLock) return @[];
+    NSArray *snapshot = nil;
+    @synchronized (sApolloLPRegisteredLinkNodesLock) {
         snapshot = sApolloLPRegisteredLinkNodes.allObjects ?: @[];
-    });
+    }
     return snapshot ?: @[];
 }
 
@@ -2023,7 +2047,7 @@ static void ApolloLPMarkNodeForColorRefresh(ASDisplayNode *node) {
 static BOOL ApolloLPApplyCardBackgroundColor(ASDisplayNode *hostNode, ASDisplayNode *backgroundNode, NSURL *url, BOOL force) {
     if (!backgroundNode || ![backgroundNode respondsToSelector:@selector(setBackgroundColor:)]) return NO;
 
-    NSNumber *currentToken = @((unsigned long)sLinkPreviewCardColorPacked);
+    NSNumber *currentToken = @((unsigned long)ApolloLPCardColorPackedSnapshot());
     NSNumber *lastToken = objc_getAssociatedObject(backgroundNode, &kApolloLinkPreviewBackgroundColorPresetKey);
     BOOL presetChanged = ![lastToken isKindOfClass:[NSNumber class]] || ![lastToken isEqualToNumber:currentToken];
     if (!force && !presetChanged) return NO;
@@ -4413,7 +4437,7 @@ static NSString *ApolloLPRenderSignature(NSURL *url, ApolloLinkPreview *preview,
     return [NSString stringWithFormat:@"%@|%@|%lu|%@|%@|%@|%@|%@|%@|%@|%@|%@|%.1fx%.1f|%d",
             variant ?: @"",
             url.absoluteString ?: @"",
-            (unsigned long)sLinkPreviewCardColorPacked,
+            (unsigned long)ApolloLPCardColorPackedSnapshot(),
             ApolloLPDisplayTitleForPreview(preview) ?: @"",
             ApolloLPDisplayDescriptionForPreview(preview) ?: @"",
             ApolloLPCleanDisplayText(preview.siteName) ?: @"",
@@ -5111,7 +5135,7 @@ static void ApolloLPKickWeakCachedPreviewRefetch(NSURL *url, ApolloLinkPreview *
 
 %ctor {
     sApolloLPRegisteredLinkNodes = [NSHashTable weakObjectsHashTable];
-    sApolloLPRegisteredLinkNodesQueue = dispatch_queue_create("com.apollo.linkpreviews.nodes", DISPATCH_QUEUE_SERIAL);
+    sApolloLPRegisteredLinkNodesLock = [NSObject new];
 
     // One-time, off-thread: derive host verdicts from previews we have already
     // fetched, so an existing install knows on its first launch which of ITS

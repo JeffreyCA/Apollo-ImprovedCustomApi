@@ -63,6 +63,26 @@ NSURLSessionDataTask *ApolloStartBoundedDataRequest(
     ApolloBoundedDataCompletion completion);
 
 BOOL IsLiquidGlass(void);
+
+// --- Liquid Glass trailing-cluster reservation ---
+// Some screens temporarily strip their right bar buttons while staying on the
+// SAME navigation item (the Inbox strips them whenever its in-place Chat hub
+// covers Notifications). The Liquid Glass title recenter in
+// ApolloLiquidGlass.xm would then re-balance the title against an empty
+// trailing side, visibly sliding it — in gap-centering mode because the gap
+// midpoint moves, and in screen-centering mode because the overlap clamp
+// relaxes. While a "hold" is set on the navigation item, the recenter keeps
+// using the trailing content edge it last measured for that item (stored as an
+// inset from the bar's trailing edge, so rotation keeps working), making the
+// title position identical whether the buttons are up or stripped. The
+// recenter itself records the live inset via
+// ApolloNavItemNoteTrailingContentInset on every pass that sees real trailing
+// content; holders only toggle the hold. All four are no-ops off-glass (the
+// recenter never runs there and nothing else reads the values).
+void ApolloNavItemSetTrailingReservationHold(UINavigationItem *item, BOOL hold);
+BOOL ApolloNavItemTrailingReservationHold(UINavigationItem *item);
+void ApolloNavItemNoteTrailingContentInset(UINavigationItem *item, CGFloat inset);
+CGFloat ApolloNavItemTrailingContentInset(UINavigationItem *item);   // 0 = never captured
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url);
 BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL);
 void ApolloFlushReadPostIDsToDefaults(void);

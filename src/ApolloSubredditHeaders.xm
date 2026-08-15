@@ -876,14 +876,20 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     [provider loadObjectOfClass:[UIImage class] completionHandler:^(__kindof id<NSItemProviderReading> object, NSError *error) {
         if (error || ![object isKindOfClass:[UIImage class]]) return;
         UIImage *image = (UIImage *)object;
+        // NSItemProvider documents that load completions use an internal queue,
+        // so crop/encode/write here and return only UIKit work to main.
+        NSError *saveError = nil;
+        BOOL saved = NO;
+        if (assetKind == ApolloSubredditHeaderAssetKindIcon) {
+            saved = [[ApolloSubredditCustomIconCache sharedCache] saveIcon:image
+                                                               forSubreddit:subredditName
+                                                                       error:&saveError];
+        } else {
+            saved = [[ApolloSubredditCustomBannerCache sharedCache] saveBanner:image
+                                                                    forSubreddit:subredditName
+                                                                            error:&saveError];
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSError *saveError = nil;
-            BOOL saved = NO;
-            if (assetKind == ApolloSubredditHeaderAssetKindIcon) {
-                saved = [[ApolloSubredditCustomIconCache sharedCache] saveIcon:image forSubreddit:subredditName error:&saveError];
-            } else {
-                saved = [[ApolloSubredditCustomBannerCache sharedCache] saveBanner:image forSubreddit:subredditName error:&saveError];
-            }
             if (saved) {
                 if (header && ApolloSubredditNamesEqual(header.subredditName, subredditName)) {
                     ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName];

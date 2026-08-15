@@ -14,17 +14,21 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
 
 @interface ApolloLinkPreviewCache ()
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *entries;
+// Immutable point-in-time view used by layout callers after NSCache eviction.
+// Publishing it avoids dispatch_sync against the persistence queue.
+@property (atomic, strong) NSDictionary<NSString *, NSDictionary *> *entriesSnapshot;
 @property (nonatomic, strong) NSCache<NSString *, ApolloLinkPreview *> *memoryCache;
-// Known-absent keys (no disk entry either), so repeat measures of a URL whose
-// fetch hasn't completed skip the dispatch_sync onto the disk queue — misses
-// are the steady state while scrolling. Markers are set only inside the queue
-// (so they can never predate init's synchronous disk load) and cleared by
-// storePreview:.
+// Known-absent keys, so repeat measures of a URL whose fetch has not completed
+// skip even the immutable snapshot decode — misses are the steady state while
+// scrolling. Init loads disk state synchronously before the cache is published;
+// storePreview: clears a marker both immediately and on the state queue to keep
+// concurrent miss/store ordering deterministic.
 @property (nonatomic, strong) NSCache<NSString *, NSNumber *> *missCache;
 // url.absoluteString -> SHA-256 hex key; the digest + hex loop otherwise runs
 // on every lookup, memory hit or not.
 @property (nonatomic, strong) NSCache<NSString *, NSString *> *keyCache;
 @property (nonatomic, strong) dispatch_queue_t queue;
+@property (nonatomic, strong) dispatch_queue_t ioQueue;
 @property (nonatomic, copy) NSString *cachePath;
 @property (nonatomic) BOOL diskDirty;
 @property (nonatomic) BOOL diskFlushScheduled;
@@ -45,6 +49,7 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
     self = [super init];
     if (self) {
         _queue = dispatch_queue_create("com.apollo.linkpreviews.cache", DISPATCH_QUEUE_SERIAL);
+        _ioQueue = dispatch_queue_create_with_target("com.apollo.linkpreviews.cache.io", DISPATCH_QUEUE_SERIAL, dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0));
         _memoryCache = [NSCache new];
         _memoryCache.countLimit = ApolloLinkPreviewCacheMaxEntries;
         _missCache = [NSCache new];
@@ -56,6 +61,7 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
         NSString *cacheDirectory = paths.firstObject ?: NSTemporaryDirectory();
         _cachePath = [cacheDirectory stringByAppendingPathComponent:@"com.apollo.linkpreviews.json"];
         _entries = [[self loadEntriesFromDisk] mutableCopy] ?: [NSMutableDictionary dictionary];
+        _entriesSnapshot = [_entries copy] ?: @{};
         ApolloLog(@"[LinkPreviews] cache init: %lu entries loaded", (unsigned long)_entries.count);
 
         __weak typeof(self) weakSelf = self;
@@ -91,7 +97,12 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
 - (void)flushDiskNowLocked {
     if (!self.diskDirty) return;
     self.diskDirty = NO;
-    [self writeEntriesToDiskLocked];
+    NSDictionary *snapshot = [self.entries copy] ?: @{};
+    NSString *path = self.cachePath;
+    dispatch_async(self.ioQueue, ^{
+        NSData *data = [NSJSONSerialization dataWithJSONObject:snapshot options:0 error:nil];
+        if (data.length) [data writeToFile:path atomically:YES];
+    });
 }
 
 - (NSDictionary *)loadEntriesFromDisk {
@@ -99,13 +110,6 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
     if (!data) return nil;
     id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     return [object isKindOfClass:[NSDictionary class]] ? object : nil;
-}
-
-- (void)writeEntriesToDiskLocked {
-    NSDictionary *snapshot = [self.entries copy];
-    NSData *data = [NSJSONSerialization dataWithJSONObject:snapshot options:0 error:nil];
-    if (!data) return;
-    [data writeToFile:self.cachePath atomically:YES];
 }
 
 - (NSString *)cacheKeyForURL:(NSURL *)url {
@@ -152,26 +156,54 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
     if (memoryPreview && [self previewIsFresh:memoryPreview forURL:url]) return memoryPreview;
 
     // A key already proven absent stays absent until a store clears its
-    // marker — answer without touching the disk queue.
+    // marker — answer without touching the immutable snapshot.
     if ([self.missCache objectForKey:key]) return nil;
 
-    __block ApolloLinkPreview *preview = nil;
-    dispatch_sync(self.queue, ^{
-        NSDictionary *entry = self.entries[key];
-        preview = [ApolloLinkPreview previewFromDictionary:entry];
-        if (preview && [self previewIsFresh:preview forURL:url]) {
-            [self.memoryCache setObject:preview forKey:key];
-            NSMutableDictionary *updated = [entry mutableCopy];
-            updated[@"lastAccess"] = @([[NSDate date] timeIntervalSince1970]);
-            self.entries[key] = updated;
-        } else if (entry) {
-            [self.entries removeObjectForKey:key];
-            [self markDiskDirtyLocked];
-            preview = nil;
+    NSDictionary *entry = self.entriesSnapshot[key];
+    ApolloLinkPreview *preview = [ApolloLinkPreview previewFromDictionary:entry];
+    if (preview && [self previewIsFresh:preview forURL:url]) {
+        [self.memoryCache setObject:preview forKey:key];
+        // An invalidation can publish a new snapshot while this caller is
+        // decoding the old entry. Never let that late decode repopulate the
+        // memory cache after remove/flush has completed.
+        if (self.entriesSnapshot[key] != entry) {
+            [self.memoryCache removeObjectForKey:key];
+            return [self cachedPreviewForURL:url];
         }
-        if (!preview) [self.missCache setObject:@YES forKey:key];
-    });
-    return preview;
+        NSTimeInterval accessTime = [[NSDate date] timeIntervalSince1970];
+        dispatch_async(self.queue, ^{
+            // Do not let a delayed last-access update overwrite a newer store.
+            NSDictionary *current = self.entries[key];
+            if (current != entry) return;
+            NSMutableDictionary *updated = [entry mutableCopy];
+            updated[@"lastAccess"] = @(accessTime);
+            self.entries[key] = updated;
+            self.entriesSnapshot = [self.entries copy];
+        });
+        return preview;
+    }
+
+    [self.missCache setObject:@YES forKey:key];
+    // The snapshot can advance between the load above and publication of this
+    // negative marker. If a concurrent store already won, do not leave a stale
+    // marker that would hide it after NSCache eventually evicts the preview.
+    if (self.entriesSnapshot[key] != entry) {
+        [self.missCache removeObjectForKey:key];
+        return [self cachedPreviewForURL:url];
+    }
+    if (entry) {
+        dispatch_async(self.queue, ^{
+            // A store may have replaced this entry after our snapshot load.
+            if (self.entries[key] != entry) {
+                [self.missCache removeObjectForKey:key];
+                return;
+            }
+            [self.entries removeObjectForKey:key];
+            self.entriesSnapshot = [self.entries copy];
+            [self markDiskDirtyLocked];
+        });
+    }
+    return nil;
 }
 
 - (BOOL)cachedPreviewIsRichForURL:(NSURL *)url {
@@ -194,8 +226,15 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
 
     [self.memoryCache setObject:preview forKey:key];
     dispatch_async(self.queue, ^{
+        [self.missCache removeObjectForKey:key];
         self.entries[key] = entry;
         [self evictIfNeededLocked];
+        self.entriesSnapshot = [self.entries copy];
+        // Reassert the ordered store after publishing its snapshot. A caller
+        // may have decoded the previous snapshot between the eager memory put
+        // above and this state-queue block; this final put makes the newest
+        // store the eventual memory-cache winner as well.
+        if (self.entries[key] == entry) [self.memoryCache setObject:preview forKey:key];
         [self markDiskDirtyLocked];
     });
 }
@@ -203,12 +242,19 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
 - (void)removePreviewForURL:(NSURL *)url {
     if (![url isKindOfClass:[NSURL class]]) return;
     NSString *key = [self cacheKeyForURL:url];
-    [self.memoryCache removeObjectForKey:key];
-    dispatch_async(self.queue, ^{
+
+    // Invalidations are rare user/account events. Make the state publication
+    // synchronous so the method's return remains a real ordering boundary;
+    // layout lookups avoid dispatch_sync to the state queue through
+    // entriesSnapshot.
+    dispatch_sync(self.queue, ^{
         if (self.entries[key]) {
             [self.entries removeObjectForKey:key];
+            self.entriesSnapshot = [self.entries copy];
             [self markDiskDirtyLocked];
         }
+        [self.memoryCache removeObjectForKey:key];
+        [self.missCache setObject:@YES forKey:key];
     });
 }
 
@@ -242,25 +288,34 @@ static NSString *ApolloLinkPreviewRedditUsernameFromURL(NSURL *url) {
     NSString *normalized = ApolloLinkPreviewNormalizedRedditUsername(username);
     if (normalized.length == 0) return;
 
-    NSMutableArray<NSURL *> *urlsToRemove = [NSMutableArray array];
+    __block NSUInteger removedCount = 0;
     dispatch_sync(self.queue, ^{
-        for (NSString *key in [self.entries.allKeys copy]) {
+        NSMutableArray<NSString *> *keysToRemove = [NSMutableArray array];
+        for (NSString *key in self.entries) {
             NSDictionary *entry = self.entries[key];
             NSString *urlString = [entry[@"url"] isKindOfClass:[NSString class]] ? entry[@"url"] : nil;
             if (urlString.length == 0) continue;
             NSURL *url = [NSURL URLWithString:urlString];
             NSString *entryUsername = ApolloLinkPreviewRedditUsernameFromURL(url);
             if (entryUsername.length > 0 && [entryUsername isEqualToString:normalized]) {
-                [urlsToRemove addObject:url];
+                [keysToRemove addObject:key];
             }
+        }
+
+        for (NSString *key in keysToRemove) {
+            [self.entries removeObjectForKey:key];
+            [self.memoryCache removeObjectForKey:key];
+            [self.missCache setObject:@YES forKey:key];
+        }
+        removedCount = keysToRemove.count;
+        if (removedCount > 0) {
+            self.entriesSnapshot = [self.entries copy];
+            [self markDiskDirtyLocked];
         }
     });
 
-    for (NSURL *url in urlsToRemove) {
-        [self removePreviewForURL:url];
-    }
-    if (urlsToRemove.count > 0) {
-        ApolloLog(@"[BannedProfile] invalidated %lu reddit-user link preview(s) for u/%@", (unsigned long)urlsToRemove.count, normalized);
+    if (removedCount > 0) {
+        ApolloLog(@"[BannedProfile] invalidated %lu reddit-user link preview(s) for u/%@", (unsigned long)removedCount, normalized);
     }
 }
 
@@ -272,13 +327,19 @@ static NSString *ApolloLinkPreviewRedditUsernameFromURL(NSURL *url) {
 }
 
 - (void)flushCache {
-    [self.memoryCache removeAllObjects];
-    dispatch_async(self.queue, ^{
+    dispatch_sync(self.queue, ^{
         self.diskDirty = NO;
         self.diskFlushScheduled = NO;
         NSUInteger removed = self.entries.count;
         [self.entries removeAllObjects];
-        [[NSFileManager defaultManager] removeItemAtPath:self.cachePath error:nil];
+        self.entriesSnapshot = @{};
+        [self.memoryCache removeAllObjects];
+        [self.missCache removeAllObjects];
+        [self.keyCache removeAllObjects];
+        NSString *path = self.cachePath;
+        dispatch_async(self.ioQueue, ^{
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        });
         ApolloLog(@"[LinkPreviews] cache flushed by user (%lu entries cleared, disk file removed)", (unsigned long)removed);
     });
 }
@@ -286,13 +347,8 @@ static NSString *ApolloLinkPreviewRedditUsernameFromURL(NSURL *url) {
 - (void)enumerateStoredPreviewsUsingBlock:(void (^)(NSURL *url, ApolloLinkPreview *preview))block {
     if (!block) return;
 
-    // Snapshot under the queue, then run the block outside it: the caller
-    // records into another store that may itself talk back to this cache, and
-    // holding the serial queue across arbitrary work invites a deadlock.
-    __block NSArray<NSDictionary *> *snapshot = nil;
-    dispatch_sync(self.queue, ^{
-        snapshot = [self.entries.allValues copy];
-    });
+    // Run arbitrary caller work over the already-published immutable snapshot.
+    NSArray<NSDictionary *> *snapshot = self.entriesSnapshot.allValues;
 
     for (NSDictionary *entry in snapshot) {
         NSString *urlString = [entry[@"url"] isKindOfClass:[NSString class]] ? entry[@"url"] : nil;

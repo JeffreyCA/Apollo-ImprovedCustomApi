@@ -377,13 +377,20 @@ static BOOL ApolloHLDidCollapseContains(NSString *sub) {
     if (sub.length == 0) return NO;
     @synchronized(ApolloHLDeDupLock()) { return [ApolloHLDidCollapseSubs() containsObject:sub]; }
 }
-static void ApolloHLDidCollapseAdd(NSString *sub) {
-    if (sub.length == 0) return;
-    @synchronized(ApolloHLDeDupLock()) { [ApolloHLDidCollapseSubs() addObject:sub]; }
-}
 static void ApolloHLDidCollapseRemove(NSString *sub) {
     if (sub.length == 0) return;
     @synchronized(ApolloHLDeDupLock()) { [ApolloHLDidCollapseSubs() removeObject:sub]; }
+}
+
+// Hot Texture layout transaction: membership and the resulting "did collapse"
+// mark describe one decision, so perform both under one monitor entry.
+static BOOL ApolloHLHideAndMarkCollapsed(NSString *sub) {
+    if (sub.length == 0) return NO;
+    @synchronized(ApolloHLDeDupLock()) {
+        if (![ApolloHLHideSubs() containsObject:sub]) return NO;
+        [ApolloHLDidCollapseSubs() addObject:sub];
+        return YES;
+    }
 }
 
 // Lowercased subreddit -> number of leading stickied posts the REST `hot` fetch
@@ -1450,7 +1457,7 @@ static void ApolloHLToggleCollapsed(NSString *sub); // fwd (defined after ApplyI
     }
     if (permalink.length == 0) return;
     NSString *full = [permalink hasPrefix:@"http"] ? permalink
-                   : [NSString stringWithFormat:@"https://reddit.com%@", permalink];
+                   : [@"https://reddit.com" stringByAppendingString:permalink];
     NSURL *url = [NSURL URLWithString:full];
     if (!url) return;
     ApolloLog(@"[Highlights] card tapped -> %@", full);
@@ -2513,15 +2520,15 @@ static BOOL ApolloHLShouldHideCell(id cellNode) {
     if (ApolloHLHideSubsIsEmpty()) return NO;
     RDKLinkLite *link = (RDKLinkLite *)ApolloHLTypedIvar(cellNode, @"link", objc_getClass("RDKLink"));
     if (!link || ![link respondsToSelector:@selector(stickied)] || !link.stickied) return NO;
-    NSString *sub = link.subreddit.lowercaseString;
-    if (sub.length == 0 || !ApolloHLHideSubsContains(sub)) return NO;
     // …except a live interactive post while the feed renders those widgets: the
     // feed owns it, so it keeps its row (the widget IS the post) and the carousel
     // dropped it instead — no duplicate. Read straight off the link so this can
-    // never disagree with what the fetch filtered.
+    // never disagree with what the fetch filtered, and settled BEFORE the monitor
+    // below: it touches only the link, never the shared sets, so there is no
+    // reason to hold the de-dup lock across it on this hot layout path.
     if (ApolloDevvitFeedOwnsLink(link)) return NO;
-    ApolloHLDidCollapseAdd(sub);
-    return YES;
+    NSString *sub = link.subreddit.lowercaseString;
+    return ApolloHLHideAndMarkCollapsed(sub);
 }
 
 // Zero-size layout spec used to collapse a hidden cell.
