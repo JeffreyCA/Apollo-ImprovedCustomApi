@@ -503,13 +503,21 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 @property (nonatomic, strong) ApolloGalleryChromePillView *counterPill;
 @property (nonatomic, strong) UIView *infoPanel;
 @property (nonatomic, strong, nullable) UIView *infoPanelMaterial;
-@property (nonatomic, strong) UIButton *infoCloseButton;
 @property (nonatomic, strong) UITapGestureRecognizer *infoTap;
+@property (nonatomic, strong) UIPanGestureRecognizer *infoPan;
 // Dismissing the card gets you out of the way of THIS post, not every post:
 // paging to another one (or reopening the viewer) shows its details again,
 // since a new picture's title is new information rather than the thing you
 // just chose to ignore.
 @property (nonatomic) BOOL infoPanelHiddenForItem;
+// A video's card also bows out on its own a few seconds after the chrome
+// appears: you get the title, then an unobstructed picture with the transport
+// still under your thumb. This is a FADE, not the layout-level dismissal
+// above — tapping the chrome back on brings it straight back — and asking for
+// it explicitly from the menu pins it for that post so it stops doing this.
+@property (nonatomic) BOOL infoPanelAutoHidden;
+@property (nonatomic) BOOL infoPanelPinnedForItem;
+@property (nonatomic) NSUInteger infoPanelAutoHideGeneration;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -845,17 +853,15 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 
     // Dismissing the card is what makes the transport usable on its own: the
     // title block is the tallest piece of chrome, and on a wide video it is
-    // the part most likely to be in the way.
-    self.infoCloseButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.infoCloseButton.tintColor = [UIColor colorWithWhite:1.0 alpha:0.75];
-    [self.infoCloseButton setImage:[UIImage systemImageNamed:@"xmark.circle.fill"
-                                            withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:17.0
-                                                                                                              weight:UIImageSymbolWeightSemibold]]
-                          forState:UIControlStateNormal];
-    self.infoCloseButton.accessibilityLabel = @"Hide Post Info";
-    [self.infoCloseButton addTarget:self action:@selector(apollo_hideInfoPanelTapped)
-                   forControlEvents:UIControlEventTouchUpInside];
-    [self.infoPanel addSubview:self.infoCloseButton];
+    // the part most likely to be in the way. It swipes away sideways rather
+    // than carrying a close button — the card is small, and a permanent ×
+    // both clutters it and eats the width the title needs. Vertical is spoken
+    // for (that is the viewer's swipe-to-close), so this takes horizontal.
+    self.infoPan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                            action:@selector(apollo_infoPanelPanned:)];
+    self.infoPan.delegate = self;
+    [self.infoPanel addGestureRecognizer:self.infoPan];
+    self.infoPanel.accessibilityHint = @"Swipe sideways to hide";
 
     self.statusLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.statusLabel.textColor = UIColor.whiteColor;
@@ -1092,12 +1098,6 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
     CGFloat videoBarWidth = availableWidth;
     CGFloat textWidth = panelWidth - 24.0;
 
-    // The close button eats into the title's line, so the text measures
-    // against the narrower column.
-    CGFloat const closeSize = 28.0;
-    CGFloat closeInset = closeSize + 8.0;
-    textWidth -= closeInset;
-
     CGSize titleSize = CGSizeZero;
     if (self.titleLabel.text.length > 0) {
         titleSize = [self.titleLabel sizeThatFits:CGSizeMake(textWidth, CGFLOAT_MAX)];
@@ -1114,8 +1114,6 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
     self.infoPanel.hidden = !showsInfo;
     self.titleLabel.frame = CGRectMake(12.0, 10.0, titleSize.width, titleSize.height);
     self.subtitleLabel.frame = CGRectMake(12.0, 10.0 + titleSize.height + gap, subtitleSize.width, subtitleSize.height);
-    self.infoCloseButton.frame = CGRectMake(panelWidth - closeSize - 8.0,
-                                            (panelHeight - closeSize) / 2.0, closeSize, closeSize);
 
     CGFloat const videoBarHeight = 44.0;
     BOOL showsBar = !self.videoBarPill.hidden;
@@ -1409,11 +1407,13 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
     self.muteHost.userInteractionEnabled = visible;
     self.infoPanel.userInteractionEnabled = visible;
     self.videoBarPill.userInteractionEnabled = visible;
+    if (visible) self.infoPanelAutoHidden = NO;   // `changes` puts its alpha back
     if (animated) {
         [UIView animateWithDuration:0.22 animations:changes];
     } else {
         changes();
     }
+    [self apollo_scheduleInfoPanelAutoHide];
 }
 
 - (void)apollo_setStatus:(NSString *)status {
@@ -1475,6 +1475,11 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
     // A different post carries different details, so it starts with its card
     // showing even if the last one's was dismissed.
     self.infoPanelHiddenForItem = NO;
+    self.infoPanelPinnedForItem = NO;
+    self.infoPanelAutoHidden = NO;
+    self.infoPanel.transform = CGAffineTransformIdentity;
+    self.infoPanel.alpha = self.chromeVisible ? 1.0 : 0.0;
+    [self apollo_scheduleInfoPanelAutoHide];
     [self apollo_updateChromeContent];
     [self apollo_syncPlayback];
     [self apollo_prefetchAroundIndex:page];
@@ -1781,6 +1786,12 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
 #pragma mark UIGestureRecognizerDelegate
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    // The card's swipe is horizontal-only, so it and the viewer's vertical
+    // swipe-to-close can never both claim the same drag.
+    if (gestureRecognizer == self.infoPan) {
+        CGPoint velocity = [self.infoPan velocityInView:self.view];
+        return fabs(velocity.x) > fabs(velocity.y);
+    }
     if (gestureRecognizer != self.dismissPan) return YES;
     // A zoomed-in page pans its own content instead.
     if ([self apollo_currentCell].isZoomed) return NO;
@@ -1800,9 +1811,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
        shouldReceiveTouch:(UITouch *)touch {
     // The card's own tap (open post) must not fire when the touch is on its
     // × — that button dismisses the card instead.
-    if (gestureRecognizer == self.infoTap) {
-        return ![touch.view isDescendantOfView:self.infoCloseButton];
-    }
+    if (gestureRecognizer == self.infoTap || gestureRecognizer == self.infoPan) return YES;
     // Let the info panel's own tap handle taps that land on it.
     if ([touch.view isDescendantOfView:self.infoPanel] && self.chromeVisible) {
         return ![gestureRecognizer isKindOfClass:[UITapGestureRecognizer class]];
@@ -1848,13 +1857,86 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     [self apollo_openCurrentPost];
 }
 
-- (void)apollo_hideInfoPanelTapped {
-    [self apollo_setInfoPanelHidden:YES];
+// Slide the card out under the finger; past a short distance (or a flick) it
+// goes, otherwise it springs back. Either direction works — whichever way the
+// user pushed it is the way it leaves.
+- (void)apollo_infoPanelPanned:(UIPanGestureRecognizer *)recognizer {
+    CGFloat translation = [recognizer translationInView:self.view].x;
+    CGFloat width = MAX(CGRectGetWidth(self.infoPanel.bounds), 1.0);
+
+    switch (recognizer.state) {
+        case UIGestureRecognizerStateBegan:
+            self.infoPanelAutoHideGeneration++;   // no fading mid-drag
+            break;
+        case UIGestureRecognizerStateChanged: {
+            self.infoPanel.transform = CGAffineTransformMakeTranslation(translation, 0.0);
+            self.infoPanel.alpha = MAX(0.15, 1.0 - fabs(translation) / width);
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            CGFloat velocity = [recognizer velocityInView:self.view].x;
+            BOOL commit = recognizer.state == UIGestureRecognizerStateEnded &&
+                          (fabs(translation) > 64.0 || fabs(velocity) > 600.0);
+            if (commit) {
+                CGFloat direction = (translation != 0.0 ? translation : velocity) < 0.0 ? -1.0 : 1.0;
+                [UIView animateWithDuration:0.2 delay:0.0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+                    self.infoPanel.transform = CGAffineTransformMakeTranslation(direction * (width + 40.0), 0.0);
+                    self.infoPanel.alpha = 0.0;
+                } completion:^(BOOL finished) {
+                    // Reset underneath the hidden card so a later "Show Post
+                    // Info" doesn't restore it mid-flight off screen.
+                    self.infoPanel.transform = CGAffineTransformIdentity;
+                    self.infoPanel.alpha = self.chromeVisible ? 1.0 : 0.0;
+                    [self apollo_setInfoPanelHidden:YES];
+                    (void)finished;
+                }];
+            } else {
+                [UIView animateWithDuration:0.25 delay:0.0 usingSpringWithDamping:0.85
+                       initialSpringVelocity:0.0 options:0 animations:^{
+                    self.infoPanel.transform = CGAffineTransformIdentity;
+                    self.infoPanel.alpha = 1.0;
+                } completion:nil];
+                [self apollo_scheduleInfoPanelAutoHide];
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// Still images keep their card: there is no transport competing for the
+// space, and a photo's title is the only context on screen.
+- (void)apollo_scheduleInfoPanelAutoHide {
+    NSUInteger generation = ++self.infoPanelAutoHideGeneration;   // cancels any pending pass
+    if (!self.chromeVisible || self.infoPanelHiddenForItem || self.infoPanelPinnedForItem) return;
+    if (![self apollo_currentItem].playsAsVideo) return;
+    ApolloLog(@"[Gallery] info card auto-hide armed (page %ld)", (long)self.currentIndex);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.infoPanelAutoHideGeneration != generation) return;
+        if (!strongSelf.chromeVisible || strongSelf.infoPanelHiddenForItem || strongSelf.infoPanelPinnedForItem) return;
+        if (![strongSelf apollo_currentItem].playsAsVideo) return;
+        strongSelf.infoPanelAutoHidden = YES;
+        ApolloLog(@"[Gallery] info card auto-hidden (alpha was %.2f)", strongSelf.infoPanel.alpha);
+        [UIView animateWithDuration:0.3 animations:^{ strongSelf.infoPanel.alpha = 0.0; }];
+    });
 }
 
 - (void)apollo_setInfoPanelHidden:(BOOL)hidden {
     if (self.infoPanelHiddenForItem == hidden) return;
     self.infoPanelHiddenForItem = hidden;
+    if (!hidden) {
+        // Asked for it back by name: stop fading it out from under them.
+        self.infoPanelPinnedForItem = YES;
+        self.infoPanelAutoHidden = NO;
+        self.infoPanel.transform = CGAffineTransformIdentity;
+        self.infoPanel.alpha = self.chromeVisible ? 1.0 : 0.0;
+    }
     // Rebuilds the share menu so its row reads the other way round now.
     [self apollo_updateChromeContent];
     [UIView animateWithDuration:0.2 animations:^{
