@@ -748,6 +748,30 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 
 #pragma mark Navigation confinement
 
+// A devvit app navigates its host page by post FULLNAME, not by the bare id
+// reddit's own permalinks use: finishing a Pixelary drawing sends the page to
+//   /r/Pixelary/comments/t3_1vp57ul
+// where a real permalink reads /r/Pixelary/comments/1vp57ul[/slug]. Apollo
+// resolves that literally, opens a post id that cannot exist, and the user is
+// left on "Error loading comments" over an endless spinner with the game gone —
+// right after posting, the worst possible moment. Strip the `t3_` so the post
+// they just made actually opens. Returns nil when there is nothing to change.
+static NSURL *ApolloDevvitNormalizedPermalink(NSURL *url) {
+    NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if (!comps) return nil;
+    NSMutableArray<NSString *> *parts = [(url.pathComponents ?: @[]) mutableCopy];
+    NSUInteger commentsIdx = [parts indexOfObject:@"comments"];
+    if (commentsIdx == NSNotFound || commentsIdx + 1 >= parts.count) return nil;
+    NSString *postID = parts[commentsIdx + 1];
+    if (![postID hasPrefix:@"t3_"] || postID.length <= 3) return nil;
+    parts[commentsIdx + 1] = [postID substringFromIndex:3];
+    // pathComponents keeps a leading "/" element; joining would double it.
+    if (parts.count && [parts.firstObject isEqualToString:@"/"]) [parts removeObjectAtIndex:0];
+    comps.path = [@"/" stringByAppendingString:[parts componentsJoinedByString:@"/"]];
+    ApolloLog(@"[Devvit] rewrote fullname permalink → %@", comps.path);
+    return comps.URL;
+}
+
 // The embed shows exactly one post. Any main-frame link activation gets
 // routed to Apollo's own browser/scheme handling instead — both to keep the
 // crop coherent and so third-party pages never inherit the seeded reddit
@@ -786,7 +810,18 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 
 - (void)routeExternally:(NSURL *)url {
     if (!url) return;
-    ApolloLog(@"[Devvit] routing external URL out of widget: %@://%@", url.scheme, url.host);
+    NSString *host = url.host.lowercaseString;
+    BOOL redditHost = host && ([host isEqualToString:@"reddit.com"] || [host hasSuffix:@".reddit.com"]);
+    NSString *path = url.path ?: @"";
+    // Log the PATH for reddit (it is the same class of identifier as the t3
+    // fullnames this module already logs, and without it a misrouted navigation
+    // is undiagnosable); host only for anywhere else.
+    if (redditHost) {
+        ApolloLog(@"[Devvit] routing reddit URL out of widget: %@", path.length ? path : @"(no path)");
+    } else {
+        ApolloLog(@"[Devvit] routing external URL out of widget: %@://%@", url.scheme, host);
+    }
+    if (redditHost) url = ApolloDevvitNormalizedPermalink(url) ?: url;
     NSURL *apolloURL = ApolloURLByConvertingResolvedURLToApolloScheme(url);
     if (apolloURL && ApolloRouteResolvedURLViaApolloScheme(apolloURL)) return;
     UIResponder *responder = self;
