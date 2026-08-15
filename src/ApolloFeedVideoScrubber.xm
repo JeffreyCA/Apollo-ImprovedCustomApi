@@ -107,6 +107,56 @@ static UIView *ViewForNode(id node) {
     return ((UIView *(*)(id, SEL))objc_msgSend)(node, @selector(view));
 }
 
+// The feed's scroll view, for clamping the bar into the region the user can
+// actually see (Apollo insets the feed for the tab bar).
+static UIScrollView *EnclosingScrollView(UIView *view) {
+    for (UIView *v = view.superview; v; v = v.superview) {
+        if ([v isKindOfClass:[UIScrollView class]]) return (UIScrollView *)v;
+    }
+    return nil;
+}
+
+// The view controller a view currently lives in, for reaching its navigation
+// controller's interactive-pop recognizer.
+static UIViewController *ViewControllerForView(UIView *view) {
+    for (UIResponder *r = view; r; r = r.nextResponder) {
+        if ([r isKindOfClass:[UIViewController class]]) return (UIViewController *)r;
+    }
+    return nil;
+}
+
+// A horizontal drag on the bar is also a perfectly good "swipe back" as far as
+// Apollo's swipe-anywhere-to-go-back gesture is concerned, and that gesture
+// wins: it cancels the bar's touch tracking and pops the screen mid-scrub.
+// Disable the pop recognizer and any pan-like ancestor for the duration of the
+// drag only (mirrors ApolloStatsRowTouch.xm's loupe handling). The feed's own
+// scroll pan is deliberately left alone — cancelling it is the scroll view's
+// business and it never fires for a horizontal drag.
+static NSArray<UIGestureRecognizer *> *SuspendCompetingPans(UIView *view) {
+    NSMutableArray<UIGestureRecognizer *> *disabled = [NSMutableArray array];
+
+    UIGestureRecognizer *pop =
+        ViewControllerForView(view).navigationController.interactivePopGestureRecognizer;
+    if (pop && pop.isEnabled) { pop.enabled = NO; [disabled addObject:pop]; }
+
+    for (UIView *v = view; v; v = v.superview) {
+        UIGestureRecognizer *scrollPan =
+            [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if (g == scrollPan || !g.isEnabled) continue;
+            NSString *name = NSStringFromClass([g class]);
+            BOOL panLike = [g isKindOfClass:[UIPanGestureRecognizer class]]
+                || [name containsString:@"ParallaxTransition"];
+            if (panLike) { g.enabled = NO; [disabled addObject:g]; }
+        }
+    }
+    return disabled;
+}
+
+static void RestoreCompetingPans(NSArray<UIGestureRecognizer *> *disabled) {
+    for (UIGestureRecognizer *g in disabled) g.enabled = YES;
+}
+
 static NSString *FormatPlaybackTime(NSTimeInterval seconds) {
     if (!isfinite(seconds) || seconds < 0) seconds = 0;
     NSInteger total = (NSInteger)llround(seconds);
@@ -145,6 +195,8 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 @property (nonatomic, strong) UIView *fillView;
 @property (nonatomic, strong) UIView *knobView;
 @property (nonatomic, copy) void (^onScrub)(CGFloat fraction, BOOL finished);
+@property (nonatomic, strong) NSArray<UIGestureRecognizer *> *suspendedPans;
+- (void)restoreSuspendedPans;
 @end
 
 @implementation ApolloFeedScrubBar
@@ -173,8 +225,33 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
     _knobView.layer.shadowOffset = CGSizeMake(0, 1);
     [self addSubview:_knobView];
 
+    self.isAccessibilityElement = YES;
+    self.accessibilityLabel = @"Video progress";
+    self.accessibilityTraits = UIAccessibilityTraitAdjustable;
+
     [self applyAccentColor];
     return self;
+}
+
+#pragma mark Accessibility
+
+// VoiceOver scrubs in 5% steps; the same entry point also makes the bar
+// addressable from the accessibility tree, which is how it gets driven in
+// automated simulator runs.
+- (NSString *)accessibilityValue {
+    return [NSString stringWithFormat:@"%ld%%", (long)llround(MAX(0.0, MIN(1.0, self.progress)) * 100.0)];
+}
+
+- (void)accessibilityIncrement {
+    CGFloat next = MIN(1.0, self.progress + 0.05);
+    self.progress = next;
+    if (self.onScrub) self.onScrub(next, YES);
+}
+
+- (void)accessibilityDecrement {
+    CGFloat next = MAX(0.0, self.progress - 0.05);
+    self.progress = next;
+    if (self.onScrub) self.onScrub(next, YES);
 }
 
 // The theme accent, with the documented fallback chain. Used as a plain
@@ -219,6 +296,11 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
     self.scrubbing = YES;
     CGFloat fraction = [self fractionForTouch:touch];
+    // Confirms the touch reached the bar rather than being claimed by the feed's
+    // scroll view or the swipe-back gesture, which is the failure mode to watch
+    // for when this is dropped into a new chrome (glass vs legacy).
+    ApolloLog(@"[FeedScrubber] scrub began at %.0f%%", fraction * 100.0);
+    self.suspendedPans = SuspendCompetingPans(self);
     self.progress = fraction;
     if (self.onScrub) self.onScrub(fraction, NO);
     [UIView animateWithDuration:0.12 animations:^{
@@ -234,8 +316,14 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
     return YES;
 }
 
+- (void)restoreSuspendedPans {
+    RestoreCompetingPans(self.suspendedPans);
+    self.suspendedPans = nil;
+}
+
 - (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
     self.scrubbing = NO;
+    [self restoreSuspendedPans];
     CGFloat fraction = touch ? [self fractionForTouch:touch] : self.progress;
     self.progress = fraction;
     if (self.onScrub) self.onScrub(fraction, YES);
@@ -246,6 +334,7 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 
 - (void)cancelTrackingWithEvent:(UIEvent *)event {
     self.scrubbing = NO;
+    [self restoreSuspendedPans];
     if (self.onScrub) self.onScrub(self.progress, YES);
     [UIView animateWithDuration:0.12 animations:^{
         self.knobView.transform = CGAffineTransformIdentity;
@@ -270,6 +359,9 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 @property (nonatomic, strong) UILabel *durationLabel;
 @property (nonatomic, weak) UIView *nativeProgressView;  // hidden while we're up
 @property (nonatomic, assign) BOOL nativeProgressWasHidden;
+@property (nonatomic, weak) UIScrollView *feedScrollView;   // touch-delay owner
+@property (nonatomic, assign) BOOL feedDelayedContentTouches;
+@property (nonatomic, assign) BOOL didSuspendTouchDelay;
 @property (nonatomic, assign) NSTimeInterval duration;
 @property (nonatomic, assign) NSUInteger hideGeneration;
 @property (nonatomic, assign) BOOL seekInFlight;
@@ -287,6 +379,11 @@ static char kFeedScrubOverlayKey;
     if (_timeObserver && _player) {
         [_player removeTimeObserver:_timeObserver];
         _timeObserver = nil;
+    }
+    // The feed's own touch handling must never stay altered past our lifetime.
+    if (_didSuspendTouchDelay) {
+        _didSuspendTouchDelay = NO;
+        _feedScrollView.delaysContentTouches = _feedDelayedContentTouches;
     }
 }
 
@@ -355,6 +452,20 @@ static char kFeedScrubOverlayKey;
         }
     }
 
+    // A tall video's bottom edge often sits under the floating tab bar, which
+    // would hide the bar entirely. Keep it inside the part of the feed the user
+    // can actually see — Apollo insets the scroll view for the tab bar, so that
+    // inset is the honest boundary in both the glass and legacy chrome.
+    UIScrollView *scrollView = EnclosingScrollView(host);
+    if (scrollView) {
+        CGRect candidate = CGRectMake(originX, originY, width, kOverlayHeight);
+        CGRect inScroll = [host convertRect:candidate toView:scrollView];
+        CGFloat visibleMaxY = CGRectGetMaxY(scrollView.bounds)
+                            - scrollView.adjustedContentInset.bottom - 8.0;
+        CGFloat overshoot = CGRectGetMaxY(inScroll) - visibleMaxY;
+        if (overshoot > 0) originY -= overshoot;
+    }
+
     // Never let it ride above the top of the video on a very short cell.
     originY = MAX(originY, videoFrame.origin.y + 2.0);
 
@@ -397,6 +508,20 @@ static char kFeedScrubOverlayKey;
         nativeProgress.hidden = YES;
     }
 
+    // The feed's scroll view holds every content touch for ~150ms to decide
+    // whether it is the start of a scroll. A finger that starts moving inside
+    // that window never reaches the bar at all — the scroll view keeps it — so
+    // a drag scrolls the feed instead of scrubbing. Hand touches straight
+    // through while the bar is up; the scroll view still takes over for touches
+    // that land anywhere else, and this is restored on every teardown path.
+    UIScrollView *scrollView = EnclosingScrollView(host);
+    if (scrollView && !self.didSuspendTouchDelay) {
+        self.feedScrollView = scrollView;
+        self.feedDelayedContentTouches = scrollView.delaysContentTouches;
+        self.didSuspendTouchDelay = YES;
+        scrollView.delaysContentTouches = NO;
+    }
+
     self.durationLabel.text = FormatPlaybackTime(self.duration);
     [self positionInHost:host videoView:videoView];
     [self refreshProgress];
@@ -420,8 +545,19 @@ static char kFeedScrubOverlayKey;
     });
 }
 
+- (void)restoreFeedTouchDelay {
+    if (!self.didSuspendTouchDelay) return;
+    self.didSuspendTouchDelay = NO;
+    self.feedScrollView.delaysContentTouches = self.feedDelayedContentTouches;
+    self.feedScrollView = nil;
+}
+
 - (void)teardownWithReason:(NSString *)reason {
     self.hideGeneration++;   // cancel any pending auto-hide
+    [self restoreFeedTouchDelay];
+    // Backstop: if a drag was somehow still live (its touch cancelled without
+    // the control hearing about it), swipe-back must not stay disabled.
+    [self.scrubBar restoreSuspendedPans];
 
     if (self.timeObserver && self.player) {
         [self.player removeTimeObserver:self.timeObserver];
