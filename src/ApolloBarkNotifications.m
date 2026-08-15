@@ -1,4 +1,5 @@
 #import "ApolloBarkNotifications.h"
+#import "ApolloLiquidGlassIconIDs.h"
 #import "ApolloCommon.h"
 #import "ApolloNotificationBackend.h"
 #import "ApolloPushNotifications.h"
@@ -148,6 +149,10 @@ BOOL ApolloBarkNoteSelectedIconName(NSString *name) {
             break;
         }
     }
+    // Classics use an LG- prefix in the app catalog, while Bark's hosted PNGs
+    // keep their established filenames. Translate only those renamed IDs.
+    NSString *legacyName = ApolloLGLegacyClassicsIconID(name);
+    if (legacyName) name = legacyName;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *stored = [defaults stringForKey:UDKeyBarkSelectedIconName];
     if (name.length == 0) {

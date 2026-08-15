@@ -1,0 +1,161 @@
+{
+  "fill" : "system-dark",
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "hidden" : true,
+          "image-name" : "app-icon-iphone-ernest@3x.png",
+          "name" : "app-icon-iphone-ernest@3x",
+          "opacity" : 0.61,
+          "position" : {
+            "scale" : 5.72,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    },
+    {
+      "blur-material" : 0.5,
+      "layers" : [
+        {
+          "image-name" : "ernest_pupils 2.svg",
+          "name" : "ernest_pupils 2",
+          "position" : {
+            "scale" : 1.38,
+            "translation-in-points" : [
+              126.46092256723136,
+              -74
+            ]
+          }
+        },
+        {
+          "image-name" : "ernest_beak 2.svg",
+          "name" : "ernest_beak 2",
+          "position" : {
+            "scale" : 1.35,
+            "translation-in-points" : [
+              229,
+              78
+            ]
+          }
+        },
+        {
+          "image-name" : "ernest_ball 2.svg",
+          "name" : "ernest_ball 2",
+          "position" : {
+            "scale" : 1.36,
+            "translation-in-points" : [
+              -43,
+              -430
+            ]
+          }
+        },
+        {
+          "image-name" : "ernest_stem 2.svg",
+          "name" : "ernest_stem 2",
+          "position" : {
+            "scale" : 1.31,
+            "translation-in-points" : [
+              0,
+              -355
+            ]
+          }
+        },
+        {
+          "image-name" : "ernest_eyes 2.svg",
+          "name" : "ernest_eyes 2",
+          "position" : {
+            "scale" : 1.38,
+            "translation-in-points" : [
+              122,
+              -74
+            ]
+          }
+        },
+        {
+          "image-name" : "ernest_decal 2.svg",
+          "name" : "ernest_decal 2",
+          "position" : {
+            "scale" : 1.36,
+            "translation-in-points" : [
+              -71,
+              186
+            ]
+          }
+        },
+        {
+          "hidden" : false,
+          "image-name" : "ernest_wing_outer 2.svg",
+          "name" : "ernest_wing_outer 2",
+          "position" : {
+            "scale" : 1.41,
+            "translation-in-points" : [
+              -289.8654660208208,
+              407.3354950147177
+            ]
+          }
+        },
+        {
+          "image-name" : "ernest_wing_inner 2.svg",
+          "name" : "ernest_wing_inner 2",
+          "position" : {
+            "scale" : 1.38,
+            "translation-in-points" : [
+              -314,
+              422
+            ]
+          }
+        },
+        {
+          "image-name" : "ernest_wing_filllayer 2.svg",
+          "name" : "ernest_wing_filllayer 2",
+          "position" : {
+            "scale" : 1.4,
+            "translation-in-points" : [
+              -318.96330527847044,
+              425.714528202932
+            ]
+          }
+        },
+        {
+          "image-name" : "ernest_body 2.svg",
+          "name" : "ernest_body 2",
+          "position" : {
+            "scale" : 1.35,
+            "translation-in-points" : [
+              -82,
+              309
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.81
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

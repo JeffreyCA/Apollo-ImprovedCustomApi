@@ -1,0 +1,361 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "display-p3:0.92845,0.41091,0.17246,1.00000",
+          "display-p3:0.93235,0.48310,0.18807,1.00000"
+        ]
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : "system-dark"
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.92845,0.41091,0.17246,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.75023,0.33701,0.14631,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "apollo_antennaball.svg",
+          "name" : "Ball",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 0.22,
+            "translation-in-points" : [
+              414,
+              102
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.92845,0.41091,0.17246,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.75023,0.33701,0.14631,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "apollo_antennaball.svg",
+          "name" : "Ball",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 0.22,
+            "translation-in-points" : [
+              -414,
+              102
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.50000,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.50000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "image-name" : "airpods 2.svg",
+          "name" : "airpods",
+          "position" : {
+            "scale" : 1.36,
+            "translation-in-points" : [
+              0,
+              143
+            ]
+          }
+        },
+        {
+          "blend-mode" : "plus-lighter",
+          "fill" : {
+            "solid" : "display-p3:0.16077,0.16077,0.16077,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "apollo_antennaball.svg",
+          "name" : "Ball",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 1.32,
+            "translation-in-points" : [
+              0,
+              -384
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 2.4
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.2
+      }
+    },
+    {
+      "blur-material-specializations" : [
+        {
+          "value" : 0.24
+        },
+        {
+          "appearance" : "tinted",
+          "value" : 0.24
+        }
+      ],
+      "hidden" : false,
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Face.svg",
+          "name" : "Face",
+          "position" : {
+            "scale" : 1.71,
+            "translation-in-points" : [
+              0,
+              125
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.16077,0.16077,0.16077,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Eyes 3.svg",
+          "name" : "Eyes",
+          "position" : {
+            "scale" : 1.7,
+            "translation-in-points" : [
+              0,
+              100
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "stem.svg",
+          "name" : "Stem",
+          "position" : {
+            "scale" : 3.1,
+            "translation-in-points" : [
+              0.020926385442521678,
+              -272
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.85824,0.55714,0.29019,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Apollo Helmet Space.svg",
+          "name" : "Apollo Helmet Space",
+          "position" : {
+            "scale" : 1.3,
+            "translation-in-points" : [
+              0,
+              120
+            ]
+          }
+        }
+      ],
+      "lighting-specializations" : [
+        {
+          "value" : "individual"
+        },
+        {
+          "appearance" : "tinted",
+          "value" : "individual"
+        }
+      ],
+      "shadow-specializations" : [
+        {
+          "value" : {
+            "kind" : "neutral",
+            "opacity" : 0.6
+          }
+        },
+        {
+          "appearance" : "tinted",
+          "value" : {
+            "kind" : "layer-color",
+            "opacity" : 1
+          }
+        }
+      ],
+      "specular-specializations" : [
+        {
+          "value" : true
+        },
+        {
+          "appearance" : "tinted",
+          "value" : false
+        }
+      ],
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : true,
+            "value" : 0.2
+          }
+        },
+        {
+          "appearance" : "tinted",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.49
+          }
+        }
+      ]
+    },
+    {
+      "layers" : [
+        {
+          "fill" : {
+            "solid" : "display-p3:0.16077,0.16077,0.16077,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Helmet 2.svg",
+          "name" : "Helmet",
+          "position" : {
+            "scale" : 1.71,
+            "translation-in-points" : [
+              1,
+              84
+            ]
+          }
+        }
+      ],
+      "name" : "Group",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 1.6
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.92920,0.42358,0.17651,1.00000"
+              }
+            }
+          ],
+          "image-name" : "airpod_lines.svg",
+          "name" : "airpod_lines",
+          "opacity-specializations" : [
+            {
+              "value" : 0.56
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.3
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0
+            }
+          ],
+          "position" : {
+            "scale" : 1.36,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.6
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

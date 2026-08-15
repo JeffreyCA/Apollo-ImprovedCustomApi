@@ -24,6 +24,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "Tweak.h"
 #import "UserDefaultConstants.h"
 
@@ -80,9 +81,38 @@ struct ApolloFeedGallerySizeRange { CGSize min; CGSize max; };
 // clamped between that 16:9 floor and a 5:4 portrait ceiling: a full-bleed
 // pager reads as "the image", so center-cropping a portrait photo into a hard
 // 16:9 box looked like a bug, while an unclamped 1:3 comic would swallow the
-// feed. AspectFill within the clamp keeps residual crops modest.
+// feed. Pages render aspect-fit within the card (#899): aspect-fill cropped
+// every page whose aspect differs from the card's — a wide sketch in a
+// portrait-median gallery lost both edges — so off-aspect pages letterbox on
+// the theme's card surface instead. A 4:3 ceiling (full-bleed 3:4 iPhone
+// photos) was tried and deliberately reverted: the tighter 5:4 card reads
+// better in the feed, and the thin side bars it costs on portrait galleries
+// don't hide anything — the fullscreen viewer always shows the full image.
 static const CGFloat kApolloFeedGalleryRatio = 9.0 / 16.0;
 static const CGFloat kApolloFeedGalleryMaxRatio = 5.0 / 4.0;
+
+// Letterbox/placeholder surface behind carousel pages. Under aspect-fill this
+// was a debug backstop that only flashed during loads; with aspect-fit it is
+// permanently on screen beside every off-aspect page, so it follows the
+// theme's card background (Pure Black Dark Mode aware, custom themes
+// included) instead of a fixed near-black that read as a slab on light
+// themes. Fallback per the ApolloThemeRuntime contract.
+static UIColor *ApolloFeedGalleryPageSurfaceColor(void) {
+    return ApolloThemeCardBackgroundColor() ?: UIColor.secondarySystemGroupedBackgroundColor;
+}
+
+// The page dots were UIPageControl's default white, which disappears into a
+// light letterbox surface. Resolve the surface per trait collection and pick
+// contrasting dots; a dynamic provider so light/dark flips and theme reloads
+// re-resolve without reconfiguring the card.
+static UIColor *ApolloFeedGalleryPageIndicatorColor(BOOL current) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        UIColor *surface = [ApolloFeedGalleryPageSurfaceColor() resolvedColorWithTraitCollection:traits];
+        CGFloat alpha = current ? 1.0 : 0.35;
+        return ApolloColorIsLight(surface) ? [UIColor colorWithWhite:0.0 alpha:alpha]
+                                           : [UIColor colorWithWhite:1.0 alpha:alpha];
+    }];
+}
 
 static CGFloat ApolloFeedGalleryRatioForItems(NSArray<NSDictionary *> *items) {
     NSMutableArray<NSNumber *> *aspects = [NSMutableArray arrayWithCapacity:items.count];
@@ -260,6 +290,49 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
 
 #pragma mark - Gesture-cooperative paging scroll view
 
+static UINavigationController *ApolloFeedGalleryAncestorNavigationController(UIView *view) {
+    for (UIResponder *responder = view.nextResponder; responder; responder = responder.nextResponder) {
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            UIViewController *viewController = (UIViewController *)responder;
+            if (viewController.navigationController) return viewController.navigationController;
+            return [viewController isKindOfClass:[UINavigationController class]]
+                ? (UINavigationController *)viewController : nil;
+        }
+    }
+    return nil;
+}
+
+// A drag that ends pulled at least this far past the first/last page commits
+// to navigation on release. UIScrollView rubber-banding roughly halves finger
+// travel in the overscroll region, so 16pt of offset is ~32pt of finger — a
+// deliberate pull, but far less than a page turn.
+static const CGFloat kApolloFeedGalleryReleaseHandOffOverscroll = 16.0;
+
+// The begin-time hand-off only acts on an unambiguous velocity: below this
+// floor the hysteresis reading is jitter, and a wrong-sign blip would hand
+// the touch away and navigate — the one failure mode worse than a bounce.
+// Marginal drags simply fall through to the release-past-edge path, which
+// decides from release position and needs no velocity at all.
+static const CGFloat kApolloFeedGalleryHandOffMinimumVelocity = 150.0;
+
+// ApolloNavigationController keeps the pages popped by swipe-back in a Swift
+// [UIViewController] ivar named poppedViewControllers; its goForward command
+// and right-side navigation pan re-push from it (RE: the class's ivar list and
+// method list). A Swift array ivar is a single word holding the storage
+// object, which on Darwin is an NSArray subclass, so counting it through the
+// runtime is legitimate. Every failure path (different nav class, missing
+// ivar on a future Apollo, nil/empty array) returns NO, which keeps the
+// carousel's native rubber-band.
+static BOOL ApolloFeedGalleryCanGoForward(UINavigationController *navigationController) {
+    id popped = ApolloFeedGalleryObjectIvar(navigationController, "poppedViewControllers");
+    if (![popped respondsToSelector:@selector(count)]) return NO;
+    @try {
+        return ((NSUInteger (*)(id, SEL))objc_msgSend)(popped, @selector(count)) > 0;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+}
+
 @interface ApolloFeedGalleryScrollView : UIScrollView
 @end
 
@@ -270,6 +343,60 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     // carousel drag. There is no reorder interaction to preserve here.
     (void)view;
     return YES;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer == self.panGestureRecognizer && sFeedGalleryEdgeSwipeNav) {
+        // The carousel owns a horizontal drag only while it still has a page
+        // to show in that direction. At the first/last page the drag could
+        // only rubber-band, so decline it: the failure requirements wired in
+        // didMoveToWindow then release Apollo's own back/forward navigation
+        // pans (ApolloNavigationController's left/right pan recognizers) to
+        // take over the same touch. Only decline when that navigation can
+        // actually act; otherwise keep the native bounce.
+        //
+        // Direction comes from the velocity sign (translationInView: is still
+        // zero at pan-hysteresis time), taken only above a magnitude floor:
+        // hysteresis velocity can read as zero or momentarily backwards for
+        // real fingers, and a false hand-off navigates the user away, which
+        // is worse than a bounce. Anything below the floor falls through to
+        // the deterministic release-past-edge path in the scroll delegate.
+        UIPanGestureRecognizer *pan = (UIPanGestureRecognizer *)gestureRecognizer;
+        CGFloat velocityX = [pan velocityInView:self].x;
+        CGFloat maximumOffset = self.contentSize.width - CGRectGetWidth(self.bounds);
+        if (maximumOffset > 0.5 &&
+            fabs(velocityX) >= kApolloFeedGalleryHandOffMinimumVelocity) {
+            // Pages are laid out left-to-right in every locale (see
+            // layoutSubviews), so the first image sits at offset 0 even under
+            // RTL. Only the NAVIGATION meaning of pulling past an edge
+            // mirrors with the layout direction, not the edges themselves.
+            BOOL atFirstPage = self.contentOffset.x <= 0.5;
+            BOOL atLastPage = self.contentOffset.x >= maximumOffset - 0.5;
+            BOOL pullingPastLeading = atFirstPage && velocityX > 0.0;
+            BOOL pullingPastTrailing = atLastPage && velocityX < 0.0;
+            BOOL rightToLeft = self.effectiveUserInterfaceLayoutDirection ==
+                UIUserInterfaceLayoutDirectionRightToLeft;
+            BOOL wantsBack = rightToLeft ? pullingPastTrailing : pullingPastLeading;
+            BOOL wantsForward = rightToLeft ? pullingPastLeading : pullingPastTrailing;
+            if (wantsBack || wantsForward) {
+                UINavigationController *navigationController =
+                    ApolloFeedGalleryAncestorNavigationController(self);
+                // Never hand off while a transition is already running (the
+                // carousel can be asked again mid-pop as its screen animates
+                // away; a second decline would double-pop).
+                BOOL navigationCanAct = navigationController.transitionCoordinator == nil &&
+                    (wantsBack
+                    ? navigationController.viewControllers.count > 1
+                    : ApolloFeedGalleryCanGoForward(navigationController));
+                if (navigationCanAct) {
+                    ApolloLog(@"[FeedGallery] handing %@ swipe to navigation (offset=%.0f)",
+                              wantsBack ? @"back" : @"forward", self.contentOffset.x);
+                    return NO;
+                }
+            }
+        }
+    }
+    return [super gestureRecognizerShouldBegin:gestureRecognizer];
 }
 
 - (void)didMoveToWindow {
@@ -329,6 +456,8 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
 @property (nonatomic) BOOL contentIsObscured;
 @property (nonatomic) CGSize lastLayoutSize;
 @property (nonatomic) BOOL needsPageGeometry;
+@property (nonatomic) BOOL dragBeganAtLeadingEdge;
+@property (nonatomic) BOOL dragBeganAtTrailingEdge;
 - (void)configureWithItems:(NSArray<NSDictionary *> *)items
                  albumNode:(id)albumNode
                       nsfw:(BOOL)nsfw
@@ -342,7 +471,9 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     if (!self) return nil;
 
     self.clipsToBounds = YES;
-    self.backgroundColor = UIColor.blackColor;
+    // Same surface as the pages so horizontal bounce past the first/last page
+    // stays seamless.
+    self.backgroundColor = ApolloFeedGalleryPageSurfaceColor();
     self.accessibilityIdentifier = @"ApolloFeedGalleryCarousel";
     self.shouldGroupAccessibilityChildren = YES;
 
@@ -368,6 +499,8 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
 
     _pageControl = [[UIPageControl alloc] initWithFrame:CGRectZero];
     if (@available(iOS 14.0, *)) _pageControl.backgroundStyle = UIPageControlBackgroundStyleMinimal;
+    _pageControl.currentPageIndicatorTintColor = ApolloFeedGalleryPageIndicatorColor(YES);
+    _pageControl.pageIndicatorTintColor = ApolloFeedGalleryPageIndicatorColor(NO);
     [_pageControl addTarget:self action:@selector(apollo_pageControlChanged:)
            forControlEvents:UIControlEventValueChanged];
     [self addSubview:_pageControl];
@@ -446,8 +579,8 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
 
         for (NSUInteger index = 0; index < items.count; index++) {
             UIImageView *imageView = [[UIImageView alloc] initWithFrame:CGRectZero];
-            imageView.backgroundColor = [UIColor colorWithWhite:0.10 alpha:1.0];
-            imageView.contentMode = UIViewContentModeScaleAspectFill;
+            imageView.backgroundColor = ApolloFeedGalleryPageSurfaceColor();
+            imageView.contentMode = UIViewContentModeScaleAspectFit;
             imageView.clipsToBounds = YES;
             imageView.isAccessibilityElement = YES;
             imageView.accessibilityLabel = [NSString stringWithFormat:@"Gallery image %lu of %lu",
@@ -544,6 +677,22 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     ApolloLog(@"[FeedGallery] obscured gallery revealed by user");
 }
 
+// Where the page's image actually renders under aspect-fit. The zoom
+// transition and viewer placeholder use the sender view's frame as their
+// origin; handing them the full page bounds would zoom out of the letterbox
+// bars on off-aspect pages.
+- (CGRect)apollo_fittedImageRectForPage:(UIImageView *)pageView {
+    CGRect bounds = pageView.bounds;
+    CGSize imageSize = pageView.image.size;
+    if (imageSize.width <= 0.0 || imageSize.height <= 0.0 || CGRectIsEmpty(bounds)) return bounds;
+    CGFloat scale = MIN(CGRectGetWidth(bounds) / imageSize.width,
+                        CGRectGetHeight(bounds) / imageSize.height);
+    CGSize fitted = CGSizeMake(imageSize.width * scale, imageSize.height * scale);
+    return CGRectMake(CGRectGetMidX(bounds) - fitted.width / 2.0,
+                      CGRectGetMidY(bounds) - fitted.height / 2.0,
+                      fitted.width, fitted.height);
+}
+
 - (void)apollo_pageTapped:(UITapGestureRecognizer *)recognizer {
     if (recognizer.state != UIGestureRecognizerStateEnded || self.contentIsObscured) return;
     NSInteger index = self.currentIndex;
@@ -578,7 +727,8 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     UIView *senderView = [senderNode respondsToSelector:@selector(view)]
         ? ((UIView *(*)(id, SEL))objc_msgSend)(senderNode, @selector(view)) : nil;
     if (senderView.superview && pageView.window) {
-        senderView.frame = [senderView.superview convertRect:pageView.bounds fromView:pageView];
+        senderView.frame = [senderView.superview convertRect:[self apollo_fittedImageRectForPage:pageView]
+                                                    fromView:pageView];
     }
 
     // Pages >= 3 have no matching native sender; seed the pager's index ivar
@@ -685,6 +835,14 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     if (!scrollView.isDecelerating) [self apollo_loadNearIndex:index];
 }
 
+- (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
+    if (scrollView != self.scrollView) return;
+    CGFloat maximumOffset = scrollView.contentSize.width - CGRectGetWidth(scrollView.bounds);
+    self.dragBeganAtLeadingEdge = maximumOffset > 0.5 && scrollView.contentOffset.x <= 0.5;
+    self.dragBeganAtTrailingEdge = maximumOffset > 0.5 &&
+        scrollView.contentOffset.x >= maximumOffset - 0.5;
+}
+
 - (void)scrollViewWillEndDragging:(UIScrollView *)scrollView
                      withVelocity:(CGPoint)velocity
               targetContentOffset:(inout CGPoint *)targetContentOffset {
@@ -694,8 +852,51 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     [self apollo_loadNearIndex:[self apollo_clampIndex:(NSInteger)llround(targetContentOffset->x / width)]];
 }
 
+// Deterministic companion to the begin-time handoff above: when that decline
+// misses (a real finger's velocity at pan-hysteresis can read as zero or
+// momentarily backwards, so the carousel takes the drag and rubber-bands),
+// releasing while still pulled past the first/last page commits to the same
+// navigation. Release-time state is unambiguous — no velocity guessing.
+- (void)apollo_navigateIfReleasedPastEdge:(UIScrollView *)scrollView {
+    if (!sFeedGalleryEdgeSwipeNav) return;
+    if (!self.dragBeganAtLeadingEdge && !self.dragBeganAtTrailingEdge) return;
+    CGFloat maximumOffset = scrollView.contentSize.width - CGRectGetWidth(scrollView.bounds);
+    if (maximumOffset <= 0.5) return;
+    CGFloat offset = scrollView.contentOffset.x;
+    BOOL pastLeading = self.dragBeganAtLeadingEdge &&
+        offset < -kApolloFeedGalleryReleaseHandOffOverscroll;
+    BOOL pastTrailing = self.dragBeganAtTrailingEdge &&
+        offset > maximumOffset + kApolloFeedGalleryReleaseHandOffOverscroll;
+    if (!pastLeading && !pastTrailing) return;
+
+    BOOL rightToLeft = self.effectiveUserInterfaceLayoutDirection ==
+        UIUserInterfaceLayoutDirectionRightToLeft;
+    BOOL wantsBack = rightToLeft ? pastTrailing : pastLeading;
+    UINavigationController *navigationController =
+        ApolloFeedGalleryAncestorNavigationController(self);
+    // A transition already in flight means an earlier gesture won this
+    // navigation; firing again would double-pop.
+    if (navigationController.transitionCoordinator) return;
+    if (wantsBack) {
+        if (navigationController.viewControllers.count <= 1) return;
+        ApolloLog(@"[FeedGallery] released past edge; navigating back (overscroll=%.0f)",
+                  pastLeading ? -offset : offset - maximumOffset);
+        [navigationController popViewControllerAnimated:YES];
+    } else {
+        if (!ApolloFeedGalleryCanGoForward(navigationController)) return;
+        if (![navigationController respondsToSelector:@selector(goForward)]) return;
+        ApolloLog(@"[FeedGallery] released past edge; navigating forward (overscroll=%.0f)",
+                  pastLeading ? -offset : offset - maximumOffset);
+        ((void (*)(id, SEL))objc_msgSend)(navigationController, @selector(goForward));
+    }
+}
+
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
-    if (scrollView == self.scrollView && !decelerate) [self apollo_finishPaging];
+    if (scrollView != self.scrollView) return;
+    [self apollo_navigateIfReleasedPastEdge:scrollView];
+    self.dragBeganAtLeadingEdge = NO;
+    self.dragBeganAtTrailingEdge = NO;
+    if (!decelerate) [self apollo_finishPaging];
 }
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {

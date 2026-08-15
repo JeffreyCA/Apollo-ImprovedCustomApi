@@ -1,6 +1,10 @@
 #import "ApolloThemeStore.h"
 #import "ApolloThemeCompiler.h"
 #import "ApolloCommon.h"
+#import "crash/ApolloCrashManager.h"
+
+#include <stdlib.h>
+#include <string.h>
 
 // ---------------------------------------------------------------------------
 // Defaults access
@@ -840,36 +844,103 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
 static NSString * const kLaunchStartedKey = @"ApolloReborn.themeLaunchAttemptStartedAt";
 static NSString * const kLaunchDoneKey    = @"ApolloReborn.themeLaunchAttemptCompleted";
 static NSString * const kCrashCountKey    = @"ApolloReborn.themeRecentCrashCount";
+// Sub-markers distinguishing real crashes from benign process deaths (#916:
+// a force-quit or discarded iOS prewarm inside the 5s stable window used to
+// read as a theme crash and silently disable the active theme).
+static NSString * const kLaunchRunLoopKey = @"ApolloReborn.themeLaunchRunLoopStarted";
+static NSString * const kLaunchPrewarmKey = @"ApolloReborn.themeLaunchPrewarmed";
+
+// Consecutive armed launches that may die with no crash on record before the
+// switch trips anyway. Covers kills KSCrash cannot see (jetsam, watchdog) and
+// capture-disabled users, so an undetectable crash loop still cannot brick the
+// app — while a stray force-quit no longer costs the user their theme.
+static const NSInteger kUnexplainedDeathTripCount = 3;
 
 - (void)beginLaunchAttempt {
     NSUserDefaults *g = GroupDefaults();
     BOOL themeActive = self.customThemeEnabled;
-    // If the previous launch armed the marker (theme was active) but never
-    // reached the stable point, it almost certainly crashed during/after theme
-    // activation. Trip the kill switch on the FIRST such launch — a bad theme
-    // must never be able to brick the app.
     BOOL prevCompleted = [g boolForKey:kLaunchDoneKey];
     BOOL hadStart = [g objectForKey:kLaunchStartedKey] != nil;
     if (hadStart && !prevCompleted) {
-        NSInteger count = [g integerForKey:kCrashCountKey] + 1;
-        [g setInteger:count forKey:kCrashCountKey];
-        ApolloLog(@"ThemeStore: previous theme launch did NOT complete (crashCount=%ld) — tripping kill switch", (long)count);
-        [g setBool:YES forKey:kApolloRebornThemeRuntimeDisabledKey];
-        // Leave the selection pointer intact. The crash flag alone gates the
-        // runtime so recovery UI can show and re-enable the last active theme.
-        themeActive = NO;
+        // The previous launch armed the marker (theme active) but never reached
+        // the stable point. That alone is NOT proof of a theme crash: a user
+        // force-quit, a prewarmed process iOS discarded, and jetsam all look
+        // identical from here (#916). Corroborate before tripping.
+        //
+        // ORDERING DEPENDENCY: crashedLastLaunch is only meaningful if the
+        // crash recorder is already installed, which happens in Tweak.xm's
+        // %ctor — and that runs before this one ONLY because Tweak.xm precedes
+        // ApolloThemeRuntime.xm in the Makefile's ApolloReborn_FILES (dyld
+        // fires constructors in link order). Reordering that list would
+        // silently degrade real theme crashes from first-strike to 3-strike
+        // detection; the recorder-down log below is the tripwire for that.
+        ApolloCrashManager *recorder = [ApolloCrashManager sharedManager];
+        BOOL recorderUp = recorder.installed;
+        BOOL crashed = recorder.crashedLastLaunch;
+        BOOL prevRanRunLoop = [g boolForKey:kLaunchRunLoopKey];
+        BOOL prevPrewarmed = [g boolForKey:kLaunchPrewarmKey];
+        if (crashed) {
+            // KSCrash recorded a genuine crash, and that session died inside
+            // the theme launch window — the case this switch exists for. Trip
+            // on the first strike: a bad theme must never brick the app.
+            ApolloLog(@"ThemeStore: previous theme launch CRASHED before the stable point — tripping kill switch");
+            [g setBool:YES forKey:kApolloRebornThemeRuntimeDisabledKey];
+            themeActive = NO;
+        } else if (!prevRanRunLoop && prevPrewarmed) {
+            // iOS prewarmed the app (ctor ran, marker armed) and killed the
+            // process before the main run loop ever turned. The user never saw
+            // the app; nothing can be inferred about the theme.
+            ApolloLog(@"ThemeStore: previous theme launch was a discarded prewarm — ignoring");
+        } else {
+            // Died inside the stable window with no crash recorded: most
+            // likely a force-quit, else a kill KSCrash cannot see. Tolerate a
+            // few, but a streak with no stable launch in between still trips.
+            NSInteger count = [g integerForKey:kCrashCountKey] + 1;
+            [g setInteger:count forKey:kCrashCountKey];
+            // Say WHY there was no crash on record: "recorder not installed"
+            // here means capture is user-disabled — or the ctor ordering above
+            // broke, which this line is the only visible symptom of.
+            const char *why = recorderUp ? "no crash was recorded"
+                                         : "crash recorder not installed (capture disabled, or theme ctor ran first)";
+            if (count >= kUnexplainedDeathTripCount) {
+                ApolloLog(@"ThemeStore: %ld consecutive theme launches died before the stable point (%s) — tripping kill switch",
+                          (long)count, why);
+                [g setBool:YES forKey:kApolloRebornThemeRuntimeDisabledKey];
+                themeActive = NO;
+            } else {
+                ApolloLog(@"ThemeStore: previous theme launch did not complete but %s (strike %ld/%ld) — keeping theme enabled",
+                          why, (long)count, (long)kUnexplainedDeathTripCount);
+            }
+        }
+        // On trip, leave the selection pointer intact. The crash flag alone
+        // gates the runtime so recovery UI can re-enable the last active theme.
     }
     // Only arm the marker when a theme is actually active this launch, so normal
     // (theme-off) launches can never trip it, and a clean disabled state resets.
     if (themeActive) {
+        const char *prewarm = getenv("ActivePrewarm");
         [g setObject:@(NowTS()) forKey:kLaunchStartedKey];
         [g setBool:NO forKey:kLaunchDoneKey];
+        [g setBool:NO forKey:kLaunchRunLoopKey];
+        [g setBool:(prewarm != NULL && strcmp(prewarm, "1") == 0) forKey:kLaunchPrewarmKey];
     } else {
         [g removeObjectForKey:kLaunchStartedKey];
         [g setBool:YES forKey:kLaunchDoneKey];
     }
     [g synchronize]; // CRITICAL: flush now so a crash in ms still leaves the marker on disk
     ApolloLog(@"ThemeStore: beginLaunchAttempt themeActive=%d (marker armed=%d)", themeActive, themeActive);
+}
+
+- (void)markRunLoopStarted {
+    // First main-queue drain: the process is past dyld/ctor and genuinely
+    // launching. A prewarmed process iOS discards never gets here, which is
+    // what lets beginLaunchAttempt tell those deaths apart.
+    NSUserDefaults *g = GroupDefaults();
+    // Only pay the synchronous flush when this launch actually armed the
+    // marker — on theme-off launches the key is never read.
+    if ([g objectForKey:kLaunchStartedKey] == nil || [g boolForKey:kLaunchDoneKey]) return;
+    [g setBool:YES forKey:kLaunchRunLoopKey];
+    [g synchronize];
 }
 
 - (void)markLaunchStable {

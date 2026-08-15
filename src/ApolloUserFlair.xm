@@ -811,6 +811,13 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
 @end
 
 @implementation ApolloUserFlairWebEmojiFetch
+// Last-resort insurance: Create attaches the web view, so the window (not this
+// object) holds the strong reference — dropping the fetch without Destroy would
+// orphan an attached web view behind the app. Every normal path already goes
+// through Destroy; this makes "no orphaned attached web view" structural.
+- (void)dealloc {
+    ApolloScrapeWebViewDestroy(_web);
+}
 - (instancetype)initWithSubreddit:(NSString *)subreddit fallback:(NSArray *)fallback {
     if ((self = [super init])) {
         _subreddit = [subreddit copy];
@@ -947,8 +954,7 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
               self.subreddit, (long)status, (unsigned long)responseLength,
               (unsigned long)result.count, validResponse ? @"no" : @"yes", reason ?: @"none");
 
-    self.web.navigationDelegate = nil;
-    [self.web stopLoading];
+    ApolloScrapeWebViewDestroy(self.web);
     self.web = nil;
     NSMutableDictionary *fetches = ApolloUserFlairWebEmojiFetches();
     if (fetches[self.cacheKey] == self) [fetches removeObjectForKey:self.cacheKey];

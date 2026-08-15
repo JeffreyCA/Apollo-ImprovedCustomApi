@@ -501,6 +501,13 @@ static NSString *const UDKeyFeedGalleryCarousel = @"FeedGalleryCarousel";
 // already-measured feed cells swap presentation live; the carousel's
 // layoutSpecThatFits reads the flag on each measurement.
 static NSString *const ApolloFeedGalleryCarouselChangedNotification = @"ApolloFeedGalleryCarouselChangedNotification";
+// When the feed gallery carousel sits on its first (or last) image, continuing
+// to swipe toward the edge hands the drag to Apollo's swipe-back (or
+// swipe-forward) page navigation instead of rubber-banding, but only when a
+// previous (or forward) page actually exists. Default YES. Read live at
+// gesture time, so no change notification is needed (same reasoning as
+// UDKeySwipeUpForComments below). See ApolloFeedGalleryCarousel.xm.
+static NSString *const UDKeyFeedGalleryEdgeSwipeNav = @"FeedGalleryEdgeSwipeNavigation";
 // In the fullscreen viewer for post-backed images, galleries, GIFs, and video,
 // an upward vertical flick or comments-button tap opens a media-owned comments
 // pane. The normal downward flick still dismisses when the pane is closed.
@@ -512,6 +519,17 @@ static NSString *const UDKeySwipeUpForComments = @"SwipeUpForComments";
 // Sports-clip host links (streamff/streamin/streamain/…) play inline as native
 // video via the Streamable pipeline (off = link-preview card, stock behavior).
 static NSString *const UDKeySportsClipsInlineVideo = @"SportsClipsInlineVideo";
+
+// Live interactive Devvit ("Developer Platform") posts — match threads, games
+// — render their real web widget inline (comments header + large-mode feed
+// cards) instead of the "not supported on old Reddit" fallback text.
+// Default OFF (opt-in): each widget is a full embedded shreddit page, so the
+// cost is real and users choose to pay it.
+static NSString *const UDKeyDevvitInteractivePosts = @"DevvitInteractivePosts";
+// Sub-toggle: also render the widget in large-mode FEED cards (the costly
+// surface — comments is one widget at a time by construction). Default ON;
+// only consulted while DevvitInteractivePosts is on.
+static NSString *const UDKeyDevvitFeedWidgets = @"DevvitFeedWidgets";
 
 // Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
 static NSString *const UDKeyLinkPreviewBodyMode = @"LinkPreviewBodyMode";
