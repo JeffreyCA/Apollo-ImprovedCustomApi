@@ -6,6 +6,7 @@
 #import <stdlib.h>
 #import "ApolloCommon.h"
 #import "ApolloBarkNotifications.h"
+#import "ApolloLiquidGlassIconIDs.h"
 #import "ApolloThemeRuntime.h"
 #import "settings/ApolloSettingsTableViewController.h"
 
@@ -52,6 +53,7 @@ static NSString *const kLGAppearancePreferenceDefaultsKey = @"ApolloLGPreferredI
 static NSString *const kLGActiveStandardPackDefaultsKey = @"ApolloLGActiveStandardPack";
 static NSString *const kLGActiveStandardPackRowDefaultsKey = @"ApolloLGActiveStandardPackRow";
 static NSString *const kLGConfirmedDefaultIconMarker = @"__apollo_confirmed_default";
+static NSString *const kLGLegacyClassicsMigrationDefaultsKey = @"ApolloLGLegacyClassicsMigrationV1";
 static NSString *const kLGDailyFeaturedDayDefaultsKey = @"ApolloLGDailyFeaturedDay";
 static NSString *const kLGDailyFeaturedIDsDefaultsKey = @"ApolloLGDailyFeaturedIDs";
 static const NSInteger kLGAppearanceBarButtonTag = 0x4C474150; // "LGAP"
@@ -446,6 +448,16 @@ static NSString *LGAlternateIconNameForMode(NSString *iconID, LGIconAppearanceMo
     return iconID;
 }
 
+// Translate an old Classics alternate-icon name while retaining its static
+// Light/Dark suffix. Returns nil for IDs outside the renamed Classics group.
+static NSString *LGMigratedClassicsAlternateIconName(NSString *name) {
+    if (!name.length) return nil;
+    NSString *base = LGBaseIconIDFromAlternateIconName(name);
+    NSString *migratedBase = ApolloLGMigratedClassicsIconID(base);
+    if (!migratedBase) return nil;
+    return LGAlternateIconNameForMode(migratedBase, LGAppearanceModeFromAlternateIconName(name));
+}
+
 static void LGPersistActiveIconID(NSString *iconID) {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     if (iconID.length) {
@@ -502,39 +514,10 @@ static NSString *LGActiveAlternateIconName(void) {
     }
     NSString *active = stored.length ? stored : system;
 
-    static NSSet<NSString *> *legacyClassics;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        legacyClassics = [NSSet setWithArray:@[
-            @"morty", @"duck", @"antenna", @"spaceship", @"burnt-orange",
-            @"green", @"dark", @"orange", @"purple", @"white", @"pink",
-            @"gold", @"crimson", @"blueberry", @"calico", @"castro", @"teal",
-            @"brown", @"sunset", @"gravel-juice", @"gray", @"chosen-one",
-            @"enter-the-state", @"rule-of-two", @"galactic-zoomer", @"six-colors",
-            @"stonewall", @"trans", @"pride", @"clearly-combustion", @"dino-spoon",
-            @"apollos6", @"atp", @"canada", @"ernest", @"slothkun", @"dave2d",
-            @"red-black-white", @"camera-pool", @"peachy", @"sandals", @"andru",
-            @"rene", @"tld", @"snazzy", @"eap",
-        ]];
-    });
-    NSString *base = LGBaseIconIDFromAlternateIconName(active);
-    if ([legacyClassics containsObject:base]) {
-        NSString *migratedBase = [@"LG-" stringByAppendingString:base];
-        LGIconAppearanceMode mode = LGAppearanceModeFromAlternateIconName(active);
-        active = LGAlternateIconNameForMode(migratedBase, mode);
-    }
-
-    // Persist only when the saved fallback itself still uses a legacy ID.
-    // Some iOS builds may continue reporting an old system value; translating
-    // that for display must not rewrite an already-migrated preference.
-    NSString *storedBase = LGBaseIconIDFromAlternateIconName(stored);
-    if ([legacyClassics containsObject:storedBase]) {
-        NSString *migratedStoredBase = [@"LG-" stringByAppendingString:storedBase];
-        LGIconAppearanceMode storedMode = LGAppearanceModeFromAlternateIconName(stored);
-        NSString *migratedStored = LGAlternateIconNameForMode(migratedStoredBase, storedMode);
-        [NSUserDefaults.standardUserDefaults setObject:migratedStored forKey:kLGActiveIconDefaultsKey];
-    }
-    return active;
+    // Translate for display immediately, but leave persistence to the
+    // launch-time migration. That migration applies the new catalog key to
+    // iOS first and only saves it after the setter confirms success.
+    return LGMigratedClassicsAlternateIconName(active) ?: active;
 }
 
 static NSString *LGActiveIconID(void) {
@@ -2228,6 +2211,83 @@ static void LGSetAlternateIconName(NSString *name, void (^completion)(NSError *e
     [application setAlternateIconName:name completionHandler:completion];
 }
 
+// Finish the one-time Classics migration only after the namespaced catalog
+// key is known to be active. This keeps the picker preference and Home Screen
+// icon from disagreeing when the setter fails.
+static void LGFinishLegacyClassicsMigration(NSString *alternateName) {
+    LGPersistActiveIconID(alternateName);
+    LGPersistActiveStandardPack(LGStandardPackCount);
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setBool:YES forKey:kLGLegacyClassicsMigrationDefaultsKey];
+    [defaults synchronize];
+
+    BOOL barkChanged = ApolloBarkNoteSelectedIconName(alternateName);
+    if (barkChanged && ApolloBarkModeActive()) ApolloBarkSyncBackendDeviceTransport();
+    [[NSNotificationCenter defaultCenter] postNotificationName:kLGChangedIconNotification object:nil];
+}
+
+// Older catalogs registered Classics without the LG- namespace. Merely
+// rewriting ApolloLGActiveIconID is insufficient: after that old key vanishes,
+// iOS can fall back to the primary icon while the picker shows the migrated
+// checkmark. Reapply once on the first active launch, silently, and retry on a
+// later process launch if the setter reports an error.
+static void LGMigrateLegacyClassicsSelectionIfNeeded(void) {
+    static BOOL attemptedThisProcess = NO;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (attemptedThisProcess) return;
+
+    // A confirmed Standard-pack choice is authoritative. Several Standard
+    // IDs overlap the old Classics names and must never be rewritten as LG.
+    if ([defaults objectForKey:kLGActiveStandardPackDefaultsKey]) {
+        [defaults setBool:YES forKey:kLGLegacyClassicsMigrationDefaultsKey];
+        return;
+    }
+
+    NSString *stored = [defaults stringForKey:kLGActiveIconDefaultsKey];
+    NSString *system = UIApplication.sharedApplication.alternateIconName;
+    NSString *source = stored.length ? stored : system;
+    NSString *target = LGMigratedClassicsAlternateIconName(source);
+    BOOL migrationCompleted = [defaults boolForKey:kLGLegacyClassicsMigrationDefaultsKey];
+
+    // A backup restore or temporary downgrade can reintroduce a genuinely old
+    // ID after the marker was set. Always repair that explicit legacy state;
+    // otherwise a completed migration needs no further system reconciliation.
+    if (migrationCompleted && !target.length) return;
+
+    // An earlier build of this branch may already have rewritten the saved
+    // preference without applying it. Recognize that state and reconcile it
+    // through the same one-time path.
+    if (!target.length) {
+        NSString *base = LGBaseIconIDFromAlternateIconName(source);
+        if (ApolloLGLegacyClassicsIconID(base)) target = source;
+    }
+
+    if (!target.length) {
+        [defaults setBool:YES forKey:kLGLegacyClassicsMigrationDefaultsKey];
+        return;
+    }
+    if (![UIApplication.sharedApplication supportsAlternateIcons]) return;
+
+    attemptedThisProcess = YES;
+    if ([system isEqualToString:target]) {
+        ApolloLog(@"[LGIconPicker] Classics migration already applied: %@", target);
+        LGFinishLegacyClassicsMigration(target);
+        return;
+    }
+
+    ApolloLog(@"[LGIconPicker] migrating Classics icon %@ -> %@", source, target);
+    LGSetAlternateIconName(target, ^(NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) {
+                ApolloLog(@"[LGIconPicker] Classics migration failed; will retry next launch: %@", error);
+                return;
+            }
+            ApolloLog(@"[LGIconPicker] Classics migration applied: %@", target);
+            LGFinishLegacyClassicsMigration(target);
+        });
+    });
+}
+
 // hostView is used to find a presentation context for an error alert (works
 // for either a UITableView or UICollectionView, since both are UIViews).
 static void LGApplyAlternateIcon(UIView *hostView, NSString *iconID, void (^completion)(BOOL success)) {
@@ -3773,6 +3833,7 @@ static void LGKeepMainSettingsIconSquare(UITableViewCell *cell) {
                                                             object:nil
                                                              queue:NSOperationQueue.mainQueue
                                                         usingBlock:^(NSNotification *note) {
+            LGMigrateLegacyClassicsSelectionIfNeeded();
             NSString *system = UIApplication.sharedApplication.alternateIconName;
             NSString *persisted = [NSUserDefaults.standardUserDefaults stringForKey:kLGActiveIconDefaultsKey];
             NSString *systemDesc = system == nil ? @"(nil)" : (system.length ? system : @"(empty, non-nil)");

@@ -21,7 +21,10 @@ source "${_LG_ASSETS_MODULE_DIR}/_plist-helpers.sh"
 # them via these env vars before sourcing/calling.
 _LG_ASSETS_CAR="${LG_ASSETS_CAR:-${_LG_ASSETS_REPO_DIR}/liquid-glass/prebuilt/Assets.car}"
 _LG_ICONS_REGISTRY="${LG_ICONS_REGISTRY:-${_LG_ASSETS_REPO_DIR}/liquid-glass/icons.json}"
-_LG_ICON_NAME="AppIcon"
+# The primary icon is selected by metadata, not by requiring its asset to be
+# named AppIcon. Keep historical alternate-icon IDs stable while promoting
+# the Apollo design to the default shown when no alternate icon is selected.
+_LG_ICON_NAME="apollo"
 _LG_IPAD_ICON_FILES=("AppIcon60x60" "AppIcon76x76")
 _LG_IPHONE_ICON_FILES=("AppIcon60x60")
 

@@ -19,8 +19,8 @@ typedef struct {
 } LGIconGroupDef;
 
 static const LGIconRowEntry kLGGroupEntries_original[] = {
-    { "AppIcon", "Apollo", "IllIIllIllIllII" },
-    { "LG-og", "Apollo Glass", "IllIIllIllIllII" },
+    { "apollo", "Apollo", "IllIIllIllIllII" },
+    { "AppIcon", "Apollo Glass", "IllIIllIllIllII" },
     { "halo", "Halo", "IllIIllIllIllII" },
     { "halo-glass", "Halo Glass", "IllIIllIllIllII" },
     { "apollo-classic", "Apollo Classic", "IllIIllIllIllII" },
@@ -109,7 +109,7 @@ static const LGIconRowEntry kLGGroupEntries_concepts[] = {
 static const char *const kLGGroupCover_original[] = {
     "apollo-classic",
     "halo-glass",
-    "LG-og",
+    "AppIcon",
 };
 
 static const char *const kLGGroupCover_classics[] = {

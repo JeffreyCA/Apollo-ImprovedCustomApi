@@ -3,7 +3,7 @@
   "groups": [
     {
       "id": "original", "title": "Original",
-      "coverIconIDs": ["apollo-classic", "halo-glass", "LG-og"],
+      "coverIconIDs": ["apollo-classic", "halo-glass", "AppIcon"],
       "description": "The original Apollo icon in Liquid Glass, crafted by the community."
     },
     {
@@ -23,8 +23,8 @@
     }
   ],
   "icons": [
-    { "id": "AppIcon",                  "displayName": "Apollo",              "designer": "IllIIllIllIllII", "group": "original" },
-    { "id": "LG-og",                    "displayName": "Apollo Glass",        "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "apollo",                   "displayName": "Apollo",              "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "AppIcon",                  "displayName": "Apollo Glass",        "designer": "IllIIllIllIllII", "group": "original" },
     { "id": "halo",                     "displayName": "Halo",                "designer": "IllIIllIllIllII", "group": "original" },
     { "id": "halo-glass",               "displayName": "Halo Glass",          "designer": "IllIIllIllIllII", "group": "original" },
     { "id": "apollo-classic",           "displayName": "Apollo Classic",      "designer": "IllIIllIllIllII", "group": "original" },
