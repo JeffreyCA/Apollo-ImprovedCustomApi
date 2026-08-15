@@ -91,6 +91,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloGalleryViewController.m \
     $(SRC_DIR)/ApolloGalleryVideoExport.xm \
     $(SRC_DIR)/ApolloGalleryMenu.xm \
+    $(SRC_DIR)/ApolloGalleryOrientation.xm \
     $(SRC_DIR)/ApolloBannedProfile.xm \
     $(SRC_DIR)/ApolloImageUploadHost.xm \
     $(SRC_DIR)/ApolloPhotoPostComposerScrollFix.xm \
