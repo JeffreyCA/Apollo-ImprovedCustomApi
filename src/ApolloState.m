@@ -18,6 +18,7 @@ BOOL sPassiveDeletedComments = NO;
 BOOL sShowRecentlyReadThumbnails = YES;
 BOOL sFeedTextPostThumbnails = YES;
 BOOL sFeedGalleryCarousel = YES;
+BOOL sFeedGalleryEdgeSwipeNav = YES;
 BOOL sSwipeUpForComments = YES;
 BOOL sDevvitInteractivePosts = NO;
 BOOL sDevvitFeedWidgets = YES;
