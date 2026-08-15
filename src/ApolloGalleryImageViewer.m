@@ -59,6 +59,11 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 
 @interface ApolloGalleryViewerCell : UICollectionViewCell <UIScrollViewDelegate>
 @property (nonatomic, strong) UIScrollView *zoomView;
+// The zoomable content: the picture AND (for playables) the player layer both
+// live on this one container, so pinch/double-tap zoom treats a video exactly
+// like a photo — Apollo's own viewer does the same with its
+// playerLayerContainerView inside the zoom scroll view.
+@property (nonatomic, strong) UIView *mediaContainerView;
 @property (nonatomic, strong) UIImageView *imageView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong, nullable) ApolloGalleryImageRequest *request;
@@ -110,10 +115,15 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
         }
         [self.contentView addSubview:_zoomView];
 
-        _imageView = [[UIImageView alloc] initWithFrame:_zoomView.bounds];
+        _mediaContainerView = [[UIView alloc] initWithFrame:_zoomView.bounds];
+        _mediaContainerView.backgroundColor = UIColor.blackColor;
+        [_zoomView addSubview:_mediaContainerView];
+
+        _imageView = [[UIImageView alloc] initWithFrame:_mediaContainerView.bounds];
+        _imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         _imageView.contentMode = UIViewContentModeScaleAspectFit;
         _imageView.backgroundColor = UIColor.blackColor;
-        [_zoomView addSubview:_imageView];
+        [_mediaContainerView addSubview:_imageView];
 
         _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
         _spinner.color = UIColor.whiteColor;
@@ -160,20 +170,12 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     CGRect bounds = self.contentView.bounds;
     BOOL boundsChanged = !CGSizeEqualToSize(bounds.size, self.zoomGeometrySize);
     self.zoomView.frame = bounds;
-    // The player sits above the poster and fills the page; AVPlayerLayer's own
-    // aspect-fit gravity handles letterboxing, so it doesn't ride the zoom view.
-    if (self.playerLayer) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        self.playerLayer.frame = bounds;
-        [CATransaction commit];
-    }
     self.spinner.center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
     // A bounds change (rotation, first layout) invalidates the zoom geometry.
     if (boundsChanged) [self apollo_resetZoomGeometry];
 }
 
-// The zoom view's content is the PICTURE, not the page. Sizing the image view
+// The zoom view's content is the PICTURE, not the page. Sizing the container
 // to the whole page instead would make the letterbox bars zoomable too, so a
 // zoomed-in drag could pan off the photo into empty black.
 - (void)apollo_resetZoomGeometry {
@@ -183,19 +185,27 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     self.zoomGeometrySize = bounds;
 
     self.zoomView.zoomScale = 1.0;
-    if (!image || image.size.width <= 0.0 || image.size.height <= 0.0) {
-        self.imageView.frame = CGRectMake(0.0, 0.0, bounds.width, bounds.height);
-        self.zoomView.contentSize = bounds;
-        self.zoomView.contentInset = UIEdgeInsetsZero;
-        return;
+    CGSize fitted = bounds;
+    if (image && image.size.width > 0.0 && image.size.height > 0.0) {
+        CGFloat scale = MIN(bounds.width / image.size.width, bounds.height / image.size.height);
+        fitted = CGSizeMake(floor(image.size.width * scale), floor(image.size.height * scale));
+        self.zoomView.panGestureRecognizer.enabled = NO;
     }
-
-    CGFloat scale = MIN(bounds.width / image.size.width, bounds.height / image.size.height);
-    CGSize fitted = CGSizeMake(floor(image.size.width * scale), floor(image.size.height * scale));
-    self.imageView.frame = CGRectMake(0.0, 0.0, fitted.width, fitted.height);
+    self.mediaContainerView.frame = CGRectMake(0.0, 0.0, fitted.width, fitted.height);
     self.zoomView.contentSize = fitted;
-    self.zoomView.panGestureRecognizer.enabled = NO;
+    [self apollo_syncPlayerLayerFrame];
     [self apollo_centerContent];
+}
+
+// The player layer rides the media container (so zoom transforms carry it);
+// only genuine container-bounds changes need an explicit frame sync, and those
+// happen without animation so rotation doesn't rubber-band the video.
+- (void)apollo_syncPlayerLayerFrame {
+    if (!self.playerLayer) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.playerLayer.frame = self.mediaContainerView.bounds;
+    [CATransaction commit];
 }
 
 // Centres the picture with insets rather than by moving its frame, so the
@@ -242,8 +252,10 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 
     AVPlayerLayer *layer = [AVPlayerLayer playerLayerWithPlayer:player];
     layer.videoGravity = AVLayerVideoGravityResizeAspect;
-    layer.frame = self.contentView.bounds;
-    [self.contentView.layer addSublayer:layer];
+    // On the zoomable container, over the poster: pinching a playing video
+    // zooms it exactly like a photo.
+    layer.frame = self.mediaContainerView.bounds;
+    [self.mediaContainerView.layer addSublayer:layer];
 
     self.player = player;
     self.playerLayer = layer;
@@ -343,7 +355,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 #pragma mark UIScrollViewDelegate
 
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView {
-    return self.imageView;
+    return self.mediaContainerView;
 }
 
 - (void)scrollViewDidZoom:(UIScrollView *)scrollView {
@@ -495,6 +507,40 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 @property (nonatomic, strong) ApolloGalleryChromePillView *toastPill;
 @property (nonatomic) BOOL chromeVisible;
 
+// Video transport bar — the same control set Apollo's own VideoControlsView
+// gives a fullscreen video (play/pause, ±15s, scrubber, time labels), bound
+// to whichever page's player is current. Apollo's actual VideoControlsView
+// can't be reused here: it's a Swift view whose delegate protocol and player
+// wiring are Swift-only, so the tweak rebuilds the same controls on its own
+// chrome. Hidden on still-image pages.
+@property (nonatomic, strong) UIView *videoBarContentView;
+@property (nonatomic, strong) ApolloGalleryChromePillView *videoBarPill;
+@property (nonatomic, strong) UIButton *playPauseButton;
+@property (nonatomic, strong) UIButton *back15Button;
+@property (nonatomic, strong) UIButton *forward15Button;
+@property (nonatomic, strong) UISlider *videoSlider;
+@property (nonatomic, strong) UILabel *currentTimeLabel;
+@property (nonatomic, strong) UILabel *durationLabel;
+// The player the periodic observer is attached to. Strong on purpose: cell
+// reuse can tear the cell's player down while our token is still registered,
+// and removeTimeObserver: must be sent to the exact player that handed the
+// token out — so the bar keeps the player alive until it unbinds.
+@property (nonatomic, strong, nullable) AVPlayer *observedPlayer;
+@property (nonatomic, strong, nullable) id videoTimeObserverToken;
+// While the user is dragging the slider the periodic observer must not fight
+// the thumb (Apollo's doNotUpdateVideoPositionSlider, same idea).
+@property (nonatomic) BOOL videoScrubbing;
+@property (nonatomic) BOOL videoResumeAfterScrub;
+// Hold-and-drag scrubbing on the video itself (Apollo's MediaViewer has the
+// same gesture as scrubPanGestureRecognizer): the long-press arms on a video
+// page, and horizontal movement past a small slop turns it into a scrub. A
+// press that never moves falls through to the old actions sheet on release.
+@property (nonatomic) BOOL gestureScrubArmed;
+@property (nonatomic) BOOL gestureScrubActive;
+@property (nonatomic) CGFloat gestureScrubStartX;
+@property (nonatomic) NSTimeInterval gestureScrubStartTime;
+@property (nonatomic) BOOL gestureScrubWasPlaying;
+
 @property (nonatomic, strong) UIPanGestureRecognizer *dismissPan;
 @property (nonatomic) BOOL isDismissing;
 // Full-res look-ahead: how deep (see kApolloGalleryViewerPrefetchRadius), and
@@ -589,6 +635,14 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     }
 }
 
+- (void)dealloc {
+    // The periodic transport observer must come off the exact player that
+    // issued it before that player goes away.
+    if (_observedPlayer && _videoTimeObserverToken) {
+        [_observedPlayer removeTimeObserver:_videoTimeObserverToken];
+    }
+}
+
 - (void)didReceiveMemoryWarning {
     [super didReceiveMemoryWarning];
     // The loader is already dropping its caches; stop feeding it. Look-ahead
@@ -621,6 +675,14 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
         self.currentIndex = index;
         [self apollo_updateChromeContent];
         [self apollo_syncPlayback];
+        // That sync ran before the jumped-to page's cell existed (cells for
+        // the new offset materialize on the NEXT layout pass), so a video
+        // landing page had no player to start — the pass after the cells are
+        // real is what actually begins playback on open.
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf apollo_syncPlayback];
+        });
         [self apollo_prefetchAroundIndex:index];
     } else if (self.hasAppliedInitialIndex) {
         // Rotation moves the page boundaries; re-anchor on the current picture.
@@ -718,6 +780,59 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     self.toastPill = ApolloGalleryChromePill(self.toastLabel, 0.7);
     self.toastPill.alpha = 0.0;
     [self.view addSubview:self.toastPill];
+
+    [self apollo_buildVideoBar];
+}
+
+// One capsule holding the whole transport row; children are frame-positioned
+// from -apollo_layoutChrome like every other chrome element (see the pill
+// class comment for why Auto Layout is avoided in this subtree).
+- (void)apollo_buildVideoBar {
+    self.videoBarContentView = [[UIView alloc] initWithFrame:CGRectZero];
+
+    UIButton * (^transportButton)(NSString *, SEL) = ^UIButton *(NSString *symbol, SEL action) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.tintColor = UIColor.whiteColor;
+        [button setImage:ApolloGalleryChromeSymbol(symbol) forState:UIControlStateNormal];
+        [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+        [self.videoBarContentView addSubview:button];
+        return button;
+    };
+    self.playPauseButton = transportButton(@"pause.fill", @selector(apollo_playPauseTapped));
+    self.playPauseButton.accessibilityLabel = @"Pause";
+    self.back15Button = transportButton(@"gobackward.15", @selector(apollo_back15Tapped));
+    self.back15Button.accessibilityLabel = @"Back 15 seconds";
+    self.forward15Button = transportButton(@"goforward.15", @selector(apollo_forward15Tapped));
+    self.forward15Button.accessibilityLabel = @"Forward 15 seconds";
+
+    UILabel * (^timeLabel)(NSTextAlignment) = ^UILabel *(NSTextAlignment alignment) {
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+        label.textColor = UIColor.whiteColor;
+        label.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightSemibold];
+        label.textAlignment = alignment;
+        label.text = @"0:00";
+        [self.videoBarContentView addSubview:label];
+        return label;
+    };
+    self.currentTimeLabel = timeLabel(NSTextAlignmentRight);
+    self.durationLabel = timeLabel(NSTextAlignmentLeft);
+
+    self.videoSlider = [[UISlider alloc] initWithFrame:CGRectZero];
+    self.videoSlider.minimumValue = 0.0;
+    self.videoSlider.maximumValue = 1.0;
+    self.videoSlider.minimumTrackTintColor = UIColor.whiteColor;
+    self.videoSlider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.35];
+    [self.videoSlider addTarget:self action:@selector(apollo_sliderTouchedDown)
+               forControlEvents:UIControlEventTouchDown];
+    [self.videoSlider addTarget:self action:@selector(apollo_sliderValueChanged)
+               forControlEvents:UIControlEventValueChanged];
+    [self.videoSlider addTarget:self action:@selector(apollo_sliderTouchEnded)
+               forControlEvents:(UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel)];
+    [self.videoBarContentView addSubview:self.videoSlider];
+
+    self.videoBarPill = ApolloGalleryChromePill(self.videoBarContentView, 0.55);
+    self.videoBarPill.hidden = YES;
+    [self.view addSubview:self.videoBarPill];
 }
 
 - (void)apollo_layoutChrome {
@@ -769,9 +884,209 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     self.titleLabel.frame = CGRectMake(12.0, 10.0, titleSize.width, titleSize.height);
     self.subtitleLabel.frame = CGRectMake(12.0, 10.0 + titleSize.height + gap, subtitleSize.width, subtitleSize.height);
 
+    // Transport bar: above the info panel (or where the panel would sit when
+    // it has no text). Children are laid out here, in the pill's coordinate
+    // space, because the pill re-fits its content view to its own bounds.
+    CGFloat chromeBottom = hasText ? CGRectGetMinY(self.infoPanel.frame)
+                                   : (bounds.size.height - bottom);
+    CGFloat const videoBarHeight = 44.0;
+    self.videoBarPill.frame = CGRectMake(side, chromeBottom - 8.0 - videoBarHeight,
+                                         panelWidth, videoBarHeight);
+    {
+        CGFloat const buttonSize = 36.0;
+        CGFloat const buttonGap = 2.0;
+        CGFloat const edgePadding = 8.0;
+        CGFloat const timeWidth = 44.0;
+        CGFloat barMidY = videoBarHeight / 2.0;
+        CGFloat x = edgePadding;
+        self.playPauseButton.frame = CGRectMake(x, barMidY - buttonSize / 2.0, buttonSize, buttonSize);
+        x = CGRectGetMaxX(self.playPauseButton.frame) + buttonGap;
+        self.back15Button.frame = CGRectMake(x, barMidY - buttonSize / 2.0, buttonSize, buttonSize);
+        x = CGRectGetMaxX(self.back15Button.frame) + buttonGap;
+        self.forward15Button.frame = CGRectMake(x, barMidY - buttonSize / 2.0, buttonSize, buttonSize);
+
+        CGFloat durationRight = panelWidth - edgePadding - 4.0;
+        self.durationLabel.frame = CGRectMake(durationRight - timeWidth, barMidY - 9.0, timeWidth, 18.0);
+        CGFloat sliderLeft = CGRectGetMaxX(self.forward15Button.frame) + 6.0 + timeWidth + 6.0;
+        self.currentTimeLabel.frame = CGRectMake(CGRectGetMaxX(self.forward15Button.frame) + 6.0,
+                                                 barMidY - 9.0, timeWidth, 18.0);
+        CGFloat sliderRight = CGRectGetMinX(self.durationLabel.frame) - 6.0;
+        self.videoSlider.frame = CGRectMake(sliderLeft, barMidY - 16.0,
+                                            MAX(sliderRight - sliderLeft, 40.0), 32.0);
+    }
+
+    CGFloat toastAnchor = self.videoBarPill.hidden ? CGRectGetMinY(self.infoPanel.frame)
+                                                   : CGRectGetMinY(self.videoBarPill.frame);
     self.toastPill.frame = CGRectMake((bounds.size.width - 220.0) / 2.0,
-                                       CGRectGetMinY(self.infoPanel.frame) - 46.0,
+                                       toastAnchor - 46.0,
                                        220.0, 32.0);
+}
+
+#pragma mark Video transport
+
+static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
+    if (!isfinite(seconds) || seconds < 0.0) seconds = 0.0;
+    NSInteger total = (NSInteger)llround(seconds);
+    NSInteger hours = total / 3600;
+    NSInteger minutes = (total % 3600) / 60;
+    NSInteger secs = total % 60;
+    if (hours > 0) return [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)hours, (long)minutes, (long)secs];
+    return [NSString stringWithFormat:@"%ld:%02ld", (long)minutes, (long)secs];
+}
+
+// The duration the transport math should trust: the loaded item's own when
+// it's known, else what Reddit reported for the post.
+- (NSTimeInterval)apollo_currentVideoDuration {
+    AVPlayerItem *item = self.observedPlayer.currentItem;
+    CMTime duration = item ? item.duration : kCMTimeInvalid;
+    if (CMTIME_IS_NUMERIC(duration) && CMTimeGetSeconds(duration) > 0.0) {
+        return CMTimeGetSeconds(duration);
+    }
+    return [self apollo_currentItem].duration;
+}
+
+// Attach the transport to (exactly) the current page's player. Safe to call
+// repeatedly — rebinding to the same player is a no-op, so the sync passes
+// that fire on every page settle don't churn observers.
+- (void)apollo_bindVideoBarToPlayer:(AVPlayer *)player {
+    if (player == self.observedPlayer) {
+        [self apollo_refreshVideoBarNow];
+        return;
+    }
+    if (self.observedPlayer && self.videoTimeObserverToken) {
+        [self.observedPlayer removeTimeObserver:self.videoTimeObserverToken];
+    }
+    self.videoTimeObserverToken = nil;
+    self.observedPlayer = player;
+    self.videoScrubbing = NO;
+    if (!player) {
+        [self apollo_refreshVideoBarNow];
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    self.videoTimeObserverToken =
+        [player addPeriodicTimeObserverForInterval:CMTimeMake(1, 4)
+                                             queue:dispatch_get_main_queue()
+                                        usingBlock:^(CMTime time) {
+        [weakSelf apollo_refreshVideoBarNow];
+        (void)time;
+    }];
+    [self apollo_refreshVideoBarNow];
+}
+
+- (void)apollo_refreshVideoBarNow {
+    AVPlayer *player = self.observedPlayer;
+    ApolloGalleryItem *item = [self apollo_currentItem];
+    BOOL showsBar = item.playsAsVideo;
+    self.videoBarPill.hidden = !showsBar;
+    if (!showsBar) return;
+
+    NSTimeInterval duration = [self apollo_currentVideoDuration];
+    NSTimeInterval current = player ? CMTimeGetSeconds(player.currentTime) : 0.0;
+    if (!isfinite(current) || current < 0.0) current = 0.0;
+    if (duration > 0.0) current = MIN(current, duration);
+
+    self.currentTimeLabel.text = ApolloGalleryTimeString(current);
+    self.durationLabel.text = ApolloGalleryTimeString(duration);
+    if (!self.videoScrubbing) {
+        self.videoSlider.value = duration > 0.0 ? (float)(current / duration) : 0.0f;
+    }
+    self.videoSlider.enabled = (player != nil && duration > 0.0);
+    self.back15Button.enabled = (player != nil);
+    self.forward15Button.enabled = (player != nil);
+    self.playPauseButton.enabled = (player != nil);
+
+    BOOL playing = player && player.rate > 0.0f;
+    [self.playPauseButton setImage:ApolloGalleryChromeSymbol(playing ? @"pause.fill" : @"play.fill")
+                          forState:UIControlStateNormal];
+    self.playPauseButton.accessibilityLabel = playing ? @"Pause" : @"Play";
+}
+
+- (void)apollo_playPauseTapped {
+    AVPlayer *player = self.observedPlayer;
+    if (!player) return;
+    if (player.rate > 0.0f) {
+        [player pause];
+    } else {
+        // Play at the end restarts, like Apollo's own play button on a
+        // finished clip (the loop normally hides this, but a paused-at-end
+        // player can land here).
+        NSTimeInterval duration = [self apollo_currentVideoDuration];
+        NSTimeInterval current = CMTimeGetSeconds(player.currentTime);
+        if (duration > 0.0 && current >= duration - 0.1) {
+            [player seekToTime:kCMTimeZero];
+        }
+        [[self apollo_currentCell] playIfPossible];
+    }
+    [self apollo_refreshVideoBarNow];
+}
+
+- (void)apollo_seekRelative:(NSTimeInterval)delta {
+    AVPlayer *player = self.observedPlayer;
+    if (!player) return;
+    NSTimeInterval duration = [self apollo_currentVideoDuration];
+    NSTimeInterval target = CMTimeGetSeconds(player.currentTime) + delta;
+    if (!isfinite(target)) return;
+    target = MAX(0.0, duration > 0.0 ? MIN(target, MAX(duration - 0.1, 0.0)) : target);
+    [player seekToTime:CMTimeMakeWithSeconds(target, 600)
+       toleranceBefore:kCMTimeZero
+        toleranceAfter:kCMTimeZero
+     completionHandler:^(BOOL finished) { (void)finished; }];
+    [self apollo_refreshVideoBarNow];
+}
+
+- (void)apollo_back15Tapped { [self apollo_seekRelative:-15.0]; }
+- (void)apollo_forward15Tapped { [self apollo_seekRelative:15.0]; }
+
+- (void)apollo_sliderTouchedDown {
+    self.videoScrubbing = YES;
+    AVPlayer *player = self.observedPlayer;
+    self.videoResumeAfterScrub = (player.rate > 0.0f);
+    [player pause];
+}
+
+- (void)apollo_sliderValueChanged {
+    AVPlayer *player = self.observedPlayer;
+    NSTimeInterval duration = [self apollo_currentVideoDuration];
+    if (!player || duration <= 0.0) return;
+    NSTimeInterval target = self.videoSlider.value * duration;
+    self.currentTimeLabel.text = ApolloGalleryTimeString(target);
+    // Loose tolerance while the thumb is moving keeps the preview frame
+    // tracking the finger; the precise seek happens on touch-up.
+    [player seekToTime:CMTimeMakeWithSeconds(target, 600)
+       toleranceBefore:kCMTimePositiveInfinity
+        toleranceAfter:kCMTimePositiveInfinity
+     completionHandler:^(BOOL finished) { (void)finished; }];
+}
+
+- (void)apollo_sliderTouchEnded {
+    AVPlayer *player = self.observedPlayer;
+    NSTimeInterval duration = [self apollo_currentVideoDuration];
+    if (player && duration > 0.0) {
+        NSTimeInterval target = self.videoSlider.value * duration;
+        // Landing exactly on the very end would fire the loop's
+        // did-play-to-end and snap back to 0 — stop a whisker short instead.
+        target = MIN(target, MAX(duration - 0.1, 0.0));
+        __weak typeof(self) weakSelf = self;
+        [player seekToTime:CMTimeMakeWithSeconds(target, 600)
+           toleranceBefore:kCMTimeZero
+            toleranceAfter:kCMTimeZero
+         completionHandler:^(BOOL finished) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                typeof(self) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                strongSelf.videoScrubbing = NO;
+                if (strongSelf.videoResumeAfterScrub) {
+                    [[strongSelf apollo_currentCell] playIfPossible];
+                }
+                [strongSelf apollo_refreshVideoBarNow];
+            });
+            (void)finished;
+        }];
+    } else {
+        self.videoScrubbing = NO;
+    }
 }
 
 - (void)apollo_updateChromeContent {
@@ -815,11 +1130,13 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
         self.muteHost.alpha = alpha;
         self.counterPill.alpha = alpha;
         self.infoPanel.alpha = alpha;
+        self.videoBarPill.alpha = alpha;
     };
     self.doneHost.userInteractionEnabled = visible;
     self.shareHost.userInteractionEnabled = visible;
     self.muteHost.userInteractionEnabled = visible;
     self.infoPanel.userInteractionEnabled = visible;
+    self.videoBarPill.userInteractionEnabled = visible;
     if (animated) {
         [UIView animateWithDuration:0.22 animations:changes];
     } else {
@@ -901,6 +1218,9 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
             ApolloGalleryViewerCell *currentCell = [strongSelf apollo_currentCell];
             [currentCell replaceVideoURL:currentItem.videoURL andPlay:YES];
             [strongSelf apollo_updateChromeContent];
+            // The resolution just swapped in a fresh player; repoint the
+            // transport at it (the pre-resolution bind saw nil).
+            [strongSelf apollo_bindVideoBarToPlayer:currentCell.player];
             if (!resolvedOriginal && !currentItem.videoURL) {
                 [strongSelf apollo_showToast:@"Couldn't load video"];
             }
@@ -918,6 +1238,10 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
         }
     }
     [self apollo_updateMuteButton];
+    // playIfPossible above is what lazily builds the current page's player,
+    // so the transport can only bind after the loop. Nil player (still image,
+    // or a hosted clip whose lookup is in flight) shows the bar disabled.
+    [self apollo_bindVideoBarToPlayer:[self apollo_currentCell].player];
 }
 
 - (void)apollo_prefetchAroundIndex:(NSInteger)index {
@@ -1001,8 +1325,93 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 }
 
 - (void)apollo_longPressed:(UILongPressGestureRecognizer *)recognizer {
-    if (recognizer.state != UIGestureRecognizerStateBegan) return;
-    [self apollo_presentActionsFromView:self.view];
+    AVPlayer *player = self.observedPlayer;
+    NSTimeInterval duration = [self apollo_currentVideoDuration];
+    BOOL scrubbable = [self apollo_currentItem].playsAsVideo && player && duration > 0.0;
+
+    switch (recognizer.state) {
+        case UIGestureRecognizerStateBegan: {
+            if (!scrubbable) {
+                // Still pictures keep the original hold-for-actions.
+                [self apollo_presentActionsFromView:self.view];
+                return;
+            }
+            // Arm, but don't commit: a hold that never moves is still the
+            // actions sheet (on release), so the old gesture isn't lost.
+            self.gestureScrubArmed = YES;
+            self.gestureScrubActive = NO;
+            self.gestureScrubStartX = [recognizer locationInView:self.view].x;
+            self.gestureScrubStartTime = CMTimeGetSeconds(player.currentTime);
+            if (!isfinite(self.gestureScrubStartTime) || self.gestureScrubStartTime < 0.0) {
+                self.gestureScrubStartTime = 0.0;
+            }
+            // Same trick the dismiss pan uses: kills any paging drag UIKit
+            // had started on this touch, so the horizontal scrub can't also
+            // turn the page.
+            self.collectionView.scrollEnabled = NO;
+            break;
+        }
+        case UIGestureRecognizerStateChanged: {
+            if (!self.gestureScrubArmed || !scrubbable) return;
+            CGFloat deltaX = [recognizer locationInView:self.view].x - self.gestureScrubStartX;
+            if (!self.gestureScrubActive) {
+                if (fabs(deltaX) < 12.0) return;   // slop: not a scrub yet
+                self.gestureScrubActive = YES;
+                self.videoScrubbing = YES;         // periodic observer hands off
+                self.gestureScrubWasPlaying = player.rate > 0.0f;
+                [player pause];
+            }
+            // A full-width drag sweeps the whole clip, matching the slider's
+            // scale, so the two ways of scrubbing feel like one control.
+            CGFloat width = MAX(self.view.bounds.size.width, 1.0);
+            NSTimeInterval target = self.gestureScrubStartTime + (deltaX / width) * duration;
+            target = MAX(0.0, MIN(target, MAX(duration - 0.1, 0.0)));
+            self.videoSlider.value = (float)(target / duration);
+            self.currentTimeLabel.text = ApolloGalleryTimeString(target);
+            [player seekToTime:CMTimeMakeWithSeconds(target, 600)
+               toleranceBefore:kCMTimePositiveInfinity
+                toleranceAfter:kCMTimePositiveInfinity
+             completionHandler:^(BOOL finished) { (void)finished; }];
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            BOOL wasArmed = self.gestureScrubArmed;
+            BOOL wasActive = self.gestureScrubActive;
+            self.gestureScrubArmed = NO;
+            self.gestureScrubActive = NO;
+            if (!wasArmed) return;
+            self.collectionView.scrollEnabled = YES;
+            if (!wasActive) {
+                // Held without dragging: the original actions sheet.
+                if (recognizer.state == UIGestureRecognizerStateEnded) {
+                    [self apollo_presentActionsFromView:self.view];
+                }
+                return;
+            }
+            NSTimeInterval target = self.videoSlider.value * duration;
+            target = MIN(target, MAX(duration - 0.1, 0.0));
+            BOOL resume = self.gestureScrubWasPlaying;
+            __weak typeof(self) weakSelf = self;
+            [player seekToTime:CMTimeMakeWithSeconds(target, 600)
+               toleranceBefore:kCMTimeZero
+                toleranceAfter:kCMTimeZero
+             completionHandler:^(BOOL finished) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    typeof(self) strongSelf = weakSelf;
+                    if (!strongSelf) return;
+                    strongSelf.videoScrubbing = NO;
+                    if (resume) [[strongSelf apollo_currentCell] playIfPossible];
+                    [strongSelf apollo_refreshVideoBarNow];
+                });
+                (void)finished;
+            }];
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 - (ApolloGalleryViewerCell *)apollo_currentCell {
@@ -1024,6 +1433,7 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
                 self.muteHost.alpha = 0.0;
                 self.counterPill.alpha = 0.0;
                 self.infoPanel.alpha = 0.0;
+                self.videoBarPill.alpha = 0.0;
             }];
             break;
         }
@@ -1100,6 +1510,9 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     if (gestureRecognizer != self.dismissPan) return YES;
     // A zoomed-in page pans its own content instead.
     if ([self apollo_currentCell].isZoomed) return NO;
+    // A hold-scrub in progress owns the drag; a stray vertical drift must not
+    // start dismissing (which would cancel the scrub mid-gesture).
+    if (self.gestureScrubArmed || self.gestureScrubActive) return NO;
     CGPoint velocity = [self.dismissPan velocityInView:self.view];
     return fabs(velocity.y) > fabs(velocity.x);
 }
@@ -1114,6 +1527,12 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     // Let the info panel's own tap handle taps that land on it.
     if ([touch.view isDescendantOfView:self.infoPanel] && self.chromeVisible) {
         return ![gestureRecognizer isKindOfClass:[UITapGestureRecognizer class]];
+    }
+    // The transport bar owns every touch that starts on it: a scrub must
+    // never toggle the chrome, page, or start the dismiss pan (which would
+    // cancel the slider's tracking mid-drag).
+    if ([touch.view isDescendantOfView:self.videoBarPill] && self.chromeVisible) {
+        return NO;
     }
     return YES;
 }
