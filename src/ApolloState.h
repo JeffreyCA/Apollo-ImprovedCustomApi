@@ -40,6 +40,18 @@ extern NSInteger sReadPostMaxCount;
 // 0 = Default (off), 1 = Remember from Full Screen, 2 = Always
 extern NSInteger sUnmuteCommentsVideos;
 
+// "Unmute Videos in Feed" — how feed videos sound when they autoplay while
+// scrolling. 0 = Never (default, stock behaviour), 1 = Remember (mirror the
+// user's last manual mute/unmute of a feed video, stored in
+// UDKeyFeedVideosUnmutedMemory), 2 = Always. See ApolloVideoUnmute.xm.
+extern NSInteger sUnmuteFeedVideos;
+
+// "Feed Video Scrubber" — when ON, the first tap on a playing feed video shows
+// an inline scrub bar instead of opening the fullscreen viewer; a second tap
+// (outside the bar) opens the viewer as usual. Default OFF.
+// See ApolloFeedVideoScrubber.xm.
+extern BOOL sFeedVideoScrubber;
+
 // "Hold for Video Speed": when ON (default), press-and-hold the right side of a
 // fullscreen video to play it at sVideoHoldSpeed while held; release restores the
 // prior rate. When OFF the right side behaves like the rest of the player (normal

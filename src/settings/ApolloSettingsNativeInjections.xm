@@ -3,6 +3,12 @@
 // screens land beside their native families:
 //
 //   Open Links → "Open in App"           (under "Open Reddit Links in Apollo")
+//   Media      → "Unmute Videos in Feed" (under "Unmute Videos When Opened" —
+//                                         a shortcut to Reborn's Media screen,
+//                                         where the real Never/Remember/Always
+//                                         picker lives; the native row next to
+//                                         it governs the fullscreen player, so
+//                                         the feed counterpart belongs here too)
 //   Media      → "Picture-in-Picture"    (under "Manage Uploads")
 //   Other      → "Translation"           (in the hidden "Always Offer Translate"
 //                                         slot — ApolloTranslation.xm hides that
@@ -81,6 +87,7 @@ static void ApolloRegisterGeneralDisclosureRow(NSString *title,
 }
 
 static const void *kApolloInjOpenInAppKey = &kApolloInjOpenInAppKey;
+static const void *kApolloInjFeedUnmuteKey = &kApolloInjFeedUnmuteKey;
 static const void *kApolloInjPiPKey = &kApolloInjPiPKey;
 static const void *kApolloInjTranslationKey = &kApolloInjTranslationKey;
 static const void *kApolloInjSavedCategoriesKey = &kApolloInjSavedCategoriesKey;
@@ -90,6 +97,13 @@ static const void *kApolloInjSavedCategoriesKey = &kApolloInjSavedCategoriesKey;
                                        @"Open Reddit Links in Apollo",
                                        kApolloInjOpenInAppKey,
                                        @"open-in-app");
+    // Sits directly under Apollo's own "Unmute Videos When Opened" (which covers
+    // the fullscreen player) and opens Reborn's Media screen, where the feed
+    // counterpart's Never/Remember/Always picker actually lives.
+    ApolloRegisterGeneralDisclosureRow(@"Unmute Videos in Feed",
+                                       @"Unmute Videos When Opened",
+                                       kApolloInjFeedUnmuteKey,
+                                       @"media");
     ApolloRegisterGeneralDisclosureRow(@"Picture-in-Picture",
                                        @"Manage Uploads",
                                        kApolloInjPiPKey,

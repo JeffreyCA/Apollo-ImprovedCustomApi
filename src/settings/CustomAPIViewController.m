@@ -322,6 +322,36 @@ typedef NS_ENUM(NSInteger, Tag) {
         });
 }
 
+- (NSString *)unmuteFeedVideosModeText {
+    switch (sUnmuteFeedVideos) {
+        case 1:  return @"Remember";
+        case 2:  return @"Always";
+        default: return @"Never";
+    }
+}
+
+- (void)setUnmuteFeedVideosMode:(NSInteger)mode {
+    sUnmuteFeedVideos = mode;
+    [[NSUserDefaults standardUserDefaults] setInteger:sUnmuteFeedVideos forKey:UDKeyUnmuteFeedVideos];
+    [self reloadRowWithID:@"media.unmuteFeed"];
+}
+
+// Title + options + "(Current)" only — shared picker (option index == stored mode).
+- (void)presentUnmuteFeedVideosModeSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Unmute Videos in Feed",
+                                @[@"Never", @"Remember", @"Always"],
+                                sUnmuteFeedVideos,
+                                ^(NSInteger pickedIndex) {
+        [weakSelf setUnmuteFeedVideosMode:pickedIndex];
+    });
+}
+
+- (void)feedVideoScrubberSwitchToggled:(UISwitch *)sender {
+    sFeedVideoScrubber = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFeedVideoScrubber forKey:UDKeyFeedVideoScrubber];
+}
+
 - (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
         case ImageUploadProviderReddit:   return @"Reddit";
@@ -1754,6 +1784,15 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }];
     gifFallback.configure = disclosure;
 
+    ApolloSettingsRow *unmuteFeed =
+        [ApolloSettingsRow valueRowWithID:@"media.unmuteFeed"
+                                    title:@"Unmute Videos in Feed"
+                                   detail:^NSString * { return [weakSelf unmuteFeedVideosModeText]; }
+                                 onSelect:^{
+            [weakSelf presentUnmuteFeedVideosModeSheetFromSourceView:[weakSelf cellForRowID:@"media.unmuteFeed"]];
+        }];
+    unmuteFeed.configure = disclosure;
+
     ApolloSettingsRow *unmuteComments =
         [ApolloSettingsRow valueRowWithID:@"media.unmuteComments"
                                     title:@"Unmute Videos in Comments"
@@ -1783,9 +1822,15 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     // Only shown while Hold for Video Speed is on (see -videoHoldSpeedSwitchToggled:).
     holdSpeedValue.visible = ^BOOL { return sVideoHoldSpeedEnabled; };
 
+    ApolloSettingsRow *feedScrubber =
+        [ApolloSettingsRow switchRowWithID:@"media.feedScrubber"
+                                     title:@"Feed Video Scrubber"
+                                      isOn:^BOOL { return sFeedVideoScrubber; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedVideoScrubberSwitchToggled:sender]; }];
+
     return [ApolloSettingsSection sectionWithTitle:@"Playback"
-                                            footer:@"Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
-                                              rows:@[ gifFallback, unmuteComments, holdSpeed, holdSpeedValue ]];
+                                            footer:@"Unmute Videos in Feed: Never keeps feed videos silent, Always plays every one with sound, and Remember follows the last video you muted or unmuted yourself. Only one feed video plays sound at a time. Feed Video Scrubber: tap a playing feed video to show a progress bar you can drag to seek; tap it again to open it fullscreen. Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
+                                              rows:@[ gifFallback, unmuteFeed, unmuteComments, feedScrubber, holdSpeed, holdSpeedValue ]];
 }
 
 - (ApolloSettingsSection *)buildMediaInlineSection {
