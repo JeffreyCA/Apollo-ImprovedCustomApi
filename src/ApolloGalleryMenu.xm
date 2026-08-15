@@ -40,6 +40,7 @@
 // profile/special feeds).
 extern NSString *ApolloSubredditNameFromViewController(UIViewController *viewController);
 extern NSString *ApolloMultiredditPathFromViewController(UIViewController *viewController);
+extern NSInteger ApolloPostsTypeTagFromViewController(UIViewController *viewController);
 // Defined in ApolloUserAvatars.xm — the username a profile screen is showing,
 // nil while it can't be determined yet.
 extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController);
@@ -110,6 +111,27 @@ static NSString *ApolloGalleryMenuProfileIdentifierForOwner(UIViewController *ow
     return username.length > 0 ? [@"u/" stringByAppendingString:username] : nil;
 }
 
+// "~home" when the owner is the signed-in HOME front page. Gated on the nav
+// title AND the PostsType tag being none of subreddit(0)/multireddit(1)/
+// random(5), so Popular/All/profile feeds (whose titles differ) and every
+// named feed stay excluded. The sentinel can't collide with a real slug —
+// "~" is invalid in subreddit names.
+static NSString *ApolloGalleryMenuHomeIdentifierForOwner(UIViewController *owner) {
+    static Class postsClass = Nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ postsClass = objc_getClass("_TtC6Apollo19PostsViewController"); });
+    if (!postsClass || ![owner isKindOfClass:postsClass]) return nil;
+    // Home's tag measured at 6 (2026-08-14 sim probe; subreddit=0,
+    // multireddit=1, random=5 per ApolloSubredditHeaders). The nav title is a
+    // second lock so a future re-numbering fails closed rather than putting
+    // Gallery View on Popular/All.
+    NSInteger tag = ApolloPostsTypeTagFromViewController(owner);
+    if (tag != 6) return nil;
+    NSString *title = owner.navigationItem.title ?: owner.title;
+    if (![title isEqualToString:@"Home"]) return nil;
+    return @"~home";
+}
+
 // Bare subreddit slug, canonical multireddit path, or "u/<name>" profile
 // identifier for a claimed controller. Nil keeps Popular/All, special feeds,
 // and every unrelated sheet untouched.
@@ -118,10 +140,12 @@ static NSString *ApolloGalleryMenuListingIdentifierForController(id actionContro
     if (!owner) return nil;
     return ApolloSubredditNameFromViewController(owner)
         ?: ApolloMultiredditPathFromViewController(owner)
-        ?: ApolloGalleryMenuProfileIdentifierForOwner(owner);
+        ?: ApolloGalleryMenuProfileIdentifierForOwner(owner)
+        ?: ApolloGalleryMenuHomeIdentifierForOwner(owner);
 }
 
 static NSString *ApolloGalleryMenuSourceDescription(NSString *listingIdentifier) {
+    if ([listingIdentifier isEqualToString:@"~home"]) return @"Home";
     if ([listingIdentifier hasPrefix:@"u/"]) return listingIdentifier;
     if ([listingIdentifier hasPrefix:@"/user/"]) {
         NSString *name = [listingIdentifier pathComponents].lastObject ?: @"multireddit";
@@ -232,7 +256,8 @@ static void ApolloGalleryMenuOpenForController(id actionController) {
         // multireddit path (and the "u/<name>" profile identifier)
         // automatically receives the same crash fix.
         subreddit = ApolloMultiredditPathFromViewController(owner)
-            ?: ApolloGalleryMenuProfileIdentifierForOwner(owner);
+            ?: ApolloGalleryMenuProfileIdentifierForOwner(owner)
+            ?: ApolloGalleryMenuHomeIdentifierForOwner(owner);
     }
     if (subreddit.length == 0 || !owner) {
         ApolloLog(@"[GalleryMenu] Gallery View tapped but the listing could not be resolved");
@@ -289,7 +314,8 @@ static void ApolloGalleryMenuOpenHiddenContentForController(id actionController)
     // sheet (and every other feed type) completely untouched.
     UIViewController *viewController = (UIViewController *)self;
     NSString *listingIdentifier = ApolloSubredditNameFromViewController(viewController)
-        ?: ApolloMultiredditPathFromViewController(viewController);
+        ?: ApolloMultiredditPathFromViewController(viewController)
+        ?: ApolloGalleryMenuHomeIdentifierForOwner(viewController);
     if (listingIdentifier.length > 0) {
         sApolloGalleryArmedVC = (UIViewController *)self;
         sApolloGalleryArmedAt = CACurrentMediaTime();

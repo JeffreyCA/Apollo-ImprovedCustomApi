@@ -1177,6 +1177,14 @@ static BOOL ApolloSubredditPostsTypeTag(id viewController, uint8_t *tag) {
 // Non-static: ApolloGalleryMenu.xm needs the same "is this really a single
 // subreddit, and which one" answer to decide whether the subreddit "..." menu
 // gets a Gallery View row.
+// Exported for ApolloGalleryMenu.xm's home-feed gate: the raw PostsType case
+// tag, or -1 when the ivar can't be read on this binary.
+NSInteger ApolloPostsTypeTagFromViewController(UIViewController *viewController) {
+    uint8_t tag = 0;
+    if (!viewController || !ApolloSubredditPostsTypeTag(viewController, &tag)) return -1;
+    return (NSInteger)tag;
+}
+
 NSString *ApolloSubredditNameFromViewController(UIViewController *viewController) {
     if (!viewController) return nil;
 

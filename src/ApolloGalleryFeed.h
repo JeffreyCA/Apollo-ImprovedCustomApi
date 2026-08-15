@@ -130,6 +130,8 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
 // drive it from the main thread (completions are always delivered there).
 @interface ApolloGalleryFeed : NSObject
 
+// The signed-in HOME front page (subscribed subreddits, root-path listings).
+- (instancetype)initWithHomeFeed NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithSubreddit:(NSString *)subreddit NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithMultiredditPath:(NSString *)multiredditPath NS_DESIGNATED_INITIALIZER;
 // `username` is the bare name, no "u/" prefix. Loads the user's submitted

@@ -17,6 +17,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 // `subreddit` is the bare slug, no "r/" prefix.
 - (instancetype)initWithSubreddit:(NSString *)subreddit NS_DESIGNATED_INITIALIZER;
+// The signed-in Home front page.
+- (instancetype)initWithHomeFeed NS_DESIGNATED_INITIALIZER;
 // `multiredditPath` is the canonical `/user/<owner>/m/<name>` path.
 - (instancetype)initWithMultiredditPath:(NSString *)multiredditPath NS_DESIGNATED_INITIALIZER;
 // `username` is the bare name, no "u/" prefix. Shows the media that user has

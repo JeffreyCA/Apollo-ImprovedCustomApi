@@ -289,6 +289,17 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
 
 @implementation ApolloGalleryViewController
 
+- (instancetype)initWithHomeFeed {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _subreddit = @"";
+        _sourceDescription = @"Home";
+        _feed = [[ApolloGalleryFeed alloc] initWithHomeFeed];
+        _prefetchRequests = [NSMutableDictionary dictionary];
+    }
+    return self;
+}
+
 - (instancetype)initWithSubreddit:(NSString *)subreddit {
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
@@ -412,6 +423,13 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
                                           fromViewController:sourceViewController
                                           inheritedSortValue:sortValue
                                      inheritedTopWindowValue:topWindowValue];
+    }
+    if ([subreddit isEqualToString:@"~home"]) {
+        ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithHomeFeed];
+        ApolloGalleryApplyInheritedSort(gallery, sortValue, topWindowValue);
+        if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
+        ApolloLog(@"[Gallery] opened for Home");
+        return YES;
     }
     NSString *prefixCheck = [subreddit stringByTrimmingCharactersInSet:
                              [NSCharacterSet characterSetWithCharactersInString:@" \t/"]].lowercaseString;

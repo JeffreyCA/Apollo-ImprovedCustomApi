@@ -256,6 +256,16 @@ static NSString *ApolloGalleryBearerForClient(id client) {
         : nil;
 }
 
+- (instancetype)initWithHomeFeed {
+    self = [super init];
+    if (self) {
+        // Empty listing path: the home front page's listings live at the API
+        // root (/best, /hot, ...), served from the account's subscriptions.
+        [self configureWithListingPath:@"" subreddit:@"" sourceDescription:@"Home"];
+    }
+    return self;
+}
+
 - (instancetype)initWithSubreddit:(NSString *)subreddit {
     NSString *slug = [subreddit copy] ?: @"";
     self = [super init];
@@ -551,7 +561,12 @@ static NSString *ApolloGalleryBearerForClient(id client) {
     }
 
     NSString *urlString;
-    if (self.sortsViaQueryParameter) {
+    if (self.listingPath.length == 0) {
+        // Home: the sort IS the path, at the root of the host.
+        urlString = useOAuthHost
+            ? [NSString stringWithFormat:@"https://oauth.reddit.com/%@?%@", [self sortPathComponent], query]
+            : [NSString stringWithFormat:@"https://www.reddit.com/%@.json?%@", [self sortPathComponent], query];
+    } else if (self.sortsViaQueryParameter) {
         // The listing path is already complete (`/user/<name>/submitted`);
         // the sort rides in the query string instead of the path.
         urlString = useOAuthHost
