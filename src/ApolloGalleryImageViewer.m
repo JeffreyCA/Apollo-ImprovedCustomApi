@@ -1057,7 +1057,13 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
     self.statusPill.frame = CGRectMake((bounds.size.width - 156.0) / 2.0, CGRectGetMaxY(self.counterPill.frame) + 8.0, 156.0, 28.0);
 
     CGFloat bottom = safe.bottom + 16.0;
-    CGFloat panelWidth = MIN(bounds.size.width - side - rightSide, 460.0);
+    // Two different widths on purpose. The info panel keeps a readable line
+    // length, so it stays capped; the transport is a scrubber and takes the
+    // whole width it can get — capping it too is what left the controls
+    // huddled in the left half of a landscape screen.
+    CGFloat availableWidth = bounds.size.width - side - rightSide;
+    CGFloat panelWidth = MIN(availableWidth, 460.0);
+    CGFloat videoBarWidth = availableWidth;
     CGFloat textWidth = panelWidth - 24.0;
 
     CGSize titleSize = CGSizeZero;
@@ -1085,7 +1091,7 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
                                    : (bounds.size.height - bottom);
     CGFloat const videoBarHeight = 44.0;
     self.videoBarPill.frame = CGRectMake(side, chromeBottom - 8.0 - videoBarHeight,
-                                         panelWidth, videoBarHeight);
+                                         videoBarWidth, videoBarHeight);
     {
         CGFloat const buttonSize = 36.0;
         CGFloat const buttonGap = 2.0;
@@ -1099,7 +1105,7 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
         x = CGRectGetMaxX(self.back15Button.frame) + buttonGap;
         self.forward15Button.frame = CGRectMake(x, barMidY - buttonSize / 2.0, buttonSize, buttonSize);
 
-        CGFloat durationRight = panelWidth - edgePadding - 4.0;
+        CGFloat durationRight = videoBarWidth - edgePadding - 4.0;
         self.durationLabel.frame = CGRectMake(durationRight - timeWidth, barMidY - 9.0, timeWidth, 18.0);
         CGFloat sliderLeft = CGRectGetMaxX(self.forward15Button.frame) + 6.0 + timeWidth + 6.0;
         self.currentTimeLabel.frame = CGRectMake(CGRectGetMaxX(self.forward15Button.frame) + 6.0,
