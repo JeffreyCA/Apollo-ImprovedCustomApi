@@ -2971,6 +2971,8 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    if (_pack == LGStandardPackApolloOriginals) return @"Original Icons";
+
     id source = _sourceController;
     if (!source) return nil;
     LGSetForwardedNativeSection(source, _nativeSection);
@@ -3850,6 +3852,24 @@ static void LGStyleCommunityIconCell(id controller,
 }
 
 %hook _TtC6Apollo39SettingsCommunityIconPackViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    UITableView *tableView = MSHookIvar<UITableView *>(self, "tableView");
+    __weak UITableView *weakTable = tableView;
+    LGInstallAppearanceMenu((UIViewController *)self, tableView, ^{
+        [weakTable reloadData];
+    });
+}
+
+%new
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    return @"Community Icons";
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    return nil;
+}
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     LGRememberTableView(self, tableView);
