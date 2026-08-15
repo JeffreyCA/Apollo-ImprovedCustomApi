@@ -179,6 +179,21 @@ static const NSTimeInterval kApolloDevvitIdlePollInterval = 6.0;
 static const NSInteger kApolloDevvitActivePollCount = 8;
 static const NSInteger kApolloDevvitMaxHeightCorrections = 12;
 static NSMutableDictionary<NSString *, NSNumber *> *sDevvitHeights;
+// fullNames whose widget gave up; their rows fall back to Apollo's own rendering.
+static NSMutableSet<NSString *> *sDevvitFailedPosts;
+
+static BOOL ApolloDevvitPostFailed(NSString *fullName) {
+    if (!fullName) return NO;
+    @synchronized (sDevvitHeights) { return [sDevvitFailedPosts containsObject:fullName]; }
+}
+
+static void ApolloDevvitMarkFailed(NSString *fullName) {
+    if (!fullName) return;
+    @synchronized (sDevvitHeights) {
+        if (!sDevvitFailedPosts) sDevvitFailedPosts = [NSMutableSet set];
+        [sDevvitFailedPosts addObject:fullName];
+    }
+}
 
 static CGFloat ApolloDevvitHeightForFullName(NSString *fullName) {
     if (!fullName) return kApolloDevvitDefaultHeight;
@@ -793,10 +808,22 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 
 - (void)showFailure {
     self.failed = YES;
-    [self.spinner stopAnimating];
-    self.statusLabel.text = @"Interactive post failed to load.\nTap to retry.";
-    self.coverView.alpha = 1.0;
+    // Reddit intermittently serves a shell that never hydrates (readyState
+    // complete, empty body). Holding the tall reservation for that left a
+    // screen-high dead box mid-feed, and a custom "failed" banner is its own
+    // problem: it has to lay out correctly at every collapsed height, and it
+    // tells the user nothing they can act on. Hand the row back instead — Apollo
+    // then renders the post exactly as it would without this feature, fallback
+    // text and its "view the full post" link included, which is both honest and
+    // useful. The mark is per-process, so a relaunch retries.
+    ApolloDevvitMarkFailed(self.fullName);
+    ApolloLog(@"[Devvit] %@ gave up — handing the row back to Apollo", self.fullName);
+    NSString *fullName = self.fullName;
+    [self teardown];
+    [self removeFromSuperview];
+    ApolloDevvitHeightDidChangeForFullName(fullName);
 }
+
 
 - (void)teardown {
     self.pollGeneration += 1;  // cancels any queued poll blocks
@@ -1106,9 +1133,60 @@ static void ApolloDevvitRefreshTableHeights(UITableView *table, NSInteger attemp
     } @catch (__unused id e) {}
 }
 
+// Invalidate the registered parent AND every node up to the enclosing cell.
+// Which node is registered differs by surface: in comments it is the cell node
+// itself (CommentsHeaderCellNode), but in the FEED it is RichMediaNode — a
+// child of the post cell. Texture serves a row's height from the CELL node's
+// cached layout, and invalidating only a descendant leaves that cache intact,
+// so begin/endUpdates below re-queried the same stale height and a compact card
+// stayed in its 512pt hole. Comments worked precisely because parent == cell,
+// which is what hid this. Stop at the cell (ASCellNode answers `owningNode`)
+// rather than walking to the root: invalidating the whole feed is needless work.
+static ASDisplayNode *ApolloDevvitInvalidateUpToCell(ASDisplayNode *node) {
+    ASDisplayNode *n = node;
+    for (NSInteger hops = 0; n && hops < 12; hops++) {
+        @try {
+            [n invalidateCalculatedLayout];
+            [n setNeedsLayout];
+            if ([n respondsToSelector:@selector(owningNode)] &&
+                ((id (*)(id, SEL))objc_msgSend)(n, @selector(owningNode))) return n; // the cell
+            n = [n supernode];
+        } @catch (__unused id e) { return nil; }
+    }
+    return nil;
+}
+
+// Invalidating a cell marks its layout dirty but nothing asks Texture to
+// re-measure it: a feed cell only re-measures when something drives it, and
+// beginUpdates/endUpdates on an ASTableView does not (it is the UITableView
+// path; Texture owns node-driven row heights). Comments got away with it
+// because that header re-measures anyway as comments stream in — the feed never
+// does, so a compact card kept the 512pt row it was first measured at.
+// transitionLayout… IS the "re-run this node's layout and publish the new size"
+// API, and it is scoped to the one cell rather than relayoutItems' whole-feed
+// pass (multi-second on a long feed — the #630 watchdog class).
+static void ApolloDevvitRemeasureCells(NSArray<ASDisplayNode *> *cells, NSInteger attempt) {
+    if (cells.count == 0 || attempt > 40) return;
+    // Never re-enter Texture's measurement while it is already measuring (#844)
+    // or mid-scroll, where a row-height change fights the scroll.
+    if (ApolloRowMeasureInProgress()) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ ApolloDevvitRemeasureCells(cells, attempt + 1); });
+        return;
+    }
+    SEL transition = @selector(transitionLayoutWithAnimation:shouldMeasureAsync:measurementCompletion:);
+    for (ASDisplayNode *cell in cells) {
+        @try {
+            if (![cell respondsToSelector:transition]) continue;
+            ((void (*)(id, SEL, BOOL, BOOL, id))objc_msgSend)(cell, transition, NO, NO, nil);
+        } @catch (__unused id e) {}
+    }
+}
+
 static void ApolloDevvitHeightDidChangeForFullName(NSString *fullName) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSMutableSet<UITableView *> *tables = [NSMutableSet set];
+        NSMutableArray<ASDisplayNode *> *cells = [NSMutableArray array];
         for (id parent in sDevvitHostParents.allObjects) {
             RDKLink *link = nil;
             @try {
@@ -1118,11 +1196,12 @@ static void ApolloDevvitHeightDidChangeForFullName(NSString *fullName) {
             if (fullName && link && ![ApolloDevvitFullName(link) isEqualToString:fullName]) continue;
             ASDisplayNode *host = objc_getAssociatedObject(parent, kApolloDevvitHostNodeKey);
             if (host) ApolloDevvitSetNodeHeight(host, ApolloDevvitHeightForFullName(fullName));
-            [(ASDisplayNode *)parent invalidateCalculatedLayout];
-            [(ASDisplayNode *)parent setNeedsLayout];
+            ASDisplayNode *cell = ApolloDevvitInvalidateUpToCell((ASDisplayNode *)parent);
+            if (cell) [cells addObject:cell];
             UITableView *table = ApolloDevvitTableViewForNode(parent);
             if (table) [tables addObject:table];
         }
+        ApolloDevvitRemeasureCells(cells, 0);
         for (UITableView *table in tables) ApolloDevvitRefreshTableHeights(table, 0);
     });
 }
@@ -1211,6 +1290,8 @@ static id ApolloDevvitPlaceInSpec(id rootSpec, id hostSpec, NSUInteger depth) {
     @try {
         RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
         if (!ApolloDevvitLinkIsInteractive(link)) return orig;
+        // Gave up on this post — let Apollo render it natively (see showFailure).
+        if (ApolloDevvitPostFailed(ApolloDevvitFullName(link))) return orig;
         ASDisplayNode *host = ApolloDevvitEnsureHostNode(self);
         if (!host) return orig;
         ApolloDevvitSetNodeHeight(host, ApolloDevvitHeightForFullName(ApolloDevvitFullName(link)));
@@ -1263,7 +1344,8 @@ static id ApolloDevvitPlaceInSpec(id rootSpec, id hostSpec, NSUInteger depth) {
         RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
         // The feed sub-toggle routes through the SAME cleanup path as a
         // recycled cell, so flipping it off mid-session hides any live host.
-        if (!sDevvitFeedWidgets || !ApolloDevvitLinkIsInteractive(link)) {
+        if (!sDevvitFeedWidgets || !ApolloDevvitLinkIsInteractive(link) ||
+            ApolloDevvitPostFailed(ApolloDevvitFullName(link))) {
             // Recycled off a devvit post onto a normal one: the host node is
             // no longer in the layout, but its loaded view would linger —
             // hide it (carousel lesson #4).
