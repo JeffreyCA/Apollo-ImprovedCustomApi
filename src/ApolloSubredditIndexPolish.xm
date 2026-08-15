@@ -78,6 +78,9 @@ static NSInteger sApolloFavoriteMutationOriginalLastRow = NSNotFound;
 @property (nonatomic, strong) UISelectionFeedbackGenerator *selectionFeedbackGenerator;
 @property (nonatomic) NSInteger activeIndex;
 @property (nonatomic) NSInteger lastScrolledIndex;
+// Ancestor gesture recognisers suspended for the duration of one scrub. See
+// -apollo_suspendConflictingAncestorRecognizers.
+@property (nonatomic, strong) NSArray<UIGestureRecognizer *> *suspendedRecognizers;
 - (void)apollo_applyThemeTintToLabels;
 - (void)apollo_scheduleDeferredThemeTintRefresh;
 - (void)updateWithTableView:(UITableView *)tableView titles:(NSArray<NSString *> *)titles;
@@ -955,8 +958,67 @@ static void ApolloSubredditIndexRemoveStarProxyFromCell(UITableViewCell *cell) {
     ApolloSubredditIndexScrollToTitle(self.tableView, self.titles[index], index);
 }
 
+// The overlay tracks the scrub with raw touches on a plain view, so any gesture
+// recogniser on an ANCESTOR view also sees those touches and, once it recognises,
+// cancels ours (cancelsTouchesInView defaults to YES). The offender is UIKit's
+// _UIBarPanGestureRecognizer — the nav controller's barHideOnSwipeGestureRecognizer,
+// armed by Apollo's "auto-hide bars while scrolling". A vertical drag on the A–Z
+// strip looks exactly like the swipe it wants, so it begins on the first movement
+// and kills the scrub: the user gets the letter they pressed and nothing after it.
+//
+// This is invisible under Liquid Glass because on an iOS-26-linked binary UIKit
+// collapses the bars through the scroll-edge/morph system instead of driving
+// hidesBarsOnSwipe, so that recogniser never leaves .possible — which is exactly
+// why the A–Z strip scrubs correctly on glass builds and dies on legacy ones.
+//
+// UIKit gives a view no way to veto an ancestor's recogniser, so suspend the
+// conflicting ones for the duration of the scrub and restore them the moment it
+// ends. Toggling `enabled` is the documented way to cancel a recogniser in flight,
+// the window is one touch sequence long, and suppressing bar-hiding *while the
+// user scrubs the index* is the correct behaviour anyway.
+- (void)apollo_suspendConflictingAncestorRecognizers {
+    if (self.suspendedRecognizers.count > 0) return;
+
+    NSMutableArray<UIGestureRecognizer *> *suspended = [NSMutableArray array];
+    UIViewController *owner = ApolloSubredditIndexOwningViewController(self.tableView ?: self);
+    UINavigationController *nav = owner.navigationController;
+
+    // Exact identification via public API, rather than matching a private class name.
+    UIGestureRecognizer *barGesture = nav.barHideOnSwipeGestureRecognizer;
+    if (barGesture.isEnabled) {
+        barGesture.enabled = NO;
+        [suspended addObject:barGesture];
+    }
+
+    self.suspendedRecognizers = suspended.count > 0 ? suspended : nil;
+    if (suspended.count > 0) {
+        ApolloLogDebug(@"[SubredditIndex] scrub suspended %lu ancestor recogniser(s)",
+                       (unsigned long)suspended.count);
+    }
+}
+
+- (void)apollo_restoreConflictingAncestorRecognizers {
+    for (UIGestureRecognizer *gesture in self.suspendedRecognizers) {
+        gesture.enabled = YES;
+    }
+    self.suspendedRecognizers = nil;
+}
+
+// Safety net: if the overlay leaves the hierarchy mid-scrub (tab switch, pop,
+// enhancement toggle) no touchesEnded/Cancelled arrives, so restore here too —
+// otherwise bar-hiding would stay off until the next scrub.
+- (void)willMoveToWindow:(UIWindow *)newWindow {
+    [super willMoveToWindow:newWindow];
+    if (!newWindow) [self apollo_restoreConflictingAncestorRecognizers];
+}
+
+- (void)dealloc {
+    [self apollo_restoreConflictingAncestorRecognizers];
+}
+
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     UITouch *touch = touches.anyObject;
+    [self apollo_suspendConflictingAncestorRecognizers];
     [self.selectionFeedbackGenerator prepare];
     if (touch) [self handleTouch:touch];
 }
@@ -967,12 +1029,14 @@ static void ApolloSubredditIndexRemoveStarProxyFromCell(UITableViewCell *cell) {
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self apollo_restoreConflictingAncestorRecognizers];
     self.activeIndex = NSNotFound;
     self.lastScrolledIndex = NSNotFound;
     [self applyMagnificationForIndex:NSNotFound animated:YES];
 }
 
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self apollo_restoreConflictingAncestorRecognizers];
     self.activeIndex = NSNotFound;
     self.lastScrolledIndex = NSNotFound;
     [self applyMagnificationForIndex:NSNotFound animated:YES];
