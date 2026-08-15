@@ -585,6 +585,15 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
+    // The viewer is a black fullscreen surface with white text and icons, but
+    // the APP is usually in light mode — so the iOS 26 glass pills first
+    // resolved their LIGHT variant (white frost, unreadable white-on-white
+    // labels) and only flipped dark once UIKit's adaptive glass sampled the
+    // dark backdrop, a visible white→dark pop on every open. Pin the whole
+    // hierarchy dark, like Apollo's own media viewer: glass renders its dark
+    // variant from the first frame and the legacy translucent-black pills are
+    // unaffected.
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
 
     self.layout = [[UICollectionViewFlowLayout alloc] init];
     self.layout.scrollDirection = UICollectionViewScrollDirectionHorizontal;
