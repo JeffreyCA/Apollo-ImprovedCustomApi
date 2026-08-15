@@ -158,20 +158,38 @@ static NSString *ApolloDevvitFullName(RDKLink *link) {
 
 #pragma mark - Measured height registry
 
-// fullName -> measured widget height. 512 (devvit "tall", what match threads
-// use) until the page reports otherwise, so the common case never re-measures.
+// fullName -> measured widget height. 512 (devvit "tall") until the page
+// reports otherwise, so the tall case measures final on the first pass.
 static const CGFloat kApolloDevvitDefaultHeight = 512.0;
+// Smallest height we accept as a real measurement. This must not sit ABOVE what
+// the probe itself treats as real (it reveals on h >= 40 held stable): devvit
+// apps size themselves, and a compact card is a legitimate layout — a finished
+// match thread renders a single ~96pt score row with an "open the full match
+// thread" footer. A 120pt floor silently REJECTED those, so the measurement was
+// discarded, the node kept the 512pt placeholder, and the card sat above ~400pt
+// of dead space in the feed and in the post alike.
+static const CGFloat kApolloDevvitMinHeight = 40.0;
+static const CGFloat kApolloDevvitMaxHeight = 900.0;
+// Post-reveal watchdog cadence: brisk while the widget is still moving (a user
+// expanding a compact card must not wait out a long tick with clipped content),
+// idle once it has held still, and a budget that stops an oscillating widget
+// from re-measuring a table forever.
+static const NSTimeInterval kApolloDevvitActivePollInterval = 1.0;
+static const NSTimeInterval kApolloDevvitIdlePollInterval = 6.0;
+static const NSInteger kApolloDevvitActivePollCount = 8;
+static const NSInteger kApolloDevvitMaxHeightCorrections = 12;
 static NSMutableDictionary<NSString *, NSNumber *> *sDevvitHeights;
 
 static CGFloat ApolloDevvitHeightForFullName(NSString *fullName) {
     if (!fullName) return kApolloDevvitDefaultHeight;
     NSNumber *n = nil;
     @synchronized (sDevvitHeights) { n = sDevvitHeights[fullName]; }
-    return n ? MAX(120.0, MIN(900.0, n.doubleValue)) : kApolloDevvitDefaultHeight;
+    return n ? MAX(kApolloDevvitMinHeight, MIN(kApolloDevvitMaxHeight, n.doubleValue))
+             : kApolloDevvitDefaultHeight;
 }
 
 static BOOL ApolloDevvitStoreHeight(NSString *fullName, CGFloat height) {
-    if (!fullName || height < 120.0 || height > 900.0) return NO;
+    if (!fullName || height < kApolloDevvitMinHeight || height > kApolloDevvitMaxHeight) return NO;
     @synchronized (sDevvitHeights) {
         NSNumber *old = sDevvitHeights[fullName];
         if (old && fabs(old.doubleValue - height) <= 4.0) return NO;
@@ -238,7 +256,38 @@ static NSString *const kApolloDevvitProbeScript = @""
 "        || document.querySelector('devvit-blocks-renderer');"
 "  if (!el) { return JSON.stringify({ found: 0, state: document.readyState, title: (document.title || '').slice(0, 40) }); }"
 "  var r = el.getBoundingClientRect();"
-"  return JSON.stringify({ found: 1, h: Math.round(r.height), w: Math.round(r.width) });"
+    /* The host element's own box is NOT the whole story. A compact match card
+       is 96pt, but tapping its "open the full match thread" control overlays
+       the expanded view on top — absolutely positioned, so it extends past the
+       host while the host's rect stays 96 and the cell clips everything below.
+       Measure the deepest painted descendant instead (shadow roots included,
+       which is where devvit renders), and take whichever is taller. The crop
+       pins the widget to top:0, so a descendant's viewport `bottom` IS its
+       height from the widget's top edge. */
+"  var deep = 0, seen = 0;"
+"  try {"
+"    (function walk(root, depth) {"
+"      if (!root || depth > 6 || seen > 2000) { return; }"
+"      var kids = root.querySelectorAll ? root.querySelectorAll('*') : [];"
+"      for (var i = 0; i < kids.length && seen < 2000; i++) {"
+"        seen++;"
+"        var k = kids[i];"
+"        var kr = k.getBoundingClientRect ? k.getBoundingClientRect() : null;"
+"        if (kr && kr.height > 0 && kr.bottom > deep && kr.bottom < 4000) { deep = kr.bottom; }"
+"        if (k.shadowRoot) { walk(k.shadowRoot, depth + 1); }"
+"      }"
+"    })(el, 0);"
+"    if (el.shadowRoot) { (function (r2) {"
+"      var kids = r2.querySelectorAll('*');"
+"      for (var i = 0; i < kids.length && seen < 2000; i++) {"
+"        seen++;"
+"        var kr = kids[i].getBoundingClientRect();"
+"        if (kr && kr.height > 0 && kr.bottom > deep && kr.bottom < 4000) { deep = kr.bottom; }"
+"      }"
+"    })(el.shadowRoot); }"
+"  } catch (e) {}"
+"  var h = Math.max(Math.round(r.height), Math.round(deep));"
+"  return JSON.stringify({ found: 1, h: h, w: Math.round(r.width) });"
 "})();";
 
 #pragma mark - Content blocker
@@ -684,7 +733,10 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
             self.lastProbeHeight = h;
             if (self.stableSamples >= 2) {
                 [self revealWithHeight:h];
-                [self pollAfter:6.0 attempt:0 generation:gen];
+                // Hand over to the watchdog in its brisk state: the moments
+                // right after reveal are exactly when someone taps a compact
+                // card open.
+                [self pollAfter:kApolloDevvitActivePollInterval attempt:0 generation:gen];
                 return;
             }
         }
@@ -692,25 +744,41 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
         return;
     }
 
-    // Post-reveal slow watchdog: track later height changes (some widgets
-    // grow when a match kicks off) and keep the crop asserted. Each report
-    // ends in a beginUpdates/endUpdates row-height re-query on every affected
-    // table, so corrections are strictly bounded: hysteresis widens sharply
-    // after the first one, and after the cap the height is frozen for this
-    // widget's lifetime — an oscillating widget must never re-measure a
-    // comments table indefinitely.
-    CGFloat hysteresis = (self.heightCorrections == 0) ? 8.0 : 32.0;
-    if (found && h >= 40.0 && fabs(h - self.lastProbeHeight) > hysteresis &&
-        self.heightCorrections < 3) {
+    // Post-reveal watchdog: track later height changes and keep the crop
+    // asserted. These are not only spontaneous (a match kicking off) — they are
+    // also USER-DRIVEN: a compact match card has an "open the full match thread"
+    // control that expands the widget several hundred points, and until the cell
+    // follows, the expanded content is clipped to the old height. So poll
+    // briskly for a while after any change and only back off once the widget has
+    // been still, rather than sitting on a fixed 6s tick where a tap appears to
+    // do nothing for several seconds.
+    //
+    // Each report ends in a beginUpdates/endUpdates row-height re-query on every
+    // affected table, so corrections stay bounded: hysteresis widens after the
+    // first one, they cannot land faster than the active poll interval, and a
+    // budget still freezes the height for a widget that oscillates forever. The
+    // budget is generous enough to absorb a user expanding and collapsing a card
+    // a few times, which the old 3 could not.
+    CGFloat hysteresis = (self.heightCorrections == 0) ? 8.0 : 24.0;
+    BOOL changed = NO;
+    if (found && h >= kApolloDevvitMinHeight && fabs(h - self.lastProbeHeight) > hysteresis &&
+        self.heightCorrections < kApolloDevvitMaxHeightCorrections) {
         self.heightCorrections += 1;
         self.lastProbeHeight = h;
-        ApolloLog(@"[Devvit] %@ height corrected to %.0fpt (%ld/3)",
-                  self.fullName, h, (long)self.heightCorrections);
+        changed = YES;
+        ApolloLog(@"[Devvit] %@ height corrected to %.0fpt (%ld/%ld)", self.fullName, h,
+                  (long)self.heightCorrections, (long)kApolloDevvitMaxHeightCorrections);
         if (ApolloDevvitStoreHeight(self.fullName, h) && self.onMeasuredHeight) {
             self.onMeasuredHeight(self.fullName, h);
         }
     }
-    [self pollAfter:6.0 attempt:0 generation:gen];
+    // `attempt` counts consecutive still polls here; a change restarts the
+    // brisk window so an expand → settle → collapse sequence stays responsive.
+    NSInteger stillPolls = changed ? 0 : attempt + 1;
+    BOOL brisk = stillPolls < kApolloDevvitActivePollCount;
+    [self pollAfter:(brisk ? kApolloDevvitActivePollInterval : kApolloDevvitIdlePollInterval)
+             attempt:stillPolls
+          generation:gen];
 }
 
 - (void)revealWithHeight:(CGFloat)height {
