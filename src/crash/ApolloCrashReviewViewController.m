@@ -315,7 +315,7 @@
     }
 
     UIActivityViewController *share =
-        [[UIActivityViewController alloc] initWithActivityItems:@[ [NSURL fileURLWithPath:path] ]
+        [[UIActivityViewController alloc] initWithActivityItems:@[ [NSURL fileURLWithPath:path isDirectory:NO] ]
                                           applicationActivities:nil];
     UIPopoverPresentationController *popover = share.popoverPresentationController;
     popover.sourceView = [self cellForRowID:@"review.export"] ?: self.view;

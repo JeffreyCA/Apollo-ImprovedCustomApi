@@ -352,7 +352,7 @@ static void ApolloGTZeroReturn(NSInvocation *inv) {
     // Keeps translated paths alive across the invoke (setArgument: does not
     // retain); precise lifetime pins the array to end of scope so ARC can't
     // release it early.
-    __attribute__((objc_precise_lifetime)) NSMutableArray *pinned = nil;
+    NS_VALID_UNTIL_END_OF_SCOPE NSMutableArray *pinned = nil;
     NSUInteger injectionIdx = NSNotFound;
     NSIndexPath *injectedDisplayPath = nil;
     for (NSUInteger i = 2; i < nargs; i++) {

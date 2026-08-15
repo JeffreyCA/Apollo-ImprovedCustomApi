@@ -58,30 +58,42 @@ static NSError *ApolloRedditUploadCancelledError(void) {
 }
 
 - (BOOL)apolloSetAssetTask:(NSURLSessionTask *)task {
+    BOOL shouldCancel = NO;
+    NS_VALID_UNTIL_END_OF_SCOPE NSURLSessionTask *retiredTask = nil;
     @synchronized (self) {
         if (self.cancelled) {
-            [task cancel];
-            return NO;
+            shouldCancel = YES;
+        } else if (self.assetTask != task) {
+            retiredTask = self.assetTask;
+            self.assetTask = task;
         }
-        self.assetTask = task;
-        return YES;
     }
+    if (shouldCancel) [task cancel];
+    return !shouldCancel;
 }
 
 - (BOOL)apolloSetStorageTask:(NSURLSessionTask *)task {
+    BOOL shouldCancel = NO;
+    NS_VALID_UNTIL_END_OF_SCOPE NSURLSessionTask *retiredTask = nil;
     @synchronized (self) {
         if (self.cancelled) {
-            [task cancel];
-            return NO;
+            shouldCancel = YES;
+        } else if (self.storageTask != task) {
+            retiredTask = self.storageTask;
+            self.storageTask = task;
         }
-        self.storageTask = task;
-        return YES;
     }
+    if (shouldCancel) [task cancel];
+    return !shouldCancel;
 }
 
 - (void)apolloClearStorageTask:(NSURLSessionTask *)task {
+    NS_VALID_UNTIL_END_OF_SCOPE NSURLSessionTask *retiredTask = nil;
     @synchronized (self) {
-        if (self.storageTask == task) self.storageTask = nil;
+        if (self.storageTask == task) {
+            retiredTask = self.storageTask;
+            self.storageTask = nil;
+        }
     }
 }
 
@@ -258,7 +270,8 @@ static NSURL *ApolloMultipartBodyFileForFields(NSDictionary<NSString *, NSString
                                                unsigned long long *outLength,
                                                NSError **error) {
     NSString *name = [[@"apollo-reddit-upload-" stringByAppendingString:NSUUID.UUID.UUIDString] stringByAppendingPathExtension:@"multipart"];
-    NSURL *bodyURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
+    NSURL *bodyURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]
+                                isDirectory:NO];
     NSOutputStream *stream = [NSOutputStream outputStreamWithURL:bodyURL append:NO];
     [stream open];
     if (stream.streamStatus == NSStreamStatusError) {

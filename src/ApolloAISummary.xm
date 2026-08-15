@@ -1823,7 +1823,7 @@ static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
         // service, without adding another icon or visual row to the card.
         NSString *attribution = ApolloAISummaryProviderAttribution(generationProfile);
         NSString *origin = attribution.length > 0
-            ? [NSString stringWithFormat:@"AI-generated %@", attribution]
+            ? [@"AI-generated " stringByAppendingString:attribution]
             : @"AI-generated";
         NSString *caption = (!isPost && sourceCount > 0)
             ? [NSString stringWithFormat:@"\n\n%@ · Based on %lu representative comments · may be inaccurate",
@@ -1941,14 +1941,14 @@ static void ApolloAIRenderSummaryNode(id headerNode, BOOL isPost) {
         if (state == ApolloAIBoxStateEmpty) {
             // Terminal, non-interactive card: don't announce it as an expandable button.
             nodeView.accessibilityTraits &= ~UIAccessibilityTraitButton;
-            nodeView.accessibilityLabel = [NSString stringWithFormat:@"%@. Nothing to summarize.", title];
+            nodeView.accessibilityLabel = [title stringByAppendingString:@". Nothing to summarize."];
             nodeView.accessibilityHint = nil;
         } else {
             nodeView.accessibilityTraits |= UIAccessibilityTraitButton;
             NSString *spoken = body.length ? body : (state == ApolloAIBoxStateLoading ? @"Summarizing" : @"");
             nodeView.accessibilityLabel = expanded
                 ? [NSString stringWithFormat:@"%@. %@", title, spoken]
-                : [NSString stringWithFormat:@"%@, collapsed", title];
+                : [title stringByAppendingString:@", collapsed"];
             nodeView.accessibilityHint = @"Double tap to expand or collapse";
         }
     }

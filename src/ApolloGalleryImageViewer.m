@@ -1335,7 +1335,8 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
         NSString *name = item.imageURL.lastPathComponent.length > 0
             ? item.imageURL.lastPathComponent
             : [NSString stringWithFormat:@"image-%ld.jpg", (long)self.currentIndex + 1];
-        NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
+        NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]
+                                    isDirectory:NO];
         if ([data writeToURL:fileURL atomically:YES]) activityItems = @[fileURL];
     }
     if (!activityItems && item.imageURL) activityItems = @[item.imageURL];

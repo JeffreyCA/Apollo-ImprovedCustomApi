@@ -252,7 +252,7 @@ NSURL *ApolloBackupRestoreCreateBackupZip(NSError **error) {
         return nil;
     }
 
-    return [NSURL fileURLWithPath:zipPath];
+    return [NSURL fileURLWithPath:zipPath isDirectory:NO];
 }
 
 BOOL ApolloBackupRestoreRestoreFromZipURL(NSURL *zipURL, NSString **outErrorTitle, NSString **outErrorMessage) {

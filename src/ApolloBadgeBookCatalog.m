@@ -80,7 +80,7 @@ static NSCache<NSString *, UIImage *> *ApolloBadgeBookImageCache(void) {
     NSString *dir = ApolloBadgeBookResourceDirectory();
     if (dir.length == 0) return nil;
     NSString *path = [dir stringByAppendingPathComponent:self.imageFile];
-    NSURL *fileURL = [NSURL fileURLWithPath:path];
+    NSURL *fileURL = [NSURL fileURLWithPath:path isDirectory:NO];
     CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)fileURL, NULL);
     if (!src) return nil;
     NSDictionary *opts = @{ (id)kCGImageSourceShouldCacheImmediately: @YES };
