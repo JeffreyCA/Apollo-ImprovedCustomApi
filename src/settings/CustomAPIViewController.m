@@ -1321,9 +1321,14 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf blockAnnouncementsSwitchToggled:sender]; }];
 
+    // Named for the whole class of Reddit Developer Platform posts, not the
+    // sports ones it was first built against: the same widget mechanism carries
+    // r/wallstreetbets' live market dashboard, brackets, polls and community
+    // games. Settings search indexes row TITLES only, so the footer below spells
+    // the range out for anyone who lands on this screen.
     ApolloSettingsRow *devvitPosts =
         [ApolloSettingsRow switchRowWithID:@"gen.devvitPosts"
-                                     title:@"Live Match Threads & Games"
+                                     title:@"Live Interactive Posts"
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf devvitPostsSwitchToggled:sender]; }];
 
@@ -1338,7 +1343,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list. Live Match Threads & Games shows the real live widget for Reddit's interactive posts — match scores, predictions, brackets, and community games — instead of a placeholder. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a card can't show live scores."
+                                            footer:@"Small tweaks for the post list. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
                                               rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
