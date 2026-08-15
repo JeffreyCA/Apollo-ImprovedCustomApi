@@ -42,19 +42,9 @@ static void ApolloGalleryViewerSetVideosMuted(BOOL muted) {
     [[NSUserDefaults standardUserDefaults] setBool:muted forKey:kApolloGalleryViewerMutedKey];
 }
 
-// Whether the bottom post-info card is shown. Sticky like the mute state:
-// someone who dismissed it once wants it gone for the next video too. The
-// share menu carries the row that brings it back, so hiding it is never a
-// one-way door.
-static NSString *const kApolloGalleryViewerHideInfoKey = @"ApolloGalleryHidePostInfo";
-
-static BOOL ApolloGalleryViewerInfoPanelHidden(void) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kApolloGalleryViewerHideInfoKey];
-}
-
-static void ApolloGalleryViewerSetInfoPanelHidden(BOOL hidden) {
-    [[NSUserDefaults standardUserDefaults] setBool:hidden forKey:kApolloGalleryViewerHideInfoKey];
-}
+// (The post-info card's dismissal is deliberately NOT persisted — see
+// `infoPanelHiddenForItem`: it belongs to the post it was dismissed on, so
+// the next picture or video brings its own details back.)
 
 // Apollo parks the shared session on Ambient, which is silenced by the ringer
 // switch — so an unmuted clip would still play silently without this.
@@ -515,6 +505,11 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 @property (nonatomic, strong, nullable) UIView *infoPanelMaterial;
 @property (nonatomic, strong) UIButton *infoCloseButton;
 @property (nonatomic, strong) UITapGestureRecognizer *infoTap;
+// Dismissing the card gets you out of the way of THIS post, not every post:
+// paging to another one (or reopening the viewer) shows its details again,
+// since a new picture's title is new information rather than the thing you
+// just chose to ignore.
+@property (nonatomic) BOOL infoPanelHiddenForItem;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -1115,7 +1110,7 @@ static UIInterfaceOrientation ApolloGalleryInterfaceOrientationForDevice(UIDevic
     }
     CGFloat gap = (titleSize.height > 0.0 && subtitleSize.height > 0.0) ? 3.0 : 0.0;
     CGFloat panelHeight = 20.0 + titleSize.height + gap + subtitleSize.height;
-    BOOL showsInfo = (titleSize.height + subtitleSize.height) > 0.0 && !ApolloGalleryViewerInfoPanelHidden();
+    BOOL showsInfo = (titleSize.height + subtitleSize.height) > 0.0 && !self.infoPanelHiddenForItem;
     self.infoPanel.hidden = !showsInfo;
     self.titleLabel.frame = CGRectMake(12.0, 10.0, titleSize.width, titleSize.height);
     self.subtitleLabel.frame = CGRectMake(12.0, 10.0 + titleSize.height + gap, subtitleSize.width, subtitleSize.height);
@@ -1477,6 +1472,9 @@ static NSString *ApolloGalleryTimeString(NSTimeInterval seconds) {
     page = MAX(0, MIN(page, (NSInteger)self.feed.items.count - 1));
     if (page == self.currentIndex) return;
     self.currentIndex = page;
+    // A different post carries different details, so it starts with its card
+    // showing even if the last one's was dismissed.
+    self.infoPanelHiddenForItem = NO;
     [self apollo_updateChromeContent];
     [self apollo_syncPlayback];
     [self apollo_prefetchAroundIndex:page];
@@ -1855,13 +1853,13 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 }
 
 - (void)apollo_setInfoPanelHidden:(BOOL)hidden {
-    ApolloGalleryViewerSetInfoPanelHidden(hidden);
+    if (self.infoPanelHiddenForItem == hidden) return;
+    self.infoPanelHiddenForItem = hidden;
     // Rebuilds the share menu so its row reads the other way round now.
     [self apollo_updateChromeContent];
     [UIView animateWithDuration:0.2 animations:^{
         [self.view layoutIfNeeded];
     }];
-    if (hidden) [self apollo_showToast:@"Post info hidden"];
 }
 
 // The share button's actions as a UIMenu. Same set as the long-press sheet;
@@ -1916,7 +1914,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     }
     // The way back from the card's × (and the way to dismiss it without
     // hunting for that button).
-    BOOL infoHidden = ApolloGalleryViewerInfoPanelHidden();
+    BOOL infoHidden = self.infoPanelHiddenForItem;
     [children addObject:[UIAction actionWithTitle:(infoHidden ? @"Show Post Info" : @"Hide Post Info")
                                             image:[UIImage systemImageNamed:(infoHidden ? @"info.circle" : @"info.circle.fill")]
                                        identifier:nil
