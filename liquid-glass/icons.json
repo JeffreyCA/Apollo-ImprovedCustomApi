@@ -2,7 +2,7 @@
   "primaryIconID": "jryng",
   "groups": [
     {
-      "id": "original", "title": "Original",
+      "id": "original", "title": "Apollo",
       "coverIconIDs": ["apollo-classic", "halo-glass", "AppIcon"],
       "description": "The original Apollo icon in Liquid Glass, crafted by the community."
     },

@@ -1026,7 +1026,7 @@ static LGStandardPack LGDisplayedActiveStandardPack(void) {
 
 static NSString *LGStandardPackTitle(LGStandardPack pack) {
     switch (pack) {
-        case LGStandardPackApolloOriginals: return @"Apollo Originals";
+        case LGStandardPackApolloOriginals: return @"Originals";
         case LGStandardPackCommunity:       return @"Community";
         case LGStandardPackUltra:           return @"Ultra";
         case LGStandardPackSekrit:          return @"Sekrit";
