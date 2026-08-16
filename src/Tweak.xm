@@ -19,6 +19,7 @@
 #import "ApolloUsageHeartbeat.h"
 #import "ApolloPushNotifications.h"
 #import "ApolloBarkNotifications.h"
+#import "ApolloLiquidGlassIconSelectionState.h"
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "settings/CustomAPIViewController.h"
@@ -3374,6 +3375,7 @@ static BOOL ApolloPixelPalsBlockedByModal(UIWindow *window) {
 - (void)setAlternateIconName:(NSString *)name completionHandler:(void (^)(NSError *error))completionHandler {
     void (^wrapped)(NSError *) = ^(NSError *error) {
         if (!error) {
+            ApolloLGConfirmSuccessfulSystemIconChange(name);
             BOOL changed = ApolloBarkNoteSelectedIconName(name);
             if (changed && ApolloBarkModeActive()) {
                 ApolloBarkSyncBackendDeviceTransport();

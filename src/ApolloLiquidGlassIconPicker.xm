@@ -7,6 +7,7 @@
 #import "ApolloCommon.h"
 #import "ApolloBarkNotifications.h"
 #import "ApolloLiquidGlassIconIDs.h"
+#import "ApolloLiquidGlassIconSelectionState.h"
 #import "ApolloThemeRuntime.h"
 #import "settings/ApolloSettingsTableViewController.h"
 
@@ -108,6 +109,8 @@ typedef struct {
 static char kLGIconSelectionFeedbackKey;
 static char kLGAppearanceSelectionFeedbackKey;
 static char kLGCommunitySelectionReplayKey;
+static char kLGCommunityCardBackgroundColorKey;
+static char kLGPickerCardBackgroundColorKey;
 static char kLGNativeIconCellSelectedKey;
 static char kLGNativeIconCellCheckBadgeKey;
 static char kLGNativeIconCellPressAnimationKey;
@@ -948,6 +951,56 @@ static void LGPersistActiveStandardPackRow(LGStandardPack pack, NSInteger row) {
     }
 }
 
+// Apollo owns the setter for Standard icons, so a tap only tells us what the
+// user intends to select. Keep that intent in memory until UIApplication's
+// completion confirms success. This prevents a stray forwarded selection or
+// a failed request from erasing a still-active Liquid Glass icon.
+static LGStandardPack sLGPendingStandardPack = LGStandardPackCount;
+static NSInteger sLGPendingStandardPackRow = NSNotFound;
+static NSUInteger sLGPendingStandardSelectionGeneration = 0;
+
+static void LGBeginPendingStandardPackSelection(LGStandardPack pack, NSInteger row) {
+    if (pack < 0 || pack >= LGStandardPackCount || row < 0) return;
+    sLGPendingStandardPack = pack;
+    sLGPendingStandardPackRow = row;
+    NSUInteger generation = ++sLGPendingStandardSelectionGeneration;
+
+    // Do not let an Apollo path that never reaches the icon setter leave an
+    // intent around for an unrelated icon change later in the session.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (sLGPendingStandardSelectionGeneration != generation) return;
+        ApolloLog(@"[LGIconPicker] pending Standard icon selection expired");
+        sLGPendingStandardPack = LGStandardPackCount;
+        sLGPendingStandardPackRow = NSNotFound;
+    });
+}
+
+void ApolloLGConfirmSuccessfulSystemIconChange(__unused NSString *iconName) {
+    void (^commit)(void) = ^{
+        LGStandardPack pack = sLGPendingStandardPack;
+        NSInteger row = sLGPendingStandardPackRow;
+        if (pack < 0 || pack >= LGStandardPackCount || row < 0) return;
+
+        ++sLGPendingStandardSelectionGeneration;
+        sLGPendingStandardPack = LGStandardPackCount;
+        sLGPendingStandardPackRow = NSNotFound;
+        LGClearPersistedActiveIconID();
+        LGPersistActiveStandardPackRow(pack, row);
+        ApolloLog(@"[LGIconPicker] confirmed Standard pack=%ld row=%ld",
+                  (long)pack, (long)row);
+    };
+
+    // Persist before Apollo's original completion handler redraws its cells.
+    // UIApplication normally completes on the main thread, but preserve that
+    // ordering if a future iOS version invokes the callback elsewhere.
+    if (NSThread.isMainThread) {
+        commit();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), commit);
+    }
+}
+
 static NSInteger LGActiveStandardPackRow(LGStandardPack pack) {
     if (LGActiveStandardPack() != pack) return NSNotFound;
     NSNumber *stored = [NSUserDefaults.standardUserDefaults objectForKey:kLGActiveStandardPackRowDefaultsKey];
@@ -973,7 +1026,7 @@ static LGStandardPack LGDisplayedActiveStandardPack(void) {
 
 static NSString *LGStandardPackTitle(LGStandardPack pack) {
     switch (pack) {
-        case LGStandardPackApolloOriginals: return @"Apollo Originals";
+        case LGStandardPackApolloOriginals: return @"Originals";
         case LGStandardPackCommunity:       return @"Community";
         case LGStandardPackUltra:           return @"Ultra";
         case LGStandardPackSekrit:          return @"Sekrit";
@@ -1287,6 +1340,62 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
 
 #pragma mark - Icon grid cell (pack contents screen)
 
+static void LGSetAnimatedSelectionVisuals(UIView *selectionRing,
+                                          UIImageView *checkBadge,
+                                          BOOL selected,
+                                          BOOL animated) {
+    if (!selectionRing || !checkBadge) return;
+    [selectionRing.layer removeAllAnimations];
+    [checkBadge.layer removeAllAnimations];
+
+    if (!animated || UIAccessibilityIsReduceMotionEnabled()) {
+        selectionRing.hidden = !selected;
+        checkBadge.hidden = !selected;
+        selectionRing.alpha = 1.0;
+        checkBadge.alpha = 1.0;
+        selectionRing.transform = CGAffineTransformIdentity;
+        checkBadge.transform = CGAffineTransformIdentity;
+        return;
+    }
+
+    if (!selected) {
+        selectionRing.hidden = YES;
+        checkBadge.hidden = YES;
+        selectionRing.alpha = 1.0;
+        checkBadge.alpha = 1.0;
+        selectionRing.transform = CGAffineTransformIdentity;
+        checkBadge.transform = CGAffineTransformIdentity;
+        return;
+    }
+
+    selectionRing.hidden = NO;
+    checkBadge.hidden = NO;
+    selectionRing.alpha = 0.0;
+    selectionRing.transform = CGAffineTransformMakeScale(0.985, 0.985);
+    checkBadge.alpha = 0.0;
+    checkBadge.transform = CGAffineTransformMakeScale(0.55, 0.55);
+
+    [UIView animateWithDuration:0.22
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseOut |
+                                UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        selectionRing.alpha = 1.0;
+        selectionRing.transform = CGAffineTransformIdentity;
+    } completion:nil];
+    [UIView animateWithDuration:0.34
+                          delay:0.035
+         usingSpringWithDamping:0.68
+          initialSpringVelocity:0.45
+                        options:UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        checkBadge.alpha = 1.0;
+        checkBadge.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
 @interface LGIconGridCell : UICollectionViewCell
 - (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor cardBackgroundColor:(UIColor *)cardBackgroundColor;
 @end
@@ -1299,6 +1408,9 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
     UIView *_selectionRing;
     UIImageView *_checkBadge;
     LGPressAnimationState _pressAnimation;
+    NSString *_representedIconID;
+    BOOL _hasSelectionState;
+    BOOL _selectionState;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1416,15 +1528,18 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
         ? [NSString stringWithFormat:@"%@, by %@%@", row->displayName, row->designer, selected ? @", selected" : @""]
         : [NSString stringWithFormat:@"%@%@", row->displayName, selected ? @", selected" : @""];
 
-    _checkBadge.hidden = !selected;
-    _selectionRing.hidden = !selected;
-
     UIColor *accent = accentColor ?: UIColor.systemBlueColor;
     _checkBadge.tintColor = accent;
     // Selection ring border needs a resolved snapshot — .CGColor on a dynamic
     // provider color (custom theme accent) doesn't repaint itself later.
     UIColor *resolvedAccent = [accent resolvedColorWithTraitCollection:self.traitCollection];
     _selectionRing.layer.borderColor = resolvedAccent.CGColor;
+    BOOL animateSelection = _hasSelectionState &&
+        [_representedIconID isEqualToString:iconID] && _selectionState != selected;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animateSelection);
+    _representedIconID = [iconID copy];
+    _hasSelectionState = YES;
+    _selectionState = selected;
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -1437,6 +1552,9 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
 - (void)prepareForReuse {
     [super prepareForReuse];
     LGResetPressAnimation(self, &_pressAnimation);
+    _representedIconID = nil;
+    _hasSelectionState = NO;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, NO, NO);
 }
 
 @end
@@ -1492,6 +1610,7 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
       cardBackgroundColor:(UIColor *)cardBackgroundColor
      pressAnimationEnabled:(BOOL)pressAnimationEnabled
                tapHandler:(LGGroupCardTapHandler)tapHandler;
+- (void)updateForSelectedCardIndex:(NSInteger)selectedCardIndex animated:(BOOL)animated;
 @end
 
 @implementation LGPackCardView {
@@ -1507,6 +1626,9 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
     LGPressAnimationState _pressAnimation;
     BOOL _pressAnimationEnabled;
     UIColor *_selectionAccentColor;
+    BOOL _hasSelectionState;
+    BOOL _selectionState;
+    NSInteger _selectionCardIndex;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1654,6 +1776,8 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
        cardBackgroundColor:(UIColor *)cardBackgroundColor
       pressAnimationEnabled:(BOOL)pressAnimationEnabled
                 tapHandler:(LGGroupCardTapHandler)tapHandler {
+    BOOL animateSelection = _hasSelectionState && _selectionCardIndex == cardIndex &&
+        _selectionState != selected;
     _groupIndex = cardIndex;
     _tapHandler = [tapHandler copy];
     _pressAnimationEnabled = pressAnimationEnabled;
@@ -1671,8 +1795,10 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
     _selectionAccentColor = accent;
     _checkBadge.tintColor = accent;
     _selectionRing.layer.borderColor = [[accent resolvedColorWithTraitCollection:self.traitCollection] CGColor];
-    _checkBadge.hidden = !selected;
-    _selectionRing.hidden = !selected;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animateSelection);
+    _hasSelectionState = YES;
+    _selectionState = selected;
+    _selectionCardIndex = cardIndex;
     if (selected) self.accessibilityLabel = [self.accessibilityLabel stringByAppendingString:@", selected"];
 
     NSInteger sampleCount = MIN((NSInteger)_fanImageViews.count, (NSInteger)previewImages.count);
@@ -1714,6 +1840,23 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
     if (_tapHandler) _tapHandler(_groupIndex);
 }
 
+- (void)updateForSelectedCardIndex:(NSInteger)selectedCardIndex animated:(BOOL)animated {
+    BOOL selected = _groupIndex == selectedCardIndex;
+    // Changing an alternate icon can make UIKit rebuild the surrounding table
+    // before the setter's completion runs. In that case this cover has already
+    // been configured as selected, but that initial configuration correctly
+    // avoided animating. Replay only the active cover here so a deliberate
+    // selection still gets the same visible confirmation as its icon card.
+    if (_hasSelectionState && _selectionState == selected && !(animated && selected)) return;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animated && _hasSelectionState);
+    _hasSelectionState = YES;
+    _selectionState = selected;
+    _selectionCardIndex = _groupIndex;
+    self.accessibilityLabel = [NSString stringWithFormat:@"%@, %@%@",
+        _titleLabel.text ?: @"", _countLabel.text ?: @"", selected ? @", selected" : @""];
+    self.accessibilityTraits = UIAccessibilityTraitButton | (selected ? UIAccessibilityTraitSelected : 0);
+}
+
 @end
 
 @interface LGPackGridRowCell : UITableViewCell
@@ -1729,6 +1872,7 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
                                 accentColor:(UIColor *)accentColor
                         cardBackgroundColor:(UIColor *)cardBackgroundColor
                                  tapHandler:(LGGroupCardTapHandler)tapHandler;
+- (void)updateSelectedCardIndex:(NSInteger)selectedCardIndex animated:(BOOL)animated;
 @end
 
 @implementation LGPackGridRowCell {
@@ -1827,6 +1971,12 @@ typedef void (^LGGroupCardTapHandler)(NSInteger groupIndex);
     }
 }
 
+- (void)updateSelectedCardIndex:(NSInteger)selectedCardIndex animated:(BOOL)animated {
+    for (LGPackCardView *card in _cards) {
+        if (!card.hidden) [card updateForSelectedCardIndex:selectedCardIndex animated:animated];
+    }
+}
+
 @end
 
 #pragma mark - Featured icon strip (main screen, above pack cards)
@@ -1839,6 +1989,7 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
               accentColor:(UIColor *)accentColor
       cardBackgroundColor:(UIColor *)cardBackgroundColor
                tapHandler:(LGFeaturedCardTapHandler)tapHandler;
+- (void)updateForSelectedIconID:(NSString *)selectedIconID animated:(BOOL)animated;
 @end
 
 
@@ -1851,6 +2002,9 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
     LGFeaturedCardTapHandler _tapHandler;
     LGPressAnimationState _pressAnimation;
     UIColor *_selectionAccentColor;
+    NSString *_representedIconID;
+    BOOL _hasSelectionState;
+    BOOL _selectionState;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1937,8 +2091,12 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
     UIColor *resolvedAccent = [accent resolvedColorWithTraitCollection:self.traitCollection];
     _checkBadge.tintColor = accent;
     _selectionRing.layer.borderColor = resolvedAccent.CGColor;
-    _checkBadge.hidden = !selected;
-    _selectionRing.hidden = !selected;
+    BOOL animateSelection = _hasSelectionState &&
+        [_representedIconID isEqualToString:row->iconID] && _selectionState != selected;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animateSelection);
+    _representedIconID = [row->iconID copy];
+    _hasSelectionState = YES;
+    _selectionState = selected;
 
     self.accessibilityLabel = row->designer.length
         ? [NSString stringWithFormat:@"%@, by %@%@", row->displayName, row->designer, selected ? @", selected" : @""]
@@ -1976,6 +2134,20 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
 
 - (void)lg_tapped {
     if (_tapHandler && _row) _tapHandler(_row);
+}
+
+- (void)updateForSelectedIconID:(NSString *)selectedIconID animated:(BOOL)animated {
+    if (!_row) return;
+    BOOL selected = selectedIconID.length && [_row->iconID isEqualToString:selectedIconID];
+    if (_hasSelectionState && _selectionState == selected) return;
+    LGSetAnimatedSelectionVisuals(_selectionRing, _checkBadge, selected, animated && _hasSelectionState);
+    _hasSelectionState = YES;
+    _selectionState = selected;
+    self.accessibilityLabel = _row->designer.length
+        ? [NSString stringWithFormat:@"%@, by %@%@", _row->displayName, _row->designer,
+                                             selected ? @", selected" : @""]
+        : [NSString stringWithFormat:@"%@%@", _row->displayName, selected ? @", selected" : @""];
+    self.accessibilityTraits = UIAccessibilityTraitButton | (selected ? UIAccessibilityTraitSelected : 0);
 }
 
 @end
@@ -2064,6 +2236,7 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
                accentColor:(UIColor *)accentColor
        cardBackgroundColor:(UIColor *)cardBackgroundColor
                 tapHandler:(LGFeaturedCardTapHandler)tapHandler;
+- (void)updateSelectedIconID:(NSString *)selectedIconID animated:(BOOL)animated;
 @end
 
 @implementation LGFeaturedStripCell {
@@ -2186,7 +2359,38 @@ typedef void (^LGFeaturedCardTapHandler)(const LGIconRow *row);
     [self setNeedsLayout];
 }
 
+- (void)updateSelectedIconID:(NSString *)selectedIconID animated:(BOOL)animated {
+    for (UIView *view in _stack.arrangedSubviews) {
+        if ([view isKindOfClass:[LGFeaturedCardView class]])
+            [(LGFeaturedCardView *)view updateForSelectedIconID:selectedIconID animated:animated];
+    }
+}
+
 @end
+
+static void LGRefreshVisiblePickerSelection(UITableView *tableView, BOOL animated) {
+    if (!tableView) return;
+    NSString *activeIconID = LGActiveIconID();
+    LGStandardPack activeStandardPack = LGActiveStandardPack();
+    NSInteger selectedGroupIndex = activeStandardPack == LGStandardPackCount
+        ? LGGroupIndexForIconID(activeIconID) : NSNotFound;
+    NSInteger selectedStandardPack = activeStandardPack == LGStandardPackCount
+        ? NSNotFound : activeStandardPack;
+
+    for (NSIndexPath *indexPath in tableView.indexPathsForVisibleRows) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        if (LGHasFeaturedSection() && indexPath.section == LGFeaturedSectionIndex() &&
+            [cell isKindOfClass:[LGFeaturedStripCell class]]) {
+            [(LGFeaturedStripCell *)cell updateSelectedIconID:activeIconID animated:animated];
+        } else if (indexPath.section == LGPacksSectionIndex() &&
+                   [cell isKindOfClass:[LGPackGridRowCell class]]) {
+            [(LGPackGridRowCell *)cell updateSelectedCardIndex:selectedGroupIndex animated:animated];
+        } else if (indexPath.section == LGStandardPacksSectionIndex() &&
+                   [cell isKindOfClass:[LGPackGridRowCell class]]) {
+            [(LGPackGridRowCell *)cell updateSelectedCardIndex:selectedStandardPack animated:animated];
+        }
+    }
+}
 
 #pragma mark - Alternate icon application
 
@@ -2534,48 +2738,12 @@ static void LGFixLegacyUltraPreview(UITableViewCell *cell, NSInteger row) {
 
 static void LGSetNativeIconCellCheckmark(UITableViewCell *cell, BOOL selected);
 
-static BOOL LGColorsAreVisuallyEqual(UIColor *first, UIColor *second,
-                                     UITraitCollection *traits) {
-    if (!first || !second) return NO;
-    UIColor *a = [first resolvedColorWithTraitCollection:traits];
-    UIColor *b = [second resolvedColorWithTraitCollection:traits];
-    CGFloat ar, ag, ab, aa, br, bg, bb, ba;
-    if (![a getRed:&ar green:&ag blue:&ab alpha:&aa] ||
-        ![b getRed:&br green:&bg blue:&bb alpha:&ba]) return NO;
-    const CGFloat tolerance = 0.015;
-    return fabs(ar - br) <= tolerance && fabs(ag - bg) <= tolerance &&
-        fabs(ab - bb) <= tolerance && fabs(aa - ba) <= tolerance;
-}
-
-static BOOL LGColorIsNearlyBlack(UIColor *color, UITraitCollection *traits) {
-    if (!color) return NO;
-    CGFloat red, green, blue, alpha;
-    UIColor *resolved = [color resolvedColorWithTraitCollection:traits];
-    return [resolved getRed:&red green:&green blue:&blue alpha:&alpha] &&
-        red <= 0.02 && green <= 0.02 && blue <= 0.02 && alpha >= 0.95;
-}
-
-static UIColor *LGRaisedNativeCardFallbackColor(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
-        // A translucent lift keeps custom-theme hue visible while separating
-        // the card from an otherwise identical page background.
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark
-            ? [UIColor colorWithWhite:1.0 alpha:0.09]
-            : [UIColor colorWithWhite:1.0 alpha:0.82];
-    }];
-}
-
 static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
-                                                UIColor *pageBackgroundColor,
+                                                UIColor *cardBackgroundColor,
                                                 BOOL firstRow,
                                                 BOOL lastRow) {
     if (!cell) return;
-    UIColor *color = LGThemedCardBackgroundColor(nil);
-    if (LGColorsAreVisuallyEqual(color, pageBackgroundColor, cell.traitCollection) ||
-        (cell.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark &&
-         LGColorIsNearlyBlack(color, cell.traitCollection))) {
-        color = LGRaisedNativeCardFallbackColor();
-    }
+    UIColor *color = cardBackgroundColor ?: LGThemedCardBackgroundColor(nil);
     // Apollo can replace its cell-level background after willDisplay, so keep
     // a picker-owned fill inside contentView instead of relying on it.
     cell.backgroundColor = UIColor.clearColor;
@@ -2611,24 +2779,23 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 @interface LGNativeIconPackViewController : ApolloSettingsTableViewController
 - (instancetype)initWithSourceController:(id)sourceController
                               sourceTable:(UITableView *)sourceTable
+                     cardBackgroundColor:(UIColor *)cardBackgroundColor
                                      pack:(LGStandardPack)pack;
 @end
-
-static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
-    // A Standard icon is now the intended active choice. Clear any Liquid
-    // Glass fallback immediately instead of polling alternateIconName later,
-    // when iOS may still report the icon that was active before this tap.
-    LGClearPersistedActiveIconID();
-    LGPersistActiveStandardPackRow(pack, row);
-}
 
 @implementation LGNativeIconPackViewController {
     __weak id _sourceController;
     __weak UITableView *_sourceTable;
+    UIColor *_cardBackgroundColor;
     LGStandardPack _pack;
     NSInteger _nativeSection;
     id _changedIconObserver;
     id _didBecomeActiveObserver;
+}
+
+- (UIColor *)lg_pageBackgroundColor {
+    UITableView *liveSource = ApolloThemeSourceTableIsStale(_sourceTable) ? nil : _sourceTable;
+    return LGThemedPageBackgroundColor(liveSource);
 }
 
 - (void)lg_reassertVisibleNativeRows {
@@ -2637,7 +2804,7 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
     for (NSIndexPath *indexPath in tableView.indexPathsForVisibleRows) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         if (!cell) continue;
-        LGNormalizeNativeIconCellBackground(cell, LGThemedPageBackgroundColor(_sourceTable),
+        LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                             indexPath.row == 0,
                                             indexPath.row == rowCount - 1);
         LGSetNativeIconCellCheckmark(cell,
@@ -2656,6 +2823,7 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
 
 - (instancetype)initWithSourceController:(id)sourceController
                               sourceTable:(UITableView *)sourceTable
+                     cardBackgroundColor:(UIColor *)cardBackgroundColor
                                      pack:(LGStandardPack)pack {
     // Community uses an inset-grouped table, which draws the icon rows as one
     // rounded card. Match that native geometry without constructing Apollo's
@@ -2664,6 +2832,7 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
     if (!self) return nil;
     _sourceController = sourceController;
     _sourceTable = sourceTable;
+    _cardBackgroundColor = cardBackgroundColor ?: LGThemedCardBackgroundColor(sourceTable);
     _pack = pack;
     _nativeSection = LGNativeSectionForStandardPack(pack);
     self.title = LGStandardPackTitle(pack);
@@ -2675,7 +2844,7 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
     UITableView *tableView = self.tableView;
     objc_setAssociatedObject(tableView, &kLGNativeDetailTableSectionKey,
                              @(_nativeSection), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    tableView.backgroundColor = LGThemedPageBackgroundColor(_sourceTable);
+    tableView.backgroundColor = [self lg_pageBackgroundColor];
     __weak LGNativeIconPackViewController *weakSelf = self;
     _changedIconObserver = [NSNotificationCenter.defaultCenter
         addObserverForName:kLGChangedIconNotification
@@ -2697,7 +2866,7 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
         LGNativeIconPackViewController *strongSelf = weakSelf;
         if (!strongSelf) return;
         UITableView *visibleTable = strongSelf.tableView;
-        visibleTable.backgroundColor = LGThemedPageBackgroundColor(strongSelf->_sourceTable);
+        visibleTable.backgroundColor = [strongSelf lg_pageBackgroundColor];
         [strongSelf lg_reloadAndReassertAfterNativeRefresh];
     }];
 }
@@ -2714,7 +2883,7 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     UITableView *tableView = self.tableView;
-    tableView.backgroundColor = LGThemedPageBackgroundColor(_sourceTable);
+    tableView.backgroundColor = [self lg_pageBackgroundColor];
     [tableView reloadData];
     __weak UITableView *weakTable = tableView;
     LGInstallAppearanceMenu(self, tableView, ^{ [weakTable reloadData]; });
@@ -2728,8 +2897,12 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
     if (previousTraitCollection.userInterfaceStyle == self.traitCollection.userInterfaceStyle) return;
+    // The cover color sampled while this screen was pushed can be a resolved
+    // (non-dynamic) UIColor. Refresh from the active Apollo/custom theme when
+    // the system appearance changes so the card does not retain its old mode.
+    _cardBackgroundColor = LGThemedCardBackgroundColor(nil);
     UITableView *tableView = self.tableView;
-    tableView.backgroundColor = LGThemedPageBackgroundColor(_sourceTable);
+    tableView.backgroundColor = [self lg_pageBackgroundColor];
     [tableView reloadData];
 }
 
@@ -2759,7 +2932,7 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
     // producing a visibly shorter/tinted first row. Let the cell itself own
     // one continuous card fill, matching every other Standard icon row.
     NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
-    LGNormalizeNativeIconCellBackground(cell, LGThemedPageBackgroundColor(_sourceTable),
+    LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                         indexPath.row == 0, indexPath.row == rowCount - 1);
     BOOL selected = LGStandardPackRowIsActive(_pack, indexPath.row);
     LGSetNativeIconCellCheckmark(cell, selected);
@@ -2783,7 +2956,7 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
     // Normalize after both native styling passes so every Standard pack keeps
     // the Community-style rounded card from its first presentation onward.
     NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
-    LGNormalizeNativeIconCellBackground(cell, LGThemedPageBackgroundColor(_sourceTable),
+    LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                         indexPath.row == 0, indexPath.row == rowCount - 1);
     // Apollo rebuilds its private accessory during willDisplay. Reassert the
     // persisted selection afterward so backgrounding cannot visually revert
@@ -2798,6 +2971,8 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    if (_pack == LGStandardPackApolloOriginals) return @"Original Icons";
+
     id source = _sourceController;
     if (!source) return nil;
     LGSetForwardedNativeSection(source, _nativeSection);
@@ -2846,8 +3021,13 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
     // appear to change. End only the table's transient pressed state.
     if (LGStandardPackRowIsActive(_pack, indexPath.row)) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        [tableView reloadRowsAtIndexPaths:@[ indexPath ]
-                         withRowAnimation:UITableViewRowAnimationNone];
+        // Do not reload the row while its press-release transform is still
+        // animating. In some dark custom themes UIKit keeps the outgoing cell
+        // snapshot visible, which looks like a duplicated expanding row.
+        __weak LGNativeIconPackViewController *weakSelf = self;
+        LGPerformNativeIconSelectionWithFeedback(tableView, ^{
+            [weakSelf lg_reassertVisibleNativeRows];
+        });
         return;
     }
 
@@ -2893,15 +3073,10 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
         UITableView *strongTable = weakTable;
         if (!strongSource || !strongTable) return;
         LGSetForwardedNativeSection(strongSource, nativeSection);
+        LGBeginPendingStandardPackSelection(pack, indexPath.row);
         ((void (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(
             strongSource, @selector(tableView:didSelectRowAtIndexPath:), strongTable, indexPath);
         LGSetForwardedNativeSection(strongSource, NSNotFound);
-        LGNoteNativePackSelection(pack, indexPath.row);
-        // The source controller owns Apollo's asynchronous icon setter, but
-        // this visible table owns the selection indicator. Refresh directly
-        // from our persisted row instead of depending on notification order
-        // between two different controllers.
-        [strongTable reloadData];
     });
 }
 
@@ -2960,6 +3135,24 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
     NSInteger _gi;
     UIColor *_cardBackgroundColor;
     BOOL _didRevealInitialSelection;
+}
+
+- (void)lg_refreshVisibleSelection {
+    const LGRuntimeGroup *group = LGGroupAt(_gi);
+    if (!group) return;
+    NSString *activeID = LGActiveIconID();
+    UIColor *accent = ApolloThemeAccentColor() ?: self.view.tintColor ?: UIColor.systemBlueColor;
+    for (NSIndexPath *indexPath in self.collectionView.indexPathsForVisibleItems) {
+        if (indexPath.item >= group->count) continue;
+        LGIconGridCell *cell = (LGIconGridCell *)[self.collectionView cellForItemAtIndexPath:indexPath];
+        if (![cell isKindOfClass:LGIconGridCell.class]) continue;
+        const LGIconRow *row = &group->rows[indexPath.item];
+        BOOL selected = activeID.length && [row->iconID isEqualToString:activeID];
+        [cell configureWithRow:row
+                     selected:selected
+                  accentColor:accent
+          cardBackgroundColor:_cardBackgroundColor];
+    }
 }
 
 - (instancetype)initWithGroupIndex:(NSInteger)groupIndex {
@@ -3110,9 +3303,9 @@ static void LGNoteNativePackSelection(LGStandardPack pack, NSInteger row) {
     [collectionView deselectItemAtIndexPath:indexPath animated:YES];
     const LGRuntimeGroup *g = LGGroupAt(_gi);
     if (!g || indexPath.item >= g->count) return;
-    __weak UICollectionView *weakCV = collectionView;
+    __weak LGGroupIconsViewController *weakSelf = self;
     LGApplyIconUsingPreferredAppearance(collectionView, &g->rows[indexPath.item], ^(BOOL success) {
-        if (success) [weakCV reloadData];
+        if (success) [weakSelf lg_refreshVisibleSelection];
     });
 }
 
@@ -3226,6 +3419,7 @@ static void LGSetNativeIconCellCheckmark(UITableViewCell *cell, BOOL selected) {
 // hook blocks below — each instance gets its own slot.
 static char kLGRememberedTableViewKey;
 static char kLGDailyRolloverTimerKey;
+static char kLGPickerHasAppearedKey;
 static __weak UITableView *sLGAppIconPickerTableView;
 
 static void LGRememberTableView(id viewController, UITableView *tableView) {
@@ -3288,6 +3482,10 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
     UIViewController *controller = (UIViewController *)self;
     UITableView *tableView = LGRememberedTableView(self);
     if (tableView) sLGAppIconPickerTableView = tableView;
+    BOOL hasAppeared = [objc_getAssociatedObject(self, &kLGPickerHasAppearedKey) boolValue];
+    if (hasAppeared) LGRefreshVisiblePickerSelection(tableView, YES);
+    objc_setAssociatedObject(self, &kLGPickerHasAppearedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (LGRefreshDailyFeaturedRowsIfNeeded()) LGReloadDailyFeaturedSection(tableView, NO);
     LGScheduleDailyFeaturedRollover(self);
     __weak UITableView *weakTableView = tableView;
@@ -3349,7 +3547,7 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
             cardBackgroundColor:LGThemedCardBackgroundColor(sourceTable)
                      tapHandler:^(const LGIconRow *row) {
             LGApplyIconUsingPreferredAppearance(weakTableView, row, ^(BOOL success) {
-                if (success) [weakTableView reloadData];
+                if (success) LGRefreshVisiblePickerSelection(weakTableView, YES);
             });
         }];
         return cell;
@@ -3382,6 +3580,9 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
 
         NSInteger columnCount = LGMainPackColumnCount(CGRectGetWidth(tableView.bounds));
         UITableView *sourceTable = ApolloInheritedSettingsThemeSourceTableView((UITableViewController *)(id)self);
+        UIColor *cardBackgroundColor = LGThemedCardBackgroundColor(sourceTable);
+        objc_setAssociatedObject(self, &kLGPickerCardBackgroundColorKey, cardBackgroundColor,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         __weak UIViewController *weakController = (UIViewController *)self;
         __weak id weakSourceController = self;
         __weak UITableView *weakSourceTable = tableView;
@@ -3389,7 +3590,7 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
                                       columnCount:columnCount
                               selectedStandardPack:LGDisplayedActiveStandardPack()
                                       accentColor:ApolloThemeAccentColor() ?: tableView.tintColor
-                              cardBackgroundColor:LGThemedCardBackgroundColor(sourceTable)
+                              cardBackgroundColor:cardBackgroundColor
                                        tapHandler:^(NSInteger cardIndex) {
             LGStandardPack pack = (LGStandardPack)cardIndex;
             UIViewController *destination = nil;
@@ -3406,6 +3607,7 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
             } else {
                 destination = [[LGNativeIconPackViewController alloc] initWithSourceController:weakSourceController
                                                                                    sourceTable:weakSourceTable
+                                                                           cardBackgroundColor:cardBackgroundColor
                                                                                           pack:pack];
             }
             if (destination) [weakController.navigationController pushViewController:destination animated:YES];
@@ -3517,7 +3719,6 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         }
         LG_REMAP_SCOPE(tableView, forwardedSection, 0);
         %orig(tableView, nativeIndexPath);
-        LGClearPersistedActiveIconID();
         return;
     }
     if (LGAlternateIconsAvailable() && LGHasFeaturedSection() && indexPath.section == LGFeaturedSectionIndex()) {
@@ -3552,11 +3753,6 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         }
         LG_REMAP_SCOPE(tableView, r.section, indexPath.section);
         %orig(tableView, r);
-        // The tapped row belongs to Apollo's own (non-glass) icon list, so
-        // whatever it just selected is no longer one of ours — drop our
-        // fallback so LGActiveIconID() doesn't keep reporting a stale LG
-        // icon on systems where the system API itself can't be trusted.
-        LGClearPersistedActiveIconID();
         return;
     }
     %orig;
@@ -3615,22 +3811,80 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
 
 %end
 
+static UIColor *LGCommunityCardBackgroundColor(id controller) {
+    UIColor *stored = objc_getAssociatedObject(controller, &kLGCommunityCardBackgroundColorKey);
+    if (stored) return stored;
+
+    UIViewController *viewController = (UIViewController *)controller;
+    NSArray<UIViewController *> *stack = viewController.navigationController.viewControllers;
+    NSUInteger index = [stack indexOfObject:viewController];
+    if (index != NSNotFound && index > 0) {
+        UIColor *pickerColor = objc_getAssociatedObject(stack[index - 1],
+                                                        &kLGPickerCardBackgroundColorKey);
+        if (pickerColor) stored = pickerColor;
+    }
+    UITableView *sourceTable = ApolloInheritedSettingsThemeSourceTableView(
+        (UITableViewController *)(id)controller);
+    if (!stored && !ApolloThemeSourceTableIsStale(sourceTable)) {
+        stored = LGThemedCardBackgroundColor(sourceTable);
+    }
+    if (stored) objc_setAssociatedObject(controller, &kLGCommunityCardBackgroundColorKey, stored,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return stored ?: LGThemedCardBackgroundColor(nil);
+}
+
+static void LGStyleCommunityIconCell(id controller,
+                                     UITableViewCell *cell,
+                                     UITableView *tableView,
+                                     NSIndexPath *indexPath) {
+    if (!cell || !tableView || !indexPath) return;
+    UIColor *accent = ApolloThemeAccentColor() ?: tableView.tintColor;
+    cell.tintColor = accent;
+    cell.accessoryView.tintColor = accent;
+    for (UIView *subview in cell.contentView.subviews) subview.tintColor = accent;
+
+    NSInteger rowCount = [tableView numberOfRowsInSection:indexPath.section];
+    LGNormalizeNativeIconCellBackground(cell, LGCommunityCardBackgroundColor(controller),
+                                        indexPath.row == 0,
+                                        indexPath.row == rowCount - 1);
+    LGSetNativeIconCellCheckmark(cell,
+        LGActiveStandardPackRow(LGStandardPackCommunity) == indexPath.row);
+}
+
 %hook _TtC6Apollo39SettingsCommunityIconPackViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    UITableView *tableView = MSHookIvar<UITableView *>(self, "tableView");
+    __weak UITableView *weakTable = tableView;
+    LGInstallAppearanceMenu((UIViewController *)self, tableView, ^{
+        [weakTable reloadData];
+    });
+}
+
+%new
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    return @"Community Icons";
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    return nil;
+}
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     LGRememberTableView(self, tableView);
     UITableViewCell *cell = %orig;
-    // Match the rendering pass used by the tweak-owned Standard pack tables:
-    // the same card fill, dynamic accent tint, and persisted checkmark state.
-    UIColor *cellColor = LGThemedCardBackgroundColor(nil);
-    UIColor *accent = ApolloThemeAccentColor() ?: tableView.tintColor;
-    cell.backgroundColor = cellColor;
-    cell.tintColor = accent;
-    cell.accessoryView.tintColor = accent;
-    for (UIView *subview in cell.contentView.subviews) subview.tintColor = accent;
-    LGSetNativeIconCellCheckmark(cell,
-        LGActiveStandardPackRow(LGStandardPackCommunity) == indexPath.row);
+    LGStyleCommunityIconCell(self, cell, tableView, indexPath);
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell
+                                      forRowAtIndexPath:(NSIndexPath *)indexPath {
+    %orig;
+    // Apollo's custom-theme pass runs during willDisplay and can overwrite
+    // cellForRow's card color. Reassert the same picker-owned fill used by
+    // Apollo Originals, Ultra, and Sekrit after that native pass completes.
+    LGStyleCommunityIconCell(self, cell, tableView, indexPath);
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -3639,17 +3893,22 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         // Match the tweak-owned Standard packs: an already-active row keeps
         // its checkmark and ends only the table's temporary pressed state.
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        [tableView reloadRowsAtIndexPaths:@[ indexPath ]
-                         withRowAnimation:UITableViewRowAnimationNone];
+        __weak UITableView *weakTable = tableView;
+        LGPerformNativeIconSelectionWithFeedback(tableView, ^{
+            UITableView *strongTable = weakTable;
+            if (!strongTable) return;
+            LGStyleCommunityIconCell(self,
+                                     [strongTable cellForRowAtIndexPath:indexPath],
+                                     strongTable, indexPath);
+        });
         return;
     }
 
     if (replayingSelection) {
         objc_setAssociatedObject(self, &kLGCommunitySelectionReplayKey, nil,
                                  OBJC_ASSOCIATION_ASSIGN);
+        LGBeginPendingStandardPackSelection(LGStandardPackCommunity, indexPath.row);
         %orig;
-        LGNoteNativePackSelection(LGStandardPackCommunity, indexPath.row);
-        [tableView reloadData];
         return;
     }
 
@@ -3671,6 +3930,9 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     %orig;
     if (previousTraitCollection.userInterfaceStyle == ((UIViewController *)self).traitCollection.userInterfaceStyle) return;
+    objc_setAssociatedObject(self, &kLGCommunityCardBackgroundColorKey,
+                             LGThemedCardBackgroundColor(nil),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UITableView *tableView = LGRememberedTableView(self);
     tableView.backgroundColor = LGThemedPageBackgroundColor(nil);
     [tableView reloadData];
