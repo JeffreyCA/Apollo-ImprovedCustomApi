@@ -61,9 +61,25 @@
     config.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
 
     self.webView = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:config];
-    self.webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.webView.navigationDelegate = self;
     [self.view addSubview:self.webView];
+    // Bottom pinned to the SAFE AREA, not the view. Reddit's login page puts its
+    // cookie-consent sheet — a modal that blocks the form underneath until it is
+    // answered — at the bottom of the viewport. With the web view running to the
+    // physical bottom edge, that sheet's "Accept All" / "Reject Optional Cookies"
+    // buttons land in the home-indicator strip and get clipped, so the dialog
+    // can't be dismissed and every tap on the username/password field does
+    // nothing (the form isn't even laid out while the modal is up — its inputs
+    // report a zero rect and no offsetParent). Top stays at the view edge so the
+    // page keeps scrolling under the translucent nav bar as before; WKWebView's
+    // automatic content-inset adjustment already reserves that side.
+    self.webView.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.webView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.webView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.webView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.webView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+    ]];
 
     self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     self.spinner.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin |
