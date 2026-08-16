@@ -37,6 +37,9 @@ static NSMutableSet<NSString *> *sGateCheckedSubs = nil;
 // The explainer shows at most once per launch — browsing several gated subs
 // in one session must not stack alerts.
 static BOOL sGateSheetShownThisLaunch = NO;
+// Set only while the explainer is between -presentViewController: and its
+// completion, so a burst of empty listings can't stack duplicate alerts.
+static BOOL sGateSheetPresenting = NO;
 
 // A sub this small could genuinely have an empty page; only a popular over18
 // sub with zero rows is treated as the gate.
@@ -169,11 +172,22 @@ static void ApolloGateCreateSubredditNamed(NSString *name) {
             if ([errs isKindOfClass:[NSArray class]]) errors = errs;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (error || http.statusCode != 200 || !errors) {
+            if (error || http.statusCode != 200) {
                 ApolloLog(@"[NSFWGate] site_admin failed: HTTP %ld error=%@", (long)http.statusCode, error);
                 ApolloGateShowResultAlert(@"Couldn't Create Subreddit",
                     [NSString stringWithFormat:@"Reddit answered HTTP %ld. Try again later, or create one at reddit.com.",
                                                (long)http.statusCode]);
+                return;
+            }
+            if (!errors) {
+                // HTTP 200 with a body we couldn't read as api_type=json. The
+                // request may well have succeeded, so don't report an HTTP
+                // failure that didn't happen — say what we actually know.
+                ApolloLog(@"[NSFWGate] site_admin returned HTTP 200 with an unrecognized body shape");
+                ApolloGateShowResultAlert(@"Couldn't Confirm",
+                    [NSString stringWithFormat:@"Reddit accepted the request but its reply wasn't in the expected "
+                                               @"format, so we can't tell whether r/%@ was created. Check your "
+                                               @"subreddits before trying again.", name]);
                 return;
             }
             if (errors.count > 0) {
@@ -202,8 +216,14 @@ static void ApolloGatePromptCreateSubreddit(void) {
     NSString *username = ApolloActiveAccountUsername() ?: @"";
     NSMutableString *suggestion = [NSMutableString string];
     for (NSUInteger i = 0; i < username.length && suggestion.length < 14; i++) {
+        // Explicit ASCII ranges, not isalnum(): that takes an int that must be
+        // representable as unsigned char, and a unichar above 255 is undefined
+        // behaviour there. Reddit usernames are ASCII, but the suggestion is
+        // built from whatever the account name actually holds.
         unichar c = [username characterAtIndex:i];
-        if (isalnum(c) || c == '_') [suggestion appendFormat:@"%C", c];
+        BOOL allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '_';
+        if (allowed) [suggestion appendFormat:@"%C", c];
     }
     while ([suggestion hasPrefix:@"_"]) [suggestion deleteCharactersInRange:NSMakeRange(0, 1)];
     NSString *prefill = suggestion.length > 0 ? [suggestion stringByAppendingString:@"_apollo"] : @"my_apollo_sub";
@@ -237,8 +257,19 @@ static void ApolloGatePromptCreateSubreddit(void) {
 #pragma mark - Explainer
 
 static void ApolloGatePresentExplainer(NSString *subreddit) {
-    if (sGateSheetShownThisLaunch) return;
-    sGateSheetShownThisLaunch = YES;
+    if (sGateSheetShownThisLaunch || sGateSheetPresenting) return;
+    // Don't spend the once-per-launch chance on a presentation that can't
+    // land. UIKit silently drops -presentViewController: when the presenter is
+    // nil or mid-transition, and the flag used to be set before the call — so
+    // an alert that never appeared still burned the explainer for the whole
+    // launch. Confirm a presentable controller first, then mark it shown from
+    // the completion, once the alert is genuinely on screen.
+    UIViewController *top = ApolloGateTopViewController();
+    if (!top || top.isBeingPresented || top.isBeingDismissed ||
+        top.presentedViewController) {
+        ApolloLog(@"[NSFWGate] explainer for r/%@ deferred — no presentable controller", subreddit);
+        return;
+    }
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Mature Content Blocked by Reddit"
                          message:[NSString stringWithFormat:
@@ -255,8 +286,14 @@ static void ApolloGatePresentExplainer(NSString *subreddit) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyNSFWGateExplainerEnabled];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Not Now" style:UIAlertActionStyleCancel handler:nil]];
-    [ApolloGateTopViewController() presentViewController:alert animated:YES completion:nil];
-    ApolloLog(@"[NSFWGate] Presented mature-content explainer for r/%@", subreddit);
+    // In-flight guard so a second empty listing arriving before the alert is
+    // up can't present a duplicate; cleared alongside the shown flag.
+    sGateSheetPresenting = YES;
+    [top presentViewController:alert animated:YES completion:^{
+        sGateSheetShownThisLaunch = YES;
+        sGateSheetPresenting = NO;
+        ApolloLog(@"[NSFWGate] Presented mature-content explainer for r/%@", subreddit);
+    }];
 }
 
 #pragma mark - Detection
@@ -303,7 +340,7 @@ static void ApolloGateVerifyAndExplain(NSString *subreddit) {
 // then host, then the path regex, then the query, then the result shape. The
 // NSUserDefaults read comes last so the common case never pays for it.
 static void ApolloGateInspectResponse(NSURLResponse *response, id responseObject) {
-    if (sGateSheetShownThisLaunch) return;
+    if (sGateSheetShownThisLaunch || sGateSheetPresenting) return;
     NSURL *url = response.URL;
     if (![url.host.lowercaseString isEqualToString:@"oauth.reddit.com"]) return;
     NSString *subreddit = ApolloGateSubredditFromListingPath(url.path);
