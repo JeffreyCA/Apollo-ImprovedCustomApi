@@ -353,6 +353,12 @@
     self.doubleTap.delegate = self;
     [self.view addGestureRecognizer:self.doubleTap];
     [self.singleTap requireGestureRecognizerToFail:self.doubleTap];
+    // A short page swipe can otherwise satisfy UIKit's tap tolerance on a
+    // physical device while the collection view's pan also succeeds. Waiting
+    // for paging to fail makes taps toggle the chrome without allowing a page
+    // turn to hide it accidentally.
+    [self.singleTap requireGestureRecognizerToFail:self.collectionView.panGestureRecognizer];
+    [self.doubleTap requireGestureRecognizerToFail:self.collectionView.panGestureRecognizer];
 
     self.dismissPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleDismissPan:)];
     self.dismissPan.delegate = self;
@@ -560,6 +566,13 @@
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
         shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (gestureRecognizer == self.dismissPan || otherGestureRecognizer == self.dismissPan) return NO;
+    BOOL involvesViewerTap = gestureRecognizer == self.singleTap || gestureRecognizer == self.doubleTap ||
+                             otherGestureRecognizer == self.singleTap || otherGestureRecognizer == self.doubleTap;
+    if (involvesViewerTap &&
+        ([gestureRecognizer isKindOfClass:UIPanGestureRecognizer.class] ||
+         [otherGestureRecognizer isKindOfClass:UIPanGestureRecognizer.class])) {
+        return NO;
+    }
     return YES;
 }
 
