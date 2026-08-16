@@ -3,6 +3,22 @@
 #import "ApolloCommon.h"
 #import <Photos/Photos.h>
 
+static NSUInteger ApolloWallpaperDecodedImageCost(UIImage *image) {
+    CGImageRef CGImage = image.CGImage;
+    if (!CGImage) return 0;
+    size_t bytesPerRow = CGImageGetBytesPerRow(CGImage);
+    size_t height = CGImageGetHeight(CGImage);
+    if (height > 0 && bytesPerRow > NSUIntegerMax / height) return NSUIntegerMax;
+    return bytesPerRow * height;
+}
+
+static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
+                                      NSURL *URL,
+                                      UIImage *image) {
+    if (!cache || !URL || !image) return;
+    [cache setObject:image forKey:URL cost:ApolloWallpaperDecodedImageCost(image)];
+}
+
 @implementation ApolloWallpaperItem
 
 + (instancetype)itemWithURLString:(NSString *)URLString caption:(NSString *)caption {
@@ -190,6 +206,14 @@
     self.dataCache = dataCache;
     self.retryView.hidden = YES;
     self.imageView.image = [imageCache objectForKey:URL];
+    if (!self.imageView.image) {
+        NSData *cachedData = [dataCache objectForKey:URL];
+        UIImage *cachedImage = cachedData.length > 0 ? [UIImage imageWithData:cachedData] : nil;
+        if (cachedImage) {
+            self.imageView.image = cachedImage;
+            ApolloWallpaperCacheImage(imageCache, URL, cachedImage);
+        }
+    }
     if (self.imageView.image) {
         [self resetZoomGeometry];
         [self.spinner stopAnimating];
@@ -198,15 +222,18 @@
 
     [self.spinner startAnimating];
     __weak typeof(self) weakSelf = self;
-    self.task = [[NSURLSession sharedSession] dataTaskWithURL:URL completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
+    __weak NSURLSessionDataTask *weakTask = nil;
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:URL completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
         UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
         if (image) {
-            [imageCache setObject:image forKey:URL];
+            ApolloWallpaperCacheImage(imageCache, URL, image);
             [dataCache setObject:data forKey:URL cost:data.length];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
-            if (!strongSelf || ![strongSelf.representedURL isEqual:URL]) return;
+            if (!strongSelf || strongSelf.task != weakTask ||
+                ![strongSelf.representedURL isEqual:URL]) return;
+            strongSelf.task = nil;
             [strongSelf.spinner stopAnimating];
             strongSelf.imageView.image = image;
             [strongSelf resetZoomGeometry];
@@ -214,7 +241,9 @@
             if (!image) ApolloLog(@"[Wallpapers] image load failed url=%@ error=%@", URL, error.localizedDescription ?: @"decode failed");
         });
     }];
-    [self.task resume];
+    weakTask = task;
+    self.task = task;
+    [task resume];
 }
 
 - (void)retryTapped {
@@ -267,6 +296,7 @@
 @property (nonatomic) NSInteger currentIndex;
 @property (nonatomic) NSInteger savingIndex;
 @property (nonatomic) NSInteger initialIndex;
+@property (nonatomic) NSInteger prefetchDirection;
 @property (nonatomic) BOOL initialPositionApplied;
 @property (nonatomic) BOOL chromeVisible;
 @end
@@ -278,13 +308,17 @@
     if (self) {
         _items = [items copy] ?: @[];
         _imageCache = [[NSCache alloc] init];
-        _imageCache.countLimit = 3;
+        // The active page plus a direction-aware six-page preload window.
+        // NSCache can still discard these early under system memory pressure.
+        _imageCache.countLimit = 7;
+        _imageCache.totalCostLimit = 160 * 1024 * 1024;
         _dataCache = [[NSCache alloc] init];
-        _dataCache.countLimit = 3;
-        _dataCache.totalCostLimit = 32 * 1024 * 1024;
+        _dataCache.countLimit = 16;
+        _dataCache.totalCostLimit = 64 * 1024 * 1024;
         _prefetchTasks = [NSMutableDictionary dictionary];
         _initialIndex = 0;
         _savingIndex = NSNotFound;
+        _prefetchDirection = 1;
         _chromeVisible = YES;
 #if APOLLO_SIM_BUILD
         const char *previewIndex = getenv("APOLLO_OPEN_WALLPAPER_INDEX");
@@ -670,30 +704,78 @@
     self.counterLabel.text = [NSString stringWithFormat:@"%ld of %lu", (long)self.currentIndex + 1, (unsigned long)self.items.count];
     self.captionLabel.text = self.items[self.currentIndex].caption;
     if (self.savingIndex == NSNotFound) [self resetDownloadConfirmation];
-    [self prefetchAdjacentWallpapers];
+    [self prefetchNearbyWallpapers];
 }
 
-- (void)prefetchAdjacentWallpapers {
-    NSMutableSet<NSURL *> *desiredURLs = [NSMutableSet setWithCapacity:2];
-    if (self.currentIndex > 0) [desiredURLs addObject:self.items[self.currentIndex - 1].URL];
-    if (self.currentIndex + 1 < self.items.count) [desiredURLs addObject:self.items[self.currentIndex + 1].URL];
+- (void)prefetchNearbyWallpapers {
+    // Favor the direction the user is paging: four upcoming wallpapers get
+    // time to finish before rapid repeated swipes reach them, while retaining
+    // two behind for a quick reversal. Nearest URLs are created first and
+    // receive higher URLSession priority.
+    NSInteger direction = self.prefetchDirection < 0 ? -1 : 1;
+    NSMutableArray<NSURL *> *desiredURLs = [NSMutableArray arrayWithCapacity:6];
+    NSMutableSet<NSURL *> *desiredURLSet = [NSMutableSet setWithCapacity:6];
+    for (NSInteger distance = 1; distance <= 4; distance++) {
+        NSInteger primaryIndex = self.currentIndex + direction * distance;
+        if (primaryIndex >= 0 && primaryIndex < self.items.count) {
+            NSURL *URL = self.items[primaryIndex].URL;
+            if (URL && ![desiredURLSet containsObject:URL]) {
+                [desiredURLs addObject:URL];
+                [desiredURLSet addObject:URL];
+            }
+        }
+        if (distance <= 2) {
+            NSInteger reverseIndex = self.currentIndex - direction * distance;
+            if (reverseIndex >= 0 && reverseIndex < self.items.count) {
+                NSURL *URL = self.items[reverseIndex].URL;
+                if (URL && ![desiredURLSet containsObject:URL]) {
+                    [desiredURLs addObject:URL];
+                    [desiredURLSet addObject:URL];
+                }
+            }
+        }
+    }
+    // Near either end of the album one side of the preferred 4+2 window is
+    // unavailable. Fill the empty slots from the remaining direction so the
+    // opening pages can still prepare six consecutive fast swipes.
+    for (NSInteger distance = 3; desiredURLs.count < 6 && distance < self.items.count; distance++) {
+        NSInteger candidates[] = {
+            self.currentIndex + direction * distance,
+            self.currentIndex - direction * distance,
+        };
+        for (NSUInteger candidate = 0; candidate < 2 && desiredURLs.count < 6; candidate++) {
+            NSInteger index = candidates[candidate];
+            if (index < 0 || index >= self.items.count) continue;
+            NSURL *URL = self.items[index].URL;
+            if (URL && ![desiredURLSet containsObject:URL]) {
+                [desiredURLs addObject:URL];
+                [desiredURLSet addObject:URL];
+            }
+        }
+    }
+    // If the page being displayed was already prefetching, keep that task
+    // alive long enough to hand its result to the visible cell.
+    NSURL *currentURL = self.items[self.currentIndex].URL;
+    if (currentURL) [desiredURLSet addObject:currentURL];
 
-    // A page turn changes the two-item window. Cancel anything that has fallen
-    // outside it so rapid swiping cannot accumulate background downloads.
+    // Cancel only work outside the larger active window. Unlike the old
+    // previous/next strategy, consecutive fast swipes retain useful downloads
+    // instead of repeatedly cancelling the image the user is approaching.
     for (NSURL *URL in self.prefetchTasks.allKeys.copy) {
-        if ([desiredURLs containsObject:URL]) continue;
+        if ([desiredURLSet containsObject:URL]) continue;
         [self.prefetchTasks[URL] cancel];
         [self.prefetchTasks removeObjectForKey:URL];
     }
 
-    for (NSURL *URL in desiredURLs) {
+    for (NSUInteger position = 0; position < desiredURLs.count; position++) {
+        NSURL *URL = desiredURLs[position];
         if (self.prefetchTasks[URL]) continue;
         NSData *cachedData = [self.dataCache objectForKey:URL];
         UIImage *cachedImage = [self.imageCache objectForKey:URL];
         if (cachedData && cachedImage) continue;
         if (cachedData && !cachedImage) {
             UIImage *image = [UIImage imageWithData:cachedData];
-            if (image) [self.imageCache setObject:image forKey:URL];
+            if (image) ApolloWallpaperCacheImage(self.imageCache, URL, image);
             continue;
         }
 
@@ -706,10 +788,10 @@
             UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
             typeof(self) strongSelf = weakSelf;
             if (image && strongSelf) {
-                [strongSelf.imageCache setObject:image forKey:URL];
+                ApolloWallpaperCacheImage(strongSelf.imageCache, URL, image);
                 [strongSelf.dataCache setObject:data forKey:URL cost:data.length];
             } else if (error.code != NSURLErrorCancelled) {
-                ApolloLog(@"[Wallpapers] adjacent preload failed url=%@ error=%@", URL,
+                ApolloLog(@"[Wallpapers] nearby preload failed url=%@ error=%@", URL,
                           error.localizedDescription ?: @"decode failed");
             }
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -717,9 +799,22 @@
                 if (mainSelf.prefetchTasks[URL] == weakTask) {
                     [mainSelf.prefetchTasks removeObjectForKey:URL];
                 }
+                if (!image || !mainSelf) return;
+                // A fast swipe may have made this prefetched URL visible while
+                // it was still downloading. Replace that cell's duplicate
+                // request immediately with the completed cached original.
+                for (UICollectionViewCell *visibleCell in mainSelf.collectionView.visibleCells) {
+                    if (![visibleCell isKindOfClass:ApolloWallpaperPageCell.class]) continue;
+                    ApolloWallpaperPageCell *pageCell = (ApolloWallpaperPageCell *)visibleCell;
+                    if ([pageCell.representedURL isEqual:URL] && !pageCell.imageView.image) {
+                        [pageCell showURL:URL imageCache:mainSelf.imageCache dataCache:mainSelf.dataCache];
+                    }
+                }
             });
         }];
         weakTask = task;
+        task.priority = position < 2 ? NSURLSessionTaskPriorityHigh
+            : (position < 4 ? NSURLSessionTaskPriorityDefault : NSURLSessionTaskPriorityLow);
         self.prefetchTasks[URL] = task;
         [task resume];
     }
@@ -742,7 +837,7 @@
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
             if (image) {
-                [strongSelf.imageCache setObject:image forKey:item.URL];
+                ApolloWallpaperCacheImage(strongSelf.imageCache, item.URL, image);
                 [strongSelf.dataCache setObject:data forKey:item.URL cost:data.length];
                 [strongSelf saveOriginalData:data atIndex:requestedIndex];
             } else {
@@ -901,9 +996,10 @@
 }
 
 - (void)scrollViewWillEndDragging:(UIScrollView *)scrollView
-                     withVelocity:(__unused CGPoint)velocity
+                     withVelocity:(CGPoint)velocity
               targetContentOffset:(inout CGPoint *)targetContentOffset {
     if (self.items.count == 0 || scrollView.bounds.size.width <= 0.0) return;
+    if (fabs(velocity.x) > 0.05) self.prefetchDirection = velocity.x < 0.0 ? -1 : 1;
     NSInteger targetIndex = (NSInteger)llround(targetContentOffset->x / scrollView.bounds.size.width);
     targetIndex = MAX(0, MIN(targetIndex, (NSInteger)self.items.count - 1));
     if (targetIndex == self.currentIndex) return;
