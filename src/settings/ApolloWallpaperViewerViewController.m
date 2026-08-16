@@ -320,12 +320,12 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 @property (nonatomic, strong) NSCache<NSURL *, UIImage *> *imageCache;
 @property (nonatomic, strong) NSCache<NSURL *, NSData *> *dataCache;
 @property (nonatomic, strong) NSMutableDictionary<NSURL *, NSURLSessionDataTask *> *prefetchTasks;
+@property (nonatomic, strong) NSMutableIndexSet *savedIndexes;
 @property (nonatomic, strong) UIPanGestureRecognizer *dismissPan;
 @property (nonatomic, strong) UITapGestureRecognizer *singleTap;
 @property (nonatomic, strong) UITapGestureRecognizer *doubleTap;
 @property (nonatomic, weak) ApolloWallpaperPageCell *dismissingCell;
 @property (nonatomic, copy) NSArray<UICollectionViewCell *> *dismissHiddenCells;
-@property (nonatomic, copy, nullable) dispatch_block_t savedStateReset;
 @property (nonatomic) NSInteger currentIndex;
 @property (nonatomic) NSInteger savingIndex;
 @property (nonatomic) NSInteger initialIndex;
@@ -382,6 +382,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
         _imageCache = ApolloWallpaperSharedImageCache();
         _dataCache = ApolloWallpaperSharedDataCache();
         _prefetchTasks = [NSMutableDictionary dictionary];
+        _savedIndexes = [NSMutableIndexSet indexSet];
         _initialIndex = 0;
         _savingIndex = NSNotFound;
         _prefetchDirection = 1;
@@ -769,7 +770,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
     self.currentIndex = MAX(0, MIN(self.currentIndex, (NSInteger)self.items.count - 1));
     self.counterLabel.text = [NSString stringWithFormat:@"%ld of %lu", (long)self.currentIndex + 1, (unsigned long)self.items.count];
     self.captionLabel.text = self.items[self.currentIndex].caption;
-    if (self.savingIndex == NSNotFound) [self resetDownloadConfirmation];
+    if (self.savingIndex == NSNotFound) [self updateDownloadConfirmation];
     [self prefetchNearbyWallpapers];
 }
 
@@ -889,6 +890,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 - (void)downloadTapped {
     if (self.currentIndex >= self.items.count) return;
     NSInteger requestedIndex = self.currentIndex;
+    if ([self.savedIndexes containsIndex:requestedIndex]) return;
     ApolloWallpaperItem *item = self.items[self.currentIndex];
     [self beginSavingAtIndex:requestedIndex];
     NSData *cachedData = [self.dataCache objectForKey:item.URL];
@@ -917,8 +919,6 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 }
 
 - (void)beginSavingAtIndex:(NSInteger)index {
-    if (self.savedStateReset) dispatch_block_cancel(self.savedStateReset);
-    self.savedStateReset = nil;
     self.savingIndex = index;
     self.downloadButton.enabled = NO;
     self.downloadContentStack.hidden = YES;
@@ -980,38 +980,28 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
     self.savingIndex = NSNotFound;
     [self.downloadSpinner stopAnimating];
     self.downloadContentStack.hidden = NO;
-    self.downloadButton.enabled = YES;
 
-    if (error || self.currentIndex != index) {
-        [self resetDownloadConfirmation];
+    if (error) {
+        [self updateDownloadConfirmation];
         return;
     }
 
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17
-                                                                                          weight:UIImageSymbolWeightSemibold];
-    self.downloadIcon.image = [UIImage systemImageNamed:@"checkmark" withConfiguration:config];
-    self.downloadTitle.text = @"Saved";
-    self.downloadButton.accessibilityLabel = @"Saved";
+    [self.savedIndexes addIndex:index];
+    [self updateDownloadConfirmation];
     UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [feedback impactOccurred];
-
-    __weak typeof(self) weakSelf = self;
-    dispatch_block_t reset = dispatch_block_create(0, ^{
-        [weakSelf resetDownloadConfirmation];
-        weakSelf.savedStateReset = nil;
-    });
-    self.savedStateReset = reset;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), reset);
 }
 
-- (void)resetDownloadConfirmation {
-    if (self.savedStateReset) dispatch_block_cancel(self.savedStateReset);
-    self.savedStateReset = nil;
+- (void)updateDownloadConfirmation {
+    BOOL saved = self.currentIndex >= 0 && [self.savedIndexes containsIndex:self.currentIndex];
+    self.downloadButton.enabled = !saved;
     UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17
-                                                                                          weight:UIImageSymbolWeightMedium];
-    self.downloadIcon.image = [UIImage systemImageNamed:@"square.and.arrow.down" withConfiguration:config];
-    self.downloadTitle.text = @"Download Wallpaper";
-    self.downloadButton.accessibilityLabel = @"Download Wallpaper";
+                                                                                          weight:saved ? UIImageSymbolWeightSemibold
+                                                                                                       : UIImageSymbolWeightMedium];
+    self.downloadIcon.image = [UIImage systemImageNamed:saved ? @"checkmark" : @"square.and.arrow.down"
+                                       withConfiguration:config];
+    self.downloadTitle.text = saved ? @"Saved" : @"Download Wallpaper";
+    self.downloadButton.accessibilityLabel = self.downloadTitle.text;
 }
 
 - (void)showResultTitle:(NSString *)title message:(NSString *)message {
