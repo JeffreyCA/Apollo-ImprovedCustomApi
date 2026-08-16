@@ -343,7 +343,7 @@ static BOOL ApolloTagStampNoProfanityOnLiveUser(NSString *username, BOOL value) 
 
 // The value Apollo's NATIVE blur decision should see for `username`, or nil
 // when nothing may overrule the object's current state. The local override
-// (sNSFWBlurOverride — "Blur NSFW Media" on the Filters screen) outranks every
+// (sNSFWBlurOverride — "Blur NSFW Media" in Reborn > Media) outranks every
 // capture; below it only network-truth captures (rank >= 1) qualify — a rank-0
 // archive decode can only reinstall what the archive already held.
 static NSNumber *ApolloTagAuthoritativeNoProfanity(NSString *username) {

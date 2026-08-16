@@ -169,7 +169,6 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloMultiredditEdit.xm \
     $(SRC_DIR)/ApolloSubredditSidebar.xm \
     $(SRC_DIR)/ApolloTagFilters.xm \
-    $(SRC_DIR)/ApolloNSFWGate.xm \
     $(SRC_DIR)/ApolloThemeTokens.m \
     $(SRC_DIR)/ApolloThemeCompiler.m \
     $(SRC_DIR)/ApolloThemeStore.m \

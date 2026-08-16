@@ -323,7 +323,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         }
         return %orig;
     }
-    if (indexPath.section >= native + 2) return NO; // Tag Filters / NSFW Media rows are static
+    if (indexPath.section >= native + 2) return NO; // Tag Filters rows are static
     NSArray<NSString *> *items = (indexPath.section == native) ? [ApolloPostFilterStore allSubreddits]
                                                               : [ApolloPostFilterStore nameSubstrings];
     return (NSUInteger)indexPath.row < items.count; // item rows deletable; Add row not
@@ -359,7 +359,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         %orig; return;
     }
     if (editingStyle != UITableViewCellEditingStyleDelete) return;
-    if (indexPath.section >= native + 2) return; // Tag Filters / NSFW Media rows are static
+    if (indexPath.section >= native + 2) return; // Tag Filters rows are static
     BOOL isSubSection = (indexPath.section == native);
     NSArray<NSString *> *items = isSubSection ? [ApolloPostFilterStore allSubreddits]
                                               : [ApolloPostFilterStore nameSubstrings];

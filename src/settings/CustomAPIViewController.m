@@ -15,7 +15,6 @@
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
 #import "ApolloTagFilters.h"
-#import "ApolloNSFWGate.h"
 #import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
@@ -1674,10 +1673,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 // NSFW Media. Lives here rather than in Apollo's native Filters & Blocks screen:
 // these are tweak settings, and tweak settings belong on the tweak's own screens
 // (Apollo's tables are only ever modified through the ApolloSettingsGeneralTable
-// registry). "Unlock Mature Content" matters most — mature subreddits are
-// withheld from SEARCH under the same rule that empties their listings, so a
-// blocked account cannot reach a subreddit that would trip the automatic
-// explainer, and without a row like this the fix is unreachable.
+// registry).
 - (ApolloSettingsSection *)buildMediaNSFWSection {
     __weak typeof(self) weakSelf = self;
 
@@ -1687,22 +1683,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                    detail:^NSString * { return ApolloNSFWBlurOverrideTitle(sNSFWBlurOverride); }
                                  onSelect:^{ [weakSelf nsfwBlurOverrideRowSelected]; }];
 
-    ApolloSettingsRow *explain =
-        [ApolloSettingsRow switchRowWithID:@"media.nsfwGateExplainer"
-                                     title:@"Explain Blocked Mature Content"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNSFWGateExplainerEnabled]; }
-                                  onToggle:^(UISwitch *sender) {
-            [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyNSFWGateExplainerEnabled];
-        }];
-
-    ApolloSettingsRow *unlock =
-        [ApolloSettingsRow buttonRowWithID:@"media.nsfwUnlock"
-                                     title:@"Unlock Mature Content\u2026"
-                                    action:^{ ApolloNSFWGatePresentUnlockFlow(); }];
-
     return [ApolloSettingsSection sectionWithTitle:@"NSFW Media"
-                                            footer:@"\"Reddit Setting\" follows your account's \"Blur mature (18+) images and media\" preference; Always and Never override it on this device only.\n\nReddit hides mature posts from API-key accounts that don't moderate a subreddit, which makes those subreddits look empty. The explainer says so when it happens; Unlock Mature Content opens that same fix directly."
-                                              rows:@[ blur, explain, unlock ]];
+                                            footer:@"\"Reddit Setting\" follows your account's \"Blur mature (18+) images and media\" preference; Always and Never override it on this device only."
+                                              rows:@[ blur ]];
 }
 
 - (void)nsfwBlurOverrideRowSelected {

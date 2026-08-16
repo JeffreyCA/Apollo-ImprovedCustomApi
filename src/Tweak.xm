@@ -3640,7 +3640,6 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyPictureInPictureProgressBar: @NO,
                                     UDKeyTagFilterEnabled: @NO,
                                     UDKeyNSFWBlurOverride: @0,
-                                    UDKeyNSFWGateExplainerEnabled: @YES,
                                     UDKeyTagFilterMode: @"blur",
                                     UDKeyTagFilterNSFW: @YES,
                                     UDKeyTagFilterSpoiler: @YES,
