@@ -1,7 +1,7 @@
 // ApolloFiltersBlocksInject
 //
 // Beefs out Apollo's native Filters & Blocks screen
-// (_TtC6Apollo29SettingsFiltersViewController) by APPENDING two Reborn sections
+// (_TtC6Apollo29SettingsFiltersViewController) by APPENDING three Reborn sections
 // below the native Keywords / Subreddits / Users sections:
 //
 //   • SUBREDDIT-SPECIFIC FILTERS — a list of configured subreddits; tap one to
@@ -28,6 +28,7 @@
 #import "ApolloPostFilterStore.h"
 #import "ApolloState.h"
 #import "ApolloSubredditFilterDetailViewController.h"
+#import "ApolloTagFilters.h"
 #import "TagFiltersViewController.h"
 #import "UserDefaultConstants.h"
 
@@ -306,8 +307,8 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
             [self apollo_pfPromptAddNameFromTable:tableView];
         }
         // Existing name rows: no detail; remove via swipe / Edit.
-    } else if (indexPath.row == ApolloTFRowOverrides) {
-        [self apollo_tfOpenOverrides];
+    } else if (indexPath.section == native + 2) {
+        if (indexPath.row == ApolloTFRowOverrides) [self apollo_tfOpenOverrides];
     }
 }
 
@@ -322,7 +323,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         }
         return %orig;
     }
-    if (indexPath.section == native + 2) return NO; // Tag Filters rows are static
+    if (indexPath.section >= native + 2) return NO; // Tag Filters rows are static
     NSArray<NSString *> *items = (indexPath.section == native) ? [ApolloPostFilterStore allSubreddits]
                                                               : [ApolloPostFilterStore nameSubstrings];
     return (NSUInteger)indexPath.row < items.count; // item rows deletable; Add row not
@@ -358,7 +359,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         %orig; return;
     }
     if (editingStyle != UITableViewCellEditingStyleDelete) return;
-    if (indexPath.section == native + 2) return; // Tag Filters rows are static
+    if (indexPath.section >= native + 2) return; // Tag Filters rows are static
     BOOL isSubSection = (indexPath.section == native);
     NSArray<NSString *> *items = isSubSection ? [ApolloPostFilterStore allSubreddits]
                                               : [ApolloPostFilterStore nameSubstrings];

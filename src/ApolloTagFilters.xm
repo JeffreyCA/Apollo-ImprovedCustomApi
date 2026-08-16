@@ -298,6 +298,18 @@ static NSString *ApolloTagLiveActiveUsername(void) {
 
 static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh);
 
+// Set while the tweak itself writes noProfanity onto a user object, so the
+// setNoProfanity: capture hook ignores the echo — otherwise an override-forced
+// stamp records itself as a rank-1 "network" capture and pollutes the map with
+// a value the server never said.
+//
+// Thread-local on purpose: the stamps run on the main thread, but the hook it
+// guards fires on whatever thread Mantle parsed or unarchived the user on. A
+// process-wide flag would let a background capture that happens to land during
+// a main-thread stamp be discarded as an echo — the same reason
+// sTagUserDecodeDepth below is __thread.
+static __thread BOOL sTagStampingLiveUser = NO;
+
 // Writes a captured pref onto the LIVE currentUser object when it belongs to
 // the active account (#861). Apollo's NATIVE obscure decision reads
 // currentUser.noProfanity at cell-configure time, so capturing into the
@@ -317,25 +329,40 @@ static BOOL ApolloTagStampNoProfanityOnLiveUser(NSString *username, BOOL value) 
     @try {
         NSNumber *existing = [user valueForKey:@"noProfanity"];
         if ([existing isKindOfClass:[NSNumber class]] && existing.boolValue == value) return NO;
+        sTagStampingLiveUser = YES;
         [user setValue:@(value) forKey:@"noProfanity"];
+        sTagStampingLiveUser = NO;
         ApolloLog(@"[TagFilters] Stamped noProfanity=%d onto live currentUser u/%@ (blur mature media)", value, username);
         return YES;
     } @catch (NSException *e) {
+        sTagStampingLiveUser = NO;
         ApolloLog(@"[TagFilters] live noProfanity stamp failed for u/%@: %@", username, e);
         return NO;
     }
 }
 
+// The value Apollo's NATIVE blur decision should see for `username`, or nil
+// when nothing may overrule the object's current state. The local override
+// (sNSFWBlurOverride — "Blur NSFW Media" in Reborn > Media) outranks every
+// capture; below it only network-truth captures (rank >= 1) qualify — a rank-0
+// archive decode can only reinstall what the archive already held.
+static NSNumber *ApolloTagAuthoritativeNoProfanity(NSString *username) {
+    if (sNSFWBlurOverride == 1) return @YES;
+    if (sNSFWBlurOverride == 2) return @NO;
+    if (username.length == 0) return nil;
+    NSNumber *captured = sTagNoProfanityByUser[username];
+    return (captured && sTagNoProfanityRankByUser[username].integerValue >= 1) ? captured : nil;
+}
+
 // Main thread only. Single entry point for every pref capture. Applies the
-// source-rank rule (see sTagNoProfanityRankByUser), stamps rank>=1 values onto
-// the live user, and re-resolves the effective pref.
+// source-rank rule (see sTagNoProfanityRankByUser), stamps the authoritative
+// value onto the live user, and re-resolves the effective pref.
 static void ApolloTagRecordNoProfanity(NSString *username, BOOL value, NSInteger rank) {
     if (username.length == 0) return;
     if (!sTagNoProfanityByUser) sTagNoProfanityByUser = [NSMutableDictionary dictionary];
     if (!sTagNoProfanityRankByUser) sTagNoProfanityRankByUser = [NSMutableDictionary dictionary];
     NSInteger storedRank = sTagNoProfanityRankByUser[username].integerValue;
     NSNumber *previous = sTagNoProfanityByUser[username];
-    BOOL stamped = NO;
     if (!previous || rank >= storedRank) {
         sTagNoProfanityRankByUser[username] = @(rank);
         if (!previous || previous.boolValue != value) {
@@ -343,16 +370,15 @@ static void ApolloTagRecordNoProfanity(NSString *username, BOOL value, NSInteger
             ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d for u/%@ (blur mature media, source rank %ld)",
                       value, username, (long)rank);
         }
-        // A decode can only reinstall what the archive already held; never let
-        // it rewrite the live user (rank>=1 values are network truth).
-        if (rank >= 1) stamped = ApolloTagStampNoProfanityOnLiveUser(username, value);
     } else if (previous && previous.boolValue != value) {
         ApolloLog(@"[TagFilters] Ignored stale pref_no_profanity=%d for u/%@ (source rank %ld < %ld)",
                   value, username, (long)rank, (long)storedRank);
-        // The stale value may sit on a just-reinstalled currentUser; re-assert
-        // the authoritative one so the native decision stays correct.
-        stamped = ApolloTagStampNoProfanityOnLiveUser(username, previous.boolValue);
     }
+    // Whatever just happened to the maps, the live object follows the single
+    // authoritative resolution (override > network capture; a stale value may
+    // sit on a just-reinstalled currentUser).
+    NSNumber *authoritative = ApolloTagAuthoritativeNoProfanity(username);
+    BOOL stamped = authoritative ? ApolloTagStampNoProfanityOnLiveUser(username, authoritative.boolValue) : NO;
     ApolloTagRecomputeEffectiveNoProfanity(stamped);
 }
 
@@ -430,8 +456,13 @@ static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh) {
     // Keyless accounts can only learn the pref from the tweak's own cookie
     // fetch (self-guarded: no-op for OAuth accounts and once it has run).
     // Kicked even when a rank-0 archive value exists — the fetch outranks it.
-    if (activeUsername.length > 0) ApolloTagKickKeylessPrefFetch(activeUsername);
-    NSInteger effective = captured ? (captured.boolValue ? 1 : 0) : -1;
+    // Skipped while a local override is active: the network value can't
+    // change the outcome (and captures resume when Follow returns).
+    if (activeUsername.length > 0 && sNSFWBlurOverride == 0) ApolloTagKickKeylessPrefFetch(activeUsername);
+    NSInteger effective;
+    if (sNSFWBlurOverride == 1)      effective = 1;
+    else if (sNSFWBlurOverride == 2) effective = 0;
+    else                             effective = captured ? (captured.boolValue ? 1 : 0) : -1;
     BOOL identityChanged = ![sTagEffectiveUsername isEqualToString:activeUsername];
     if (!forceRefresh && !identityChanged && effective == sTagEffectiveNoProfanity) return;
     sTagEffectiveUsername = [activeUsername copy];
@@ -442,6 +473,17 @@ static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh) {
         postNotificationName:ApolloAdultContentBlurPreferenceDidChangeNotification
                       object:nil];
     ApolloTagRefreshAllVisibleCells();
+}
+
+void ApolloTagFiltersNSFWBlurOverrideChanged(void) {
+    NSString *username = ApolloTagLiveActiveUsername();
+    NSNumber *authoritative = ApolloTagAuthoritativeNoProfanity(username);
+    if (authoritative) ApolloTagStampNoProfanityOnLiveUser(username, authoritative.boolValue);
+    // Returning to Follow with no network capture yet leaves the last stamped
+    // value on the object until a capture lands (the recompute re-kicks the
+    // keyless fetch when applicable). Forced refresh so cells re-evaluate
+    // immediately even when the effective number happens not to change.
+    ApolloTagRecomputeEffectiveNoProfanity(YES);
 }
 
 // Predicts Apollo's native NSFW obscuring for a link, so the tweak's overlay
@@ -882,6 +924,8 @@ static __thread NSInteger sTagUserDecodeDepth = 0;
 
 - (void)setNoProfanity:(BOOL)value {
     %orig;
+    // Echo of the tweak's own stamp — not a capture source.
+    if (sTagStampingLiveUser) return;
     id parsedUser = self;
     NSInteger rank = (sTagUserDecodeDepth > 0) ? 0 : 1;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -911,17 +955,18 @@ static __thread NSInteger sTagUserDecodeDepth = 0;
     id installedUser = user;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *username = ApolloTagNormalizedUsername(installedUser);
-        NSNumber *authoritative = username.length > 0 ? sTagNoProfanityByUser[username] : nil;
-        NSInteger rank = username.length > 0 ? sTagNoProfanityRankByUser[username].integerValue : 0;
-        if (authoritative && rank >= 1) {
+        NSNumber *authoritative = ApolloTagAuthoritativeNoProfanity(username);
+        if (authoritative) {
             @try {
                 NSNumber *existing = [installedUser valueForKey:@"noProfanity"];
                 if (![existing isKindOfClass:[NSNumber class]] || existing.boolValue != authoritative.boolValue) {
+                    sTagStampingLiveUser = YES;
                     [installedUser setValue:authoritative forKey:@"noProfanity"];
+                    sTagStampingLiveUser = NO;
                     ApolloLog(@"[TagFilters] Re-asserted noProfanity=%d on installed currentUser u/%@ (blur mature media)",
                               authoritative.boolValue, username);
                 }
-            } @catch (__unused NSException *e) {}
+            } @catch (__unused NSException *e) { sTagStampingLiveUser = NO; }
         }
         ApolloTagRecomputeEffectiveNoProfanity(NO);
     });
@@ -1004,5 +1049,13 @@ static __thread NSInteger sTagUserDecodeDepth = 0;
                                                       usingBlock:^(__unused NSNotification *note) {
             ApolloTagRecomputeEffectiveNoProfanity(YES);
         }];
+    }
+}
+
+NSString *ApolloNSFWBlurOverrideTitle(NSInteger value) {
+    switch (value) {
+        case 1:  return @"Always";
+        case 2:  return @"Never";
+        default: return @"Reddit Setting";
     }
 }

@@ -492,6 +492,8 @@ extern BOOL sPiPSkipButtons;
 extern NSInteger sPiPSkipSeconds;
 extern BOOL sPiPProgressBar;
 
+// Native NSFW media blur override: 0 follow Reddit setting, 1 always, 2 never.
+extern NSInteger sNSFWBlurOverride;
 // Tag filter feature (NSFW / Spoiler).
 extern BOOL sTagFilterEnabled;
 extern NSString *sTagFilterMode;          // @"hide" or @"blur"
