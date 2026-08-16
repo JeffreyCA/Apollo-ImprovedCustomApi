@@ -31,6 +31,7 @@
 #import "ApolloTagFilters.h"
 #import "TagFiltersViewController.h"
 #import "UserDefaultConstants.h"
+#import "ApolloNSFWGate.h"
 
 // Native Filters & Blocks screen (Apollo.SettingsFiltersViewController). Declared
 // for the compiler so our self-calls (the dataSource method + the %new helpers
@@ -74,10 +75,11 @@ enum {
     ApolloTFRowCount,
 };
 
-// Rows of the appended NSFW Media section (always 2; static).
+// Rows of the appended NSFW Media section (always 3; static).
 enum {
     ApolloNSFWRowBlur = 0,
     ApolloNSFWRowGateExplainer,
+    ApolloNSFWRowUnlock,
     ApolloNSFWRowCount,
 };
 
@@ -292,7 +294,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
     } else if (section == native + 2) {
         text = @"Filtered posts are covered with a frosted blur over the post's title and thumbnail. Tap the blur to confirm and reveal the post.";
     } else {
-        text = @"Apollo's built-in blur: NSFW media is blurred with a tap-to-view cover while the post title stays readable. \"Reddit Setting\" follows your account's \"Blur mature (18+) images and media\" preference; Always and Never override it on this device only.\n\nReddit hides mature posts from API-key accounts that don't moderate a subreddit, which makes those subreddits look empty. The explainer says so when it happens, and offers the fix.";
+        text = @"Apollo's built-in blur: NSFW media is blurred with a tap-to-view cover while the post title stays readable. \"Reddit Setting\" follows your account's \"Blur mature (18+) images and media\" preference; Always and Never override it on this device only.\n\nReddit hides mature posts from API-key accounts that don't moderate a subreddit, which makes those subreddits look empty. The explainer says so when it happens; Unlock Mature Content opens that same fix directly.";
     }
     return ApolloPFSectionFooterView(text);
 }
@@ -336,6 +338,9 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
     } else if (indexPath.section == native + 3) {
         if (indexPath.row == ApolloNSFWRowBlur) {
             [self apollo_nsfwBlurPresentPickerFromTable:tableView atIndexPath:indexPath];
+        } else if (indexPath.row == ApolloNSFWRowUnlock) {
+            [tableView deselectRowAtIndexPath:indexPath animated:YES];
+            ApolloNSFWGatePresentUnlockFlow();
         }
         // The explainer row is a switch; nothing to do on select.
     }
@@ -565,7 +570,12 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
 %new
 - (UITableViewCell *)apollo_nsfwCellForTable:(UITableView *)tableView row:(NSInteger)row {
     UITableViewCell *cell;
-    if (row == ApolloNSFWRowGateExplainer) {
+    if (row == ApolloNSFWRowUnlock) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.textLabel.text = @"Unlock Mature Content\u2026";
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    } else if (row == ApolloNSFWRowGateExplainer) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         cell.textLabel.text = @"Explain Blocked Mature Content";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;

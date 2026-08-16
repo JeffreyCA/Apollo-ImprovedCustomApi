@@ -19,6 +19,7 @@
 // user's own credentials — the same thing users do manually on the website
 // today, minus the trip to the website.
 
+#import "ApolloNSFWGate.h"
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -256,8 +257,12 @@ static void ApolloGatePromptCreateSubreddit(void) {
 
 #pragma mark - Explainer
 
-static void ApolloGatePresentExplainer(NSString *subreddit) {
-    if (sGateSheetShownThisLaunch || sGateSheetPresenting) return;
+// `subreddit` nil means the user opened this themselves from Settings rather
+// than tripping the gate on a listing, so there is no sub to name and none of
+// the automatic-presentation guards apply: they exist to stop the sheet
+// nagging, and someone who tapped the row is asking for it.
+static void ApolloGatePresentExplainerInternal(NSString *subreddit, BOOL userInitiated) {
+    if (!userInitiated && (sGateSheetShownThisLaunch || sGateSheetPresenting)) return;
     // Don't spend the once-per-launch chance on a presentation that can't
     // land. UIKit silently drops -presentViewController: when the presenter is
     // nil or mid-transition, and the flag used to be set before the call — so
@@ -270,30 +275,54 @@ static void ApolloGatePresentExplainer(NSString *subreddit) {
         ApolloLog(@"[NSFWGate] explainer for r/%@ deferred — no presentable controller", subreddit);
         return;
     }
+    NSString *lead = subreddit.length > 0
+        ? [NSString stringWithFormat:@"r/%@ appears empty because Reddit withholds mature content "
+                                     @"from third-party API apps", subreddit]
+        : @"Reddit withholds mature content from third-party API apps";
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Mature Content Blocked by Reddit"
                          message:[NSString stringWithFormat:
-        @"r/%@ appears empty because Reddit withholds mature content from third-party API apps — "
-        @"unless the account moderates a subreddit.\n\n"
+        @"%@ — unless the account moderates a subreddit.\n\n"
         @"The reliable fix: create a private subreddit (invisible to everyone but you). Reddit then "
         @"treats this account as a moderator and unlocks mature content, usually within minutes.\n\n"
-        @"Alternatively, accounts signed in with reddit.com (API-Key-Free) are not affected.", subreddit]
+        @"Alternatively, accounts signed in with reddit.com (API-Key-Free) are not affected.", lead]
                   preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Create Private Subreddit…" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
         ApolloGatePromptCreateSubreddit();
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Don't Show Again" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) {
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyNSFWGateExplainerEnabled];
-    }]];
+    // "Don't Show Again" only suppresses the AUTOMATIC sheet, so it would read
+    // as a no-op (or worse, a trap) on a sheet the user just opened from the
+    // row that exists to bring it back.
+    if (!userInitiated) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Don't Show Again" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *a) {
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyNSFWGateExplainerEnabled];
+        }]];
+    }
     [alert addAction:[UIAlertAction actionWithTitle:@"Not Now" style:UIAlertActionStyleCancel handler:nil]];
     // In-flight guard so a second empty listing arriving before the alert is
     // up can't present a duplicate; cleared alongside the shown flag.
     sGateSheetPresenting = YES;
     [top presentViewController:alert animated:YES completion:^{
-        sGateSheetShownThisLaunch = YES;
+        // A user-initiated sheet must not burn the automatic one: the gate can
+        // still legitimately fire later this launch on a sub they visit.
+        if (!userInitiated) sGateSheetShownThisLaunch = YES;
         sGateSheetPresenting = NO;
-        ApolloLog(@"[NSFWGate] Presented mature-content explainer for r/%@", subreddit);
+        ApolloLog(@"[NSFWGate] Presented mature-content explainer (%@)",
+                  subreddit.length > 0 ? [@"r/" stringByAppendingString:subreddit] : @"from Settings");
     }];
+}
+
+static void ApolloGatePresentExplainer(NSString *subreddit) {
+    ApolloGatePresentExplainerInternal(subreddit, NO);
+}
+
+// Settings entry point (Filters & Blocks -> NSFW Media -> Unlock Mature
+// Content). The automatic sheet only appears if the user happens to open a
+// gated subreddit, and a gated account can't reach one by searching — mature
+// subs are withheld from search on the same rule — so without this row the
+// remedy is unreachable for exactly the users who need it.
+void ApolloNSFWGatePresentUnlockFlow(void) {
+    ApolloGatePresentExplainerInternal(nil, YES);
 }
 
 #pragma mark - Detection
@@ -316,6 +345,7 @@ static void ApolloGateVerifyAndExplain(NSString *subreddit) {
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request
                                             completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         BOOL over18 = NO;
+        BOOL quarantined = NO;
         NSInteger subscribers = 0;
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         if (!error && http.statusCode == 200 && data.length > 0) {
@@ -323,10 +353,20 @@ static void ApolloGateVerifyAndExplain(NSString *subreddit) {
             NSDictionary *sub = [root isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)root)[@"data"] : nil;
             if ([sub isKindOfClass:[NSDictionary class]]) {
                 over18 = [sub[@"over18"] isKindOfClass:[NSNumber class]] && [sub[@"over18"] boolValue];
+                quarantined = [sub[@"quarantine"] isKindOfClass:[NSNumber class]] && [sub[@"quarantine"] boolValue];
                 subscribers = [sub[@"subscribers"] isKindOfClass:[NSNumber class]] ? [sub[@"subscribers"] integerValue] : 0;
             }
         }
         if (!over18 || subscribers < kGateMinimumSubscribers) return;
+        // A quarantined subreddit serves the SAME signature — over-18, popular,
+        // empty first page — but for a different reason, and moderating a
+        // subreddit does not lift it (the user has to opt in to the quarantine
+        // on reddit.com). Offering to create a permanent subreddit here would be
+        // irreversible advice that cannot work, so stay quiet instead.
+        if (quarantined) {
+            ApolloLog(@"[NSFWGate] r/%@ is quarantined, not API-gated — no explainer", subreddit);
+            return;
+        }
         ApolloLog(@"[NSFWGate] Gate confirmed for r/%@ (over18, %ld subscribers, empty listing)",
                   subreddit, (long)subscribers);
         dispatch_async(dispatch_get_main_queue(), ^{ ApolloGatePresentExplainer(subreddit); });
