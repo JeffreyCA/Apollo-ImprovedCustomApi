@@ -61,6 +61,13 @@ static void ApolloApplyRootNativeSurface(UITableViewCell *cell, UIColor *surface
     cell.contentView.backgroundColor = [UIColor clearColor];
 }
 
+static BOOL ApolloRootCellCopiesNativeSurface(NSIndexPath *indexPath) {
+    // Both cards are made from tweak-owned cells. They must follow a freshly
+    // themed native donor rather than retaining a resolved surface from the
+    // appearance in which they were first created.
+    return indexPath.section == 0 || indexPath.section == 2;
+}
+
 // Apollo's root Settings screen adds an Export button for its legacy settings
 // archive. Reborn owns Backup/Restore in its Data section, so two export paths
 // with different formats are ambiguous. Remove only Apollo's export action and
@@ -199,6 +206,21 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     sApolloLastSettingsVC = (UIViewController *)self;
 }
 
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    UIViewController *controller = (UIViewController *)self;
+    if (!previousTraitCollection ||
+        previousTraitCollection.userInterfaceStyle == controller.traitCollection.userInterfaceStyle) return;
+
+    // The native surface captured below may be a trait-resolved color. Drop
+    // it before rebuilding so the native rows donate their new appearance,
+    // then propagate that surface back to both tweak-owned cards.
+    objc_setAssociatedObject(self, &kApolloRootNativeSurfaceKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UITableView *tableView = ApolloRootSettingsTableInView(controller.view);
+    [tableView reloadData];
+}
+
 // Reborn and support form one compact primary card. The cells are tweak-owned
 // because UIKit requires a cell dequeued for an index path to be returned for
 // that same path. Their surface is copied from a real native row below after
@@ -276,6 +298,25 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     if (nativeSurface) {
         objc_setAssociatedObject(self, &kApolloRootNativeSurfaceKey, nativeSurface,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        for (UITableViewCell *visibleCell in tableView.visibleCells) {
+            NSIndexPath *visiblePath = [tableView indexPathForCell:visibleCell];
+            if (ApolloRootCellCopiesNativeSurface(visiblePath)) {
+                ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
+            }
+        }
+        // Apollo can finish its own cell theming later in this run-loop turn.
+        // Reassert once more after that pass so the custom cards match the
+        // final native surface during animated appearance transitions.
+        __weak UITableView *weakTable = tableView;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UITableView *liveTable = weakTable;
+            for (UITableViewCell *visibleCell in liveTable.visibleCells) {
+                NSIndexPath *visiblePath = [liveTable indexPathForCell:visibleCell];
+                if (ApolloRootCellCopiesNativeSurface(visiblePath)) {
+                    ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
+                }
+            }
+        });
     }
     UIImage *normalizedIcon = ApolloRootSettingsIconForTitle(cell.textLabel.text);
     if (normalizedIcon) cell.imageView.image = normalizedIcon;
