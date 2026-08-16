@@ -257,11 +257,55 @@ static void ApolloGatePromptCreateSubreddit(void) {
 
 #pragma mark - Explainer
 
+// Does this account already moderate anything? The remedy is "become a
+// moderator", so offering to create a subreddit to someone who already
+// moderates one is both useless and irreversible — and it is exactly what the
+// sheet did after a successful creation, because nothing re-checked. Calls back
+// on the MAIN queue with the count and the first subreddit's display name
+// (count < 0 means the lookup itself failed — treat as unknown, not as zero).
+static void ApolloGateFetchModeratedSubreddits(void (^completion)(NSInteger count, NSString *firstName)) {
+    NSString *bearer = ApolloGateActiveBearer();
+    if (bearer.length == 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(-1, nil); });
+        return;
+    }
+    NSMutableURLRequest *request = [NSMutableURLRequest
+        requestWithURL:[NSURL URLWithString:@"https://oauth.reddit.com/subreddits/mine/moderator?limit=100&raw_json=1"]
+           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+       timeoutInterval:10.0];
+    [request setValue:[@"bearer " stringByAppendingString:bearer] forHTTPHeaderField:@"Authorization"];
+    [request setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger count = -1;
+        NSString *first = nil;
+        if (!error && http.statusCode == 200 && data.length > 0) {
+            id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+            NSDictionary *listing = [root isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)root)[@"data"] : nil;
+            NSArray *children = [listing[@"children"] isKindOfClass:[NSArray class]] ? listing[@"children"] : nil;
+            if (children) {
+                count = (NSInteger)children.count;
+                NSDictionary *firstChild = children.firstObject;
+                NSDictionary *sub = [firstChild isKindOfClass:[NSDictionary class]] ? firstChild[@"data"] : nil;
+                if ([sub[@"display_name"] isKindOfClass:[NSString class]]) first = sub[@"display_name"];
+            }
+        }
+        ApolloLog(@"[NSFWGate] moderated-subreddit lookup: count=%ld first=%@ (HTTP %ld)",
+                  (long)count, first ?: @"n/a", (long)http.statusCode);
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(count, first); });
+    }];
+    [task resume];
+    [session finishTasksAndInvalidate];
+}
+
 // `subreddit` nil means the user opened this themselves from Settings rather
 // than tripping the gate on a listing, so there is no sub to name and none of
 // the automatic-presentation guards apply: they exist to stop the sheet
 // nagging, and someone who tapped the row is asking for it.
-static void ApolloGatePresentExplainerInternal(NSString *subreddit, BOOL userInitiated) {
+static void ApolloGatePresentExplainerInternal(NSString *subreddit, BOOL userInitiated,
+                                              NSInteger moderatedCount, NSString *moderatedName) {
     if (!userInitiated && (sGateSheetShownThisLaunch || sGateSheetPresenting)) return;
     // Don't spend the once-per-launch chance on a presentation that can't
     // land. UIKit silently drops -presentViewController: when the presenter is
@@ -279,17 +323,30 @@ static void ApolloGatePresentExplainerInternal(NSString *subreddit, BOOL userIni
         ? [NSString stringWithFormat:@"r/%@ appears empty because Reddit withholds mature content "
                                      @"from third-party API apps", subreddit]
         : @"Reddit withholds mature content from third-party API apps";
+    // Already a moderator: the remedy has been applied, so don't offer it again
+    // — creating another subreddit is irreversible and cannot help.
+    BOOL alreadyModerates = moderatedCount > 0;
+    NSString *body = alreadyModerates
+        ? [NSString stringWithFormat:
+            @"%@ — unless the account moderates a subreddit.\n\n"
+            @"This account already moderates r/%@, so the usual fix is already in place. Reddit can "
+            @"take a while to apply it, and it does not always lift the restriction — if mature "
+            @"content is still missing after a few hours, signing in with reddit.com "
+            @"(API-Key-Free) is the reliable alternative.", lead, moderatedName ?: @"a subreddit"]
+        : [NSString stringWithFormat:
+            @"%@ — unless the account moderates a subreddit.\n\n"
+            @"The usual fix: create a private subreddit (invisible to everyone but you), which makes "
+            @"Reddit treat this account as a moderator. This is not instant and is not guaranteed.\n\n"
+            @"Alternatively, accounts signed in with reddit.com (API-Key-Free) are not affected.", lead];
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Mature Content Blocked by Reddit"
-                         message:[NSString stringWithFormat:
-        @"%@ — unless the account moderates a subreddit.\n\n"
-        @"The reliable fix: create a private subreddit (invisible to everyone but you). Reddit then "
-        @"treats this account as a moderator and unlocks mature content, usually within minutes.\n\n"
-        @"Alternatively, accounts signed in with reddit.com (API-Key-Free) are not affected.", lead]
+                         message:body
                   preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Create Private Subreddit…" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        ApolloGatePromptCreateSubreddit();
-    }]];
+    if (!alreadyModerates) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Create Private Subreddit…" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+            ApolloGatePromptCreateSubreddit();
+        }]];
+    }
     // "Don't Show Again" only suppresses the AUTOMATIC sheet, so it would read
     // as a no-op (or worse, a trap) on a sheet the user just opened from the
     // row that exists to bring it back.
@@ -298,7 +355,8 @@ static void ApolloGatePresentExplainerInternal(NSString *subreddit, BOOL userIni
             [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyNSFWGateExplainerEnabled];
         }]];
     }
-    [alert addAction:[UIAlertAction actionWithTitle:@"Not Now" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:alreadyModerates ? @"OK" : @"Not Now"
+                                              style:UIAlertActionStyleCancel handler:nil]];
     // In-flight guard so a second empty listing arriving before the alert is
     // up can't present a duplicate; cleared alongside the shown flag.
     sGateSheetPresenting = YES;
@@ -313,7 +371,9 @@ static void ApolloGatePresentExplainerInternal(NSString *subreddit, BOOL userIni
 }
 
 static void ApolloGatePresentExplainer(NSString *subreddit) {
-    ApolloGatePresentExplainerInternal(subreddit, NO);
+    ApolloGateFetchModeratedSubreddits(^(NSInteger count, NSString *firstName) {
+        ApolloGatePresentExplainerInternal(subreddit, NO, count, firstName);
+    });
 }
 
 // Settings entry point (Filters & Blocks -> NSFW Media -> Unlock Mature
@@ -322,7 +382,9 @@ static void ApolloGatePresentExplainer(NSString *subreddit) {
 // subs are withheld from search on the same rule — so without this row the
 // remedy is unreachable for exactly the users who need it.
 void ApolloNSFWGatePresentUnlockFlow(void) {
-    ApolloGatePresentExplainerInternal(nil, YES);
+    ApolloGateFetchModeratedSubreddits(^(NSInteger count, NSString *firstName) {
+        ApolloGatePresentExplainerInternal(nil, YES, count, firstName);
+    });
 }
 
 #pragma mark - Detection
