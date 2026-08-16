@@ -19,6 +19,38 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
     [cache setObject:image forKey:URL cost:ApolloWallpaperDecodedImageCost(image)];
 }
 
+// Keep decoded and original wallpaper data alive across viewer presentations.
+// Without this, choosing a different device (or reopening the same album)
+// starts from an empty per-viewer cache and its first page must visibly load.
+static NSCache<NSURL *, UIImage *> *ApolloWallpaperSharedImageCache(void) {
+    static NSCache<NSURL *, UIImage *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 7;
+        cache.totalCostLimit = 160 * 1024 * 1024;
+    });
+    return cache;
+}
+
+static NSCache<NSURL *, NSData *> *ApolloWallpaperSharedDataCache(void) {
+    static NSCache<NSURL *, NSData *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 16;
+        cache.totalCostLimit = 64 * 1024 * 1024;
+    });
+    return cache;
+}
+
+static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
+    static NSMutableSet<NSURL *> *URLs;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ URLs = [NSMutableSet set]; });
+    return URLs;
+}
+
 @implementation ApolloWallpaperItem
 
 + (instancetype)itemWithURLString:(NSString *)URLString caption:(NSString *)caption {
@@ -304,18 +336,51 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
 
 @implementation ApolloWallpaperViewerViewController
 
++ (void)preloadFirstItemFromItems:(NSArray<ApolloWallpaperItem *> *)items {
+    ApolloWallpaperItem *item = items.firstObject;
+    NSURL *URL = item.URL;
+    if (!URL || [ApolloWallpaperSharedImageCache() objectForKey:URL]) return;
+    NSData *cachedData = [ApolloWallpaperSharedDataCache() objectForKey:URL];
+    if (cachedData.length > 0) {
+        UIImage *cachedImage = [UIImage imageWithData:cachedData];
+        if (cachedImage) {
+            ApolloWallpaperCacheImage(ApolloWallpaperSharedImageCache(), URL, cachedImage);
+            return;
+        }
+    }
+
+    // Device-picker actions run on the main thread. Track these tiny, bounded
+    // three-device warmups there so repeated menu presentations cannot start
+    // duplicate requests for the same opening wallpaper.
+    NSMutableSet<NSURL *> *preloadingURLs = ApolloWallpaperInitialPreloadURLs();
+    if ([preloadingURLs containsObject:URL]) return;
+    [preloadingURLs addObject:URL];
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithURL:URL
+      completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
+        UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
+        if (image) {
+            ApolloWallpaperCacheImage(ApolloWallpaperSharedImageCache(), URL, image);
+            [ApolloWallpaperSharedDataCache() setObject:data forKey:URL cost:data.length];
+        } else if (error.code != NSURLErrorCancelled) {
+            ApolloLog(@"[Wallpapers] opening-page preload failed url=%@ error=%@", URL,
+                      error.localizedDescription ?: @"decode failed");
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [ApolloWallpaperInitialPreloadURLs() removeObject:URL];
+        });
+    }];
+    task.priority = NSURLSessionTaskPriorityHigh;
+    [task resume];
+}
+
 - (instancetype)initWithItems:(NSArray<ApolloWallpaperItem *> *)items {
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
         _items = [items copy] ?: @[];
-        _imageCache = [[NSCache alloc] init];
-        // The active page plus a direction-aware six-page preload window.
-        // NSCache can still discard these early under system memory pressure.
-        _imageCache.countLimit = 7;
-        _imageCache.totalCostLimit = 160 * 1024 * 1024;
-        _dataCache = [[NSCache alloc] init];
-        _dataCache.countLimit = 16;
-        _dataCache.totalCostLimit = 64 * 1024 * 1024;
+        _imageCache = ApolloWallpaperSharedImageCache();
+        _dataCache = ApolloWallpaperSharedDataCache();
         _prefetchTasks = [NSMutableDictionary dictionary];
         _initialIndex = 0;
         _savingIndex = NSNotFound;

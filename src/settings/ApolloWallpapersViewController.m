@@ -137,6 +137,16 @@
                                    sourceView:(UIView *)sourceView {
     if (!presenter) return;
 
+    // Warm each album's opening page while the user reads and chooses from the
+    // device menu. The viewer shares these caches, so its first cell can render
+    // immediately instead of beginning its first network request on screen.
+    [ApolloWallpaperViewerViewController preloadFirstItemFromItems:
+        [self itemsWithURLs:self.goodbyeIPhoneURLs captions:self.goodbyeCaptions]];
+    [ApolloWallpaperViewerViewController preloadFirstItemFromItems:
+        [self itemsWithURLs:self.goodbyeIPadURLs captions:self.goodbyeCaptions]];
+    [ApolloWallpaperViewerViewController preloadFirstItemFromItems:
+        [self itemsWithURLs:self.goodbyeMacURLs captions:self.goodbyeMacCaptions]];
+
     UIAlertController *sheet = [UIAlertController
         alertControllerWithTitle:nil
                          message:@"Choose a device"
