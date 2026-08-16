@@ -1051,3 +1051,11 @@ static __thread NSInteger sTagUserDecodeDepth = 0;
         }];
     }
 }
+
+NSString *ApolloNSFWBlurOverrideTitle(NSInteger value) {
+    switch (value) {
+        case 1:  return @"Always";
+        case 2:  return @"Never";
+        default: return @"Reddit Setting";
+    }
+}

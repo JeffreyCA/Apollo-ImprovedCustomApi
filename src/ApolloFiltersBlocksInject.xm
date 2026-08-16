@@ -1,7 +1,7 @@
 // ApolloFiltersBlocksInject
 //
 // Beefs out Apollo's native Filters & Blocks screen
-// (_TtC6Apollo29SettingsFiltersViewController) by APPENDING two Reborn sections
+// (_TtC6Apollo29SettingsFiltersViewController) by APPENDING three Reborn sections
 // below the native Keywords / Subreddits / Users sections:
 //
 //   • SUBREDDIT-SPECIFIC FILTERS — a list of configured subreddits; tap one to
@@ -31,7 +31,6 @@
 #import "ApolloTagFilters.h"
 #import "TagFiltersViewController.h"
 #import "UserDefaultConstants.h"
-#import "ApolloNSFWGate.h"
 
 // Native Filters & Blocks screen (Apollo.SettingsFiltersViewController). Declared
 // for the compiler so our self-calls (the dataSource method + the %new helpers
@@ -49,22 +48,10 @@
 - (void)apollo_tfNSFWChanged:(UISwitch *)sw;
 - (void)apollo_tfSpoilerChanged:(UISwitch *)sw;
 - (void)apollo_tfOpenOverrides;
-- (UITableViewCell *)apollo_nsfwCellForTable:(UITableView *)tableView row:(NSInteger)row;
-- (void)apollo_nsfwBlurPresentPickerFromTable:(UITableView *)tableView atIndexPath:(NSIndexPath *)indexPath;
-- (void)apollo_nsfwGateExplainerChanged:(UISwitch *)sw;
 @end
 
-// Detail label for the current sNSFWBlurOverride state.
-static NSString *ApolloNSFWBlurOverrideLabel(NSInteger value) {
-    switch (value) {
-        case 1:  return @"Always";
-        case 2:  return @"Never";
-        default: return @"Reddit Setting";
-    }
-}
-
 // Number of Reborn sections appended after the native ones.
-static const NSInteger kApolloPFExtraSections = 4;
+static const NSInteger kApolloPFExtraSections = 3;
 
 // Rows of the appended Tag Filters section (always 4; static).
 enum {
@@ -73,14 +60,6 @@ enum {
     ApolloTFRowSpoiler,
     ApolloTFRowOverrides,
     ApolloTFRowCount,
-};
-
-// Rows of the appended NSFW Media section (always 3; static).
-enum {
-    ApolloNSFWRowBlur = 0,
-    ApolloNSFWRowGateExplainer,
-    ApolloNSFWRowUnlock,
-    ApolloNSFWRowCount,
 };
 
 // Collapsible native Blocked Users section (the last native section): collapsed by
@@ -205,8 +184,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
     }
     if (section == native) return (NSInteger)[ApolloPostFilterStore allSubreddits].count + 1;     // + Add
     if (section == native + 1) return (NSInteger)[ApolloPostFilterStore nameSubstrings].count + 1; // + Add
-    if (section == native + 2) return ApolloTFRowCount; // Tag Filters (static)
-    return ApolloNSFWRowCount; // NSFW Media (static)
+    return ApolloTFRowCount; // Tag Filters (static)
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -224,7 +202,6 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
     }
 
     if (indexPath.section == native + 2) return [self apollo_tfCellForTable:tableView row:indexPath.row];
-    if (indexPath.section == native + 3) return [self apollo_nsfwCellForTable:tableView row:indexPath.row];
 
     BOOL isSubSection = (indexPath.section == native);
     NSArray<NSString *> *items = isSubSection ? [ApolloPostFilterStore allSubreddits]
@@ -273,8 +250,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
     NSString *title;
     if (section == native) title = @"Subreddit-Specific Filters";
     else if (section == native + 1) title = @"Filter Subreddits by Name";
-    else if (section == native + 2) title = @"Tag Filters";
-    else title = @"NSFW Media";
+    else title = @"Tag Filters";
     return ApolloPFSectionHeaderView(title);
 }
 
@@ -291,10 +267,8 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         text = @"Hide posts in a specific subreddit by title keyword or post flair. Tap a subreddit to configure. Applies on this device.";
     } else if (section == native + 1) {
         text = @"Hide any subreddit whose name contains one of these words, in feeds and in search (e.g. 'circlejerk' hides r/carscirclejerk). Applies on this device.";
-    } else if (section == native + 2) {
-        text = @"Filtered posts are covered with a frosted blur over the post's title and thumbnail. Tap the blur to confirm and reveal the post.";
     } else {
-        text = @"Apollo's built-in blur: NSFW media is blurred with a tap-to-view cover while the post title stays readable. \"Reddit Setting\" follows your account's \"Blur mature (18+) images and media\" preference; Always and Never override it on this device only.\n\nReddit hides mature posts from API-key accounts that don't moderate a subreddit, which makes those subreddits look empty. The explainer says so when it happens; Unlock Mature Content opens that same fix directly.";
+        text = @"Filtered posts are covered with a frosted blur over the post's title and thumbnail. Tap the blur to confirm and reveal the post.";
     }
     return ApolloPFSectionFooterView(text);
 }
@@ -335,14 +309,6 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         // Existing name rows: no detail; remove via swipe / Edit.
     } else if (indexPath.section == native + 2) {
         if (indexPath.row == ApolloTFRowOverrides) [self apollo_tfOpenOverrides];
-    } else if (indexPath.section == native + 3) {
-        if (indexPath.row == ApolloNSFWRowBlur) {
-            [self apollo_nsfwBlurPresentPickerFromTable:tableView atIndexPath:indexPath];
-        } else if (indexPath.row == ApolloNSFWRowUnlock) {
-            [tableView deselectRowAtIndexPath:indexPath animated:YES];
-            ApolloNSFWGatePresentUnlockFlow();
-        }
-        // The explainer row is a switch; nothing to do on select.
     }
 }
 
@@ -561,75 +527,6 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
     } else {
         [selfVC presentViewController:[[UINavigationController alloc] initWithRootViewController:vc] animated:YES completion:nil];
     }
-}
-
-#pragma mark - NSFW Media section (native blur override + gate explainer)
-
-// Fresh cells per call like the Tag Filters cells (this table reloads
-// wholesale). Theme borrowed the same way.
-%new
-- (UITableViewCell *)apollo_nsfwCellForTable:(UITableView *)tableView row:(NSInteger)row {
-    UITableViewCell *cell;
-    if (row == ApolloNSFWRowUnlock) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        cell.textLabel.text = @"Unlock Mature Content\u2026";
-        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    } else if (row == ApolloNSFWRowGateExplainer) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        cell.textLabel.text = @"Explain Blocked Mature Content";
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        UISwitch *sw = [[UISwitch alloc] init];
-        sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNSFWGateExplainerEnabled];
-        [sw addTarget:self action:@selector(apollo_nsfwGateExplainerChanged:) forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = sw;
-    } else {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
-        cell.textLabel.text = @"Blur NSFW Media";
-        cell.detailTextLabel.text = ApolloNSFWBlurOverrideLabel(sNSFWBlurOverride);
-        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    }
-    @try {   // borrow the native theme (background); labels stay label-color
-        UITableViewCell *probe = [self tableView:tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
-        UIColor *c = probe.backgroundColor ?: probe.contentView.backgroundColor;
-        if (c && CGColorGetAlpha(c.CGColor) > 0.01) cell.backgroundColor = c;
-    } @catch (__unused id e) {}
-    return cell;
-}
-
-// The sheet's "Don't Show Again" writes NO here; this row is the only way back
-// on, so it has to live somewhere the user can find it.
-%new
-- (void)apollo_nsfwGateExplainerChanged:(UISwitch *)sw {
-    [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:UDKeyNSFWGateExplainerEnabled];
-}
-
-%new
-- (void)apollo_nsfwBlurPresentPickerFromTable:(UITableView *)tableView atIndexPath:(NSIndexPath *)indexPath {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Blur NSFW Media"
-                                                                   message:nil
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak UITableView *weakTable = tableView;
-    void (^pick)(NSInteger) = ^(NSInteger value) {
-        sNSFWBlurOverride = value;
-        [[NSUserDefaults standardUserDefaults] setInteger:value forKey:UDKeyNSFWBlurOverride];
-        ApolloTagFiltersNSFWBlurOverrideChanged();
-        @try { [weakTable reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone]; }
-        @catch (__unused id e) {}
-    };
-    NSArray<NSNumber *> *values = @[@0, @1, @2];
-    for (NSNumber *v in values) {
-        NSString *title = ApolloNSFWBlurOverrideLabel(v.integerValue);
-        if (v.integerValue == sNSFWBlurOverride) title = [title stringByAppendingString:@" (Current)"];
-        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-            pick(v.integerValue);
-        }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    UITableViewCell *anchor = [tableView cellForRowAtIndexPath:indexPath];
-    sheet.popoverPresentationController.sourceView = anchor ?: tableView;
-    sheet.popoverPresentationController.sourceRect = anchor ? anchor.bounds : CGRectZero;
-    [(UIViewController *)self presentViewController:sheet animated:YES completion:nil];
 }
 
 #pragma mark - Collapsible Blocked Users toggle

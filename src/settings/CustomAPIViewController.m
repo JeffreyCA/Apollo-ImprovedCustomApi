@@ -14,6 +14,8 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
+#import "ApolloTagFilters.h"
+#import "ApolloNSFWGate.h"
 #import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
@@ -1667,6 +1669,53 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     return [ApolloSettingsSection sectionWithTitle:@"Browsing"
                                             footer:@"Swipe through Reddit image galleries without leaving the feed. With Swipe Past Gallery to Navigate, continuing to swipe at a gallery's first or last image goes back or forward to the previous page instead of bouncing. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
                                               rows:@[ feedGalleries, edgeSwipeNav, swipeComments ]];
+}
+
+// NSFW Media. Lives here rather than in Apollo's native Filters & Blocks screen:
+// these are tweak settings, and tweak settings belong on the tweak's own screens
+// (Apollo's tables are only ever modified through the ApolloSettingsGeneralTable
+// registry). "Unlock Mature Content" matters most — mature subreddits are
+// withheld from SEARCH under the same rule that empties their listings, so a
+// blocked account cannot reach a subreddit that would trip the automatic
+// explainer, and without a row like this the fix is unreachable.
+- (ApolloSettingsSection *)buildMediaNSFWSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *blur =
+        [ApolloSettingsRow valueRowWithID:@"media.nsfwBlurOverride"
+                                    title:@"Blur NSFW Media"
+                                   detail:^NSString * { return ApolloNSFWBlurOverrideTitle(sNSFWBlurOverride); }
+                                 onSelect:^{ [weakSelf nsfwBlurOverrideRowSelected]; }];
+
+    ApolloSettingsRow *explain =
+        [ApolloSettingsRow switchRowWithID:@"media.nsfwGateExplainer"
+                                     title:@"Explain Blocked Mature Content"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNSFWGateExplainerEnabled]; }
+                                  onToggle:^(UISwitch *sender) {
+            [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyNSFWGateExplainerEnabled];
+        }];
+
+    ApolloSettingsRow *unlock =
+        [ApolloSettingsRow buttonRowWithID:@"media.nsfwUnlock"
+                                     title:@"Unlock Mature Content\u2026"
+                                    action:^{ ApolloNSFWGatePresentUnlockFlow(); }];
+
+    return [ApolloSettingsSection sectionWithTitle:@"NSFW Media"
+                                            footer:@"\"Reddit Setting\" follows your account's \"Blur mature (18+) images and media\" preference; Always and Never override it on this device only.\n\nReddit hides mature posts from API-key accounts that don't moderate a subreddit, which makes those subreddits look empty. The explainer says so when it happens; Unlock Mature Content opens that same fix directly."
+                                              rows:@[ blur, explain, unlock ]];
+}
+
+- (void)nsfwBlurOverrideRowSelected {
+    ApolloSettingsPresentPicker(self, nil, @"Blur NSFW Media",
+                                @[ ApolloNSFWBlurOverrideTitle(0),
+                                   ApolloNSFWBlurOverrideTitle(1),
+                                   ApolloNSFWBlurOverrideTitle(2) ],
+                                sNSFWBlurOverride,
+                                ^(NSInteger picked) {
+        sNSFWBlurOverride = picked;
+        [[NSUserDefaults standardUserDefaults] setInteger:picked forKey:UDKeyNSFWBlurOverride];
+        ApolloTagFiltersNSFWBlurOverrideChanged();
+    });
 }
 
 - (ApolloSettingsSection *)buildMediaPlaybackSection {
@@ -3734,6 +3783,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSString *)apollo_screenTitle { return @"Media"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildMediaBrowsingSection],
+              [self buildMediaNSFWSection],
               [self buildMediaPlaybackSection],
               [self buildMediaInlineSection],
               [self buildMediaUploadsSection],

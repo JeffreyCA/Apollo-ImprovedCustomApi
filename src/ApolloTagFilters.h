@@ -28,6 +28,10 @@ BOOL ApolloShouldBlurNSFWMediaInSubreddit(NSString *_Nullable subreddit);
 // override immediately, and refreshes visible cells.
 void ApolloTagFiltersNSFWBlurOverrideChanged(void);
 
+// Display title for an sNSFWBlurOverride value (0 = Reddit Setting, 1 = Always,
+// 2 = Never). Shared so the settings screen and any other presenter can't drift.
+NSString *ApolloNSFWBlurOverrideTitle(NSInteger value);
+
 #ifdef __cplusplus
 }
 #endif
