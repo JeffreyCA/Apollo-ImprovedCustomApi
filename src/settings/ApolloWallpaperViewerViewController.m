@@ -40,6 +40,7 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
 @property (nonatomic, strong, nullable) NSCache<NSURL *, UIImage *> *imageCache;
 @property (nonatomic, strong, nullable) NSCache<NSURL *, NSData *> *dataCache;
 @property (nonatomic) CGSize zoomGeometrySize;
+@property (nonatomic) NSUInteger loadGeneration;
 @property (nonatomic, readonly) BOOL isZoomed;
 @property (nonatomic, copy, nullable) void (^zoomInteractionChanged)(BOOL blocksPaging);
 - (void)showURL:(NSURL *)URL
@@ -182,6 +183,7 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
 
 - (void)prepareForReuse {
     [super prepareForReuse];
+    self.loadGeneration++;
     [self.task cancel];
     self.task = nil;
     self.representedURL = nil;
@@ -199,6 +201,7 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
 - (void)showURL:(NSURL *)URL
      imageCache:(NSCache<NSURL *, UIImage *> *)imageCache
       dataCache:(NSCache<NSURL *, NSData *> *)dataCache {
+    NSUInteger generation = ++self.loadGeneration;
     [self.task cancel];
     self.task = nil;
     self.representedURL = URL;
@@ -222,7 +225,6 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
 
     [self.spinner startAnimating];
     __weak typeof(self) weakSelf = self;
-    __weak NSURLSessionDataTask *weakTask = nil;
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:URL completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
         UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
         if (image) {
@@ -231,7 +233,7 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
-            if (!strongSelf || strongSelf.task != weakTask ||
+            if (!strongSelf || strongSelf.loadGeneration != generation ||
                 ![strongSelf.representedURL isEqual:URL]) return;
             strongSelf.task = nil;
             [strongSelf.spinner stopAnimating];
@@ -241,7 +243,6 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
             if (!image) ApolloLog(@"[Wallpapers] image load failed url=%@ error=%@", URL, error.localizedDescription ?: @"decode failed");
         });
     }];
-    weakTask = task;
     self.task = task;
     [task resume];
 }
@@ -780,7 +781,7 @@ static void ApolloWallpaperCacheImage(NSCache<NSURL *, UIImage *> *cache,
         }
 
         __weak typeof(self) weakSelf = self;
-        __weak NSURLSessionDataTask *weakTask = nil;
+        __block __weak NSURLSessionDataTask *weakTask = nil;
         NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:URL
                                                                 completionHandler:^(NSData *data,
                                                                                     __unused NSURLResponse *response,
