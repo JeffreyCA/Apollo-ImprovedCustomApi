@@ -34,19 +34,30 @@ NSStringEncoding ApolloWebTextEncodingDeclaredInHTMLData(NSData *data);
 /// declares, in this order:
 ///
 ///   1. a byte-order mark, which outranks every declaration;
-///   2. UTF-8, when the bytes are valid UTF-8 *and* carry at least one
-///      multi-byte sequence (see the note in the implementation on why this
-///      sits ahead of the declared charset);
-///   3. the response's `Content-Type: …; charset=…`;
-///   4. the charset declared inside the markup;
-///   5. UTF-8, covering pure-ASCII pages and pages that declare nothing;
-///   6. Latin-1, which cannot fail and so guarantees a non-nil result for any
+///   2. the response's `Content-Type: …; charset=…`;
+///   3. the charset declared inside the markup;
+///   4. UTF-8, for pages that declare nothing usable;
+///   5. Latin-1, which cannot fail and so guarantees a non-nil result for any
 ///      non-empty input.
+///
+/// A declaration is honoured as given and is never overridden by sniffing the
+/// bytes for valid UTF-8 first — valid UTF-8 and valid legacy text overlap (see
+/// the implementation), so sniffing would decode some legacy pages to entirely
+/// the wrong characters. A declaration that fails to decode its own bytes is
+/// abandoned in favour of the next candidate.
 ///
 /// `response` may be nil. Pass a non-NULL `outEncoding` to learn which encoding
 /// won, for logging; it is left untouched when the input is empty.
 /// Returns nil only for nil/empty `data`.
 NSString *ApolloWebTextFromData(NSData *data, NSURLResponse *response, NSStringEncoding *outEncoding);
+
+/// Regression fixtures for the above, covering the label widening, the
+/// declaration sources and their precedence, and the byte sequences that are
+/// simultaneously valid UTF-8 and valid CP949/Big5/GB18030/Shift_JIS. Returns
+/// YES when every case passes; on failure `outFailedCase` (optional) receives
+/// the name of the first case that failed. Cheap and allocation-light — run
+/// from the simulator debug bridge's %ctor.
+BOOL ApolloWebTextDecodingRunSelfTests(NSString **outFailedCase);
 
 /// Human-readable name for an encoding returned above ("Korean (Windows, DOS)"),
 /// for log lines. Returns @"unknown" for 0 / unmappable values.

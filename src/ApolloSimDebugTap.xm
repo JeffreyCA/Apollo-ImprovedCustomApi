@@ -19,6 +19,7 @@
 #import "ApolloCommentVoteInsights.h"
 #import "ApolloCommon.h"
 #import "ApolloLinkPreviewFetcher.h"
+#import "ApolloWebTextDecoding.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "UIWindow+Apollo.h"
@@ -499,6 +500,10 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
     ApolloLog(@"[SimDebugTap] listening for apollofix.debugtap");
     ApolloLog(@"[CommentInsights][parser] self-tests %@",
               ApolloCommentVoteInsightsRunParserSelfTests() ? @"passed" : @"FAILED");
+    NSString *charsetFailure = nil;
+    BOOL charsetOK = ApolloWebTextDecodingRunSelfTests(&charsetFailure);
+    ApolloLog(@"[WebTextDecoding] self-tests %@", charsetOK ? @"passed"
+              : [NSString stringWithFormat:@"FAILED at \"%@\"", charsetFailure]);
 }
 
 #endif

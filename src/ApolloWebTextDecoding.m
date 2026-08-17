@@ -188,15 +188,6 @@ NSStringEncoding ApolloWebTextEncodingDeclaredInHTMLData(NSData *data) {
     return 0;
 }
 
-static BOOL ApolloWebTextDataContainsNonASCII(NSData *data) {
-    const uint8_t *bytes = data.bytes;
-    NSUInteger length = data.length;
-    for (NSUInteger index = 0; index < length; index++) {
-        if (bytes[index] & 0x80) return YES;
-    }
-    return NO;
-}
-
 #pragma mark - Decoding
 
 NSString *ApolloWebTextFromData(NSData *data, NSURLResponse *response, NSStringEncoding *outEncoding) {
@@ -213,34 +204,30 @@ NSString *ApolloWebTextFromData(NSData *data, NSURLResponse *response, NSStringE
         }
     }
 
-    // Multi-byte-bearing valid UTF-8 outranks the declared charset here, which
-    // is a deliberate departure from the spec's "HTTP header always wins".
+    // An explicit declaration is honoured as declared, and is never
+    // second-guessed by sniffing the bytes for valid UTF-8 first.
     //
-    // The spec order would regress pages that are genuinely UTF-8 but ship a
-    // stale `charset=ISO-8859-1` header (still an Apache default) — the
-    // windows-1252 read never fails, so it would win and turn working previews
-    // into mojibake. Deciding by the bytes avoids that with no ambiguity cost:
-    // legacy multi-byte text essentially cannot be mistaken for UTF-8, because
-    // EUC-KR/CP949, Shift_JIS and Big5 all lead their characters with a byte in
-    // 0x80–0xBF or 0x81–0x9F, which UTF-8 does not allow in a lead position.
-    // So "valid UTF-8 with at least one multi-byte sequence" identifies real
-    // UTF-8, and the declared charset still governs everything else.
-    BOOL hasNonASCII = ApolloWebTextDataContainsNonASCII(data);
-    NSString *utf8Decoded = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (hasNonASCII && utf8Decoded.length > 0) {
-        if (outEncoding) *outEncoding = NSUTF8StringEncoding;
-        return utf8Decoded;
-    }
-
-    NSMutableArray<NSNumber *> *candidates = [NSMutableArray array];
+    // Sniffing looks tempting — it would rescue a page that is really UTF-8
+    // behind a stale `charset=ISO-8859-1` header — but it is not sound, because
+    // "valid UTF-8" and "valid legacy text" are not mutually exclusive. The
+    // lead-byte ranges overlap: CP949, GB18030 and Big5 lead as high as 0xFE and
+    // CP932 as high as 0xFC, well inside UTF-8's own 0xC2–0xF4 lead range. So
+    // `C2 81` is both valid UTF-8 (U+0081) and valid CP949 (혖), and `C2 A1` is
+    // both valid UTF-8 (U+00A1) and valid Big5 (癒) / GB18030 (隆) / CP932 (ﾂ｡).
+    // A page built from those pairs would sniff clean as UTF-8 and decode to
+    // entirely the wrong characters — the very bug this file exists to fix.
+    // Trusting the declaration is also what browsers do, so a page we get
+    // "wrong" is one that renders the same way in Safari.
     NSStringEncoding headerEncoding = ApolloWebTextEncodingForCharsetLabel(response.textEncodingName);
-    if (headerEncoding != 0) [candidates addObject:@(headerEncoding)];
     NSStringEncoding markupEncoding = ApolloWebTextEncodingDeclaredInHTMLData(data);
-    if (markupEncoding != 0 && markupEncoding != headerEncoding) [candidates addObject:@(markupEncoding)];
-
-    for (NSNumber *candidate in candidates) {
-        NSStringEncoding encoding = candidate.unsignedIntegerValue;
-        if (encoding == NSUTF8StringEncoding) continue; // already tried above
+    NSStringEncoding declared[] = { headerEncoding, markupEncoding };
+    for (size_t index = 0; index < sizeof(declared) / sizeof(*declared); index++) {
+        NSStringEncoding encoding = declared[index];
+        if (encoding == 0) continue;
+        if (index > 0 && encoding == declared[0]) continue;
+        // A failed decode means the declaration was wrong about its own bytes,
+        // so fall through to the next candidate rather than honouring it into
+        // mojibake.
         NSString *decoded = [[NSString alloc] initWithData:data encoding:encoding];
         if (decoded.length > 0) {
             if (outEncoding) *outEncoding = encoding;
@@ -248,7 +235,8 @@ NSString *ApolloWebTextFromData(NSData *data, NSURLResponse *response, NSStringE
         }
     }
 
-    // Pure-ASCII documents, and documents that declared nothing usable.
+    // Nothing usable was declared (or every declaration failed to decode).
+    NSString *utf8Decoded = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (utf8Decoded.length > 0) {
         if (outEncoding) *outEncoding = NSUTF8StringEncoding;
         return utf8Decoded;
@@ -259,4 +247,158 @@ NSString *ApolloWebTextFromData(NSData *data, NSURLResponse *response, NSStringE
     // handing the caller nil and losing the page's metadata outright.
     if (outEncoding) *outEncoding = NSISOLatin1StringEncoding;
     return [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+}
+
+#pragma mark - Self tests
+
+// Test double for the charset an NSURLResponse reports out of Content-Type.
+@interface ApolloWebTextTestResponse : NSURLResponse
+@property (nonatomic, copy) NSString *charsetName;
+@end
+@implementation ApolloWebTextTestResponse
+- (NSString *)textEncodingName { return self.charsetName; }
+@end
+
+BOOL ApolloWebTextDecodingRunSelfTests(NSString **outFailedCase) {
+    __block NSString *failure = nil;
+    void (^expect)(BOOL, NSString *) = ^(BOOL condition, NSString *name) {
+        if (!condition && !failure) failure = name;
+    };
+    NSURLResponse *(^declaring)(NSString *) = ^NSURLResponse *(NSString *charset) {
+        ApolloWebTextTestResponse *response = [ApolloWebTextTestResponse new];
+        response.charsetName = charset;
+        return response;
+    };
+    NSData *(^bytes)(const uint8_t *, NSUInteger) = ^NSData *(const uint8_t *b, NSUInteger n) {
+        return [NSData dataWithBytes:b length:n];
+    };
+
+    // --- Label mapping. euc-kr must widen to CP949: Apple's EUC-KR converter
+    // rejects the CP949-extended hangul that real "euc-kr" pages contain, and
+    // "korean" otherwise resolves to Mac OS Korean, a different encoding.
+    expect(ApolloWebTextEncodingForCharsetLabel(@"euc-kr") ==
+           CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingDOSKorean), @"label euc-kr->cp949");
+    expect(ApolloWebTextEncodingForCharsetLabel(@"  \"EUC-KR\" ") ==
+           ApolloWebTextEncodingForCharsetLabel(@"euc-kr"), @"label quoted/cased/padded");
+    expect(ApolloWebTextEncodingForCharsetLabel(@"korean") ==
+           CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingDOSKorean), @"label korean->cp949");
+    expect(ApolloWebTextEncodingForCharsetLabel(@"gb2312") ==
+           CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000), @"label gb2312->gb18030");
+    expect(ApolloWebTextEncodingForCharsetLabel(@"iso-8859-1") ==
+           CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingWindowsLatin1), @"label latin1->cp1252");
+    expect(ApolloWebTextEncodingForCharsetLabel(@"windows-1251") != 0, @"label windows-1251 resolves");
+    expect(ApolloWebTextEncodingForCharsetLabel(@"totally-bogus") == 0, @"label bogus->0");
+    expect(ApolloWebTextEncodingForCharsetLabel(nil) == 0, @"label nil->0");
+    expect(ApolloWebTextEncodingForCharsetLabel(@"") == 0, @"label empty->0");
+
+    // --- Ambiguous bytes: each of these is simultaneously well-formed UTF-8 and
+    // well-formed legacy text, so a decoder that sniffs for valid UTF-8 before
+    // reading the declaration silently returns the wrong characters. The
+    // declaration has to win.
+    const uint8_t c281[] = { 0xC2, 0x81 };  // UTF-8 U+0081 | CP949 혖
+    const uint8_t c2a1[] = { 0xC2, 0xA1 };  // UTF-8 U+00A1 | Big5 癒 | GB18030 隆 | CP932 ﾂ｡
+    expect([[NSString alloc] initWithData:bytes(c281, 2) encoding:NSUTF8StringEncoding] != nil,
+           @"fixture C2 81 really is valid UTF-8");
+    expect([[NSString alloc] initWithData:bytes(c2a1, 2) encoding:NSUTF8StringEncoding] != nil,
+           @"fixture C2 A1 really is valid UTF-8");
+    expect([ApolloWebTextFromData(bytes(c281, 2), declaring(@"euc-kr"), NULL) isEqualToString:@"혖"],
+           @"ambiguous C2 81 honours euc-kr");
+    expect([ApolloWebTextFromData(bytes(c2a1, 2), declaring(@"big5"), NULL) isEqualToString:@"癒"],
+           @"ambiguous C2 A1 honours big5");
+    expect([ApolloWebTextFromData(bytes(c2a1, 2), declaring(@"gb2312"), NULL) isEqualToString:@"隆"],
+           @"ambiguous C2 A1 honours gb2312");
+    expect([ApolloWebTextFromData(bytes(c2a1, 2), declaring(@"shift_jis"), NULL) isEqualToString:@"ﾂ｡"],
+           @"ambiguous C2 A1 honours shift_jis");
+
+    // A whole document of ambiguous pairs — the document-level version of the
+    // above, since a single pair could be dismissed as a corner case.
+    NSMutableData *ambiguousPage = [NSMutableData dataWithData:
+        [@"<html><head><title>" dataUsingEncoding:NSASCIIStringEncoding]];
+    for (int repeat = 0; repeat < 64; repeat++) [ambiguousPage appendBytes:c281 length:2];
+    [ambiguousPage appendData:[@"</title></head></html>" dataUsingEncoding:NSASCIIStringEncoding]];
+    expect([[NSString alloc] initWithData:ambiguousPage encoding:NSUTF8StringEncoding] != nil,
+           @"fixture whole ambiguous page is valid UTF-8");
+    expect([ApolloWebTextFromData(ambiguousPage, declaring(@"euc-kr"), NULL) containsString:@"혖혖"],
+           @"whole ambiguous page honours euc-kr");
+
+    // --- Declaration sources and precedence.
+    const uint8_t hangul[] = { 0xBE, 0xC6, 0xC0, 0xCC };  // 아이 in EUC-KR
+    expect([ApolloWebTextFromData(bytes(hangul, 4), declaring(@"euc-kr"), NULL) isEqualToString:@"아이"],
+           @"header charset decodes");
+
+    NSMutableData *metaOnly = [NSMutableData dataWithData:[
+        @"<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=euc-kr\"><title>"
+        dataUsingEncoding:NSASCIIStringEncoding]];
+    [metaOnly appendBytes:hangul length:4];
+    [metaOnly appendData:[@"</title></head>" dataUsingEncoding:NSASCIIStringEncoding]];
+    expect([ApolloWebTextFromData(metaOnly, nil, NULL) containsString:@"아이"], @"meta charset, nil response");
+
+    NSMutableData *xmlPrologue = [NSMutableData dataWithData:
+        [@"<?xml version=\"1.0\" encoding=\"euc-kr\"?><t>" dataUsingEncoding:NSASCIIStringEncoding]];
+    [xmlPrologue appendBytes:hangul length:4];
+    [xmlPrologue appendData:[@"</t>" dataUsingEncoding:NSASCIIStringEncoding]];
+    expect([ApolloWebTextFromData(xmlPrologue, nil, NULL) containsString:@"아이"], @"XHTML encoding prologue");
+
+    // Header outranks a contradicting markup declaration.
+    NSMutableData *headerVsMeta = [NSMutableData dataWithData:
+        [@"<html><head><meta charset=\"utf-8\"><title>" dataUsingEncoding:NSASCIIStringEncoding]];
+    [headerVsMeta appendBytes:hangul length:4];
+    [headerVsMeta appendData:[@"</title></head>" dataUsingEncoding:NSASCIIStringEncoding]];
+    expect([ApolloWebTextFromData(headerVsMeta, declaring(@"euc-kr"), NULL) containsString:@"아이"],
+           @"header outranks markup");
+
+    // A header that cannot decode its own bytes is abandoned in favour of the
+    // markup's declaration. Real shape: the server says utf-8 while serving
+    // EUC-KR, and only the page itself tells the truth.
+    NSMutableData *lyingHeader = [NSMutableData dataWithData:
+        [@"<html><head><meta charset=\"euc-kr\"><title>" dataUsingEncoding:NSASCIIStringEncoding]];
+    [lyingHeader appendBytes:hangul length:4];
+    [lyingHeader appendData:[@"</title></head>" dataUsingEncoding:NSASCIIStringEncoding]];
+    expect([[NSString alloc] initWithData:lyingHeader encoding:NSUTF8StringEncoding] == nil,
+           @"fixture lying-header body really is invalid UTF-8");
+    expect([ApolloWebTextFromData(lyingHeader, declaring(@"utf-8"), NULL) containsString:@"아이"],
+           @"undecodable header falls through to markup");
+
+    // --- BOM outranks a contradicting declaration, and is stripped.
+    NSMutableData *bom = [NSMutableData dataWithBytes:"\xEF\xBB\xBF" length:3];
+    [bom appendData:[@"<title>안녕</title>" dataUsingEncoding:NSUTF8StringEncoding]];
+    expect([ApolloWebTextFromData(bom, declaring(@"euc-kr"), NULL) isEqualToString:@"<title>안녕</title>"],
+           @"UTF-8 BOM wins and is stripped");
+
+    // --- CP949-extended hangul under a plain "euc-kr" label: nil through
+    // Apple's narrow EUC-KR converter, which is what the widening prevents.
+    const uint8_t cp949Extended[] = { 0x81, 0x41, 0xBE, 0xC6 };
+    expect([[NSString alloc] initWithData:bytes(cp949Extended, 4)
+                                 encoding:CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingEUC_KR)] == nil,
+           @"fixture CP949-extended really is rejected by EUC-KR");
+    expect([ApolloWebTextFromData(bytes(cp949Extended, 4), declaring(@"euc-kr"), NULL) containsString:@"아"],
+           @"CP949-extended bytes under euc-kr label");
+
+    // --- windows-1252 punctuation under an iso-8859-1 label (0x93/0x94 are
+    // undefined C1 controls in true ISO-8859-1).
+    const uint8_t smartQuotes[] = { 'C', 'a', 'f', 0xE9, ' ', 0x93, 'h', 'i', 0x94 };
+    expect([ApolloWebTextFromData(bytes(smartQuotes, 9), declaring(@"iso-8859-1"), NULL)
+            isEqualToString:@"Café “hi”"], @"windows-1252 punctuation under iso-8859-1");
+
+    // --- Undeclared, pure ASCII, and degenerate inputs.
+    expect(ApolloWebTextFromData(bytes(hangul, 4), nil, NULL).length > 0,
+           @"undeclared non-UTF-8 never returns nil");
+    expect([ApolloWebTextFromData([@"<p>hi</p>" dataUsingEncoding:NSASCIIStringEncoding],
+                                  declaring(@"shift_jis"), NULL) isEqualToString:@"<p>hi</p>"],
+           @"pure ASCII under a legacy label");
+    expect([ApolloWebTextFromData([@"<p>Café 안녕</p>" dataUsingEncoding:NSUTF8StringEncoding], nil, NULL)
+            containsString:@"Café 안녕"], @"undeclared UTF-8");
+    expect(ApolloWebTextFromData(nil, nil, NULL) == nil, @"nil data->nil");
+    expect(ApolloWebTextFromData([NSData data], nil, NULL) == nil, @"empty data->nil");
+
+    NSStringEncoding untouched = 0xDEAD;
+    (void)ApolloWebTextFromData([NSData data], nil, &untouched);
+    expect(untouched == 0xDEAD, @"outEncoding untouched on empty input");
+
+    NSStringEncoding reported = 0;
+    (void)ApolloWebTextFromData(bytes(hangul, 4), declaring(@"euc-kr"), &reported);
+    expect([ApolloWebTextNameForEncoding(reported) isEqualToString:@"cp949"], @"reported encoding name");
+
+    if (outFailedCase) *outFailedCase = failure;
+    return failure == nil;
 }
