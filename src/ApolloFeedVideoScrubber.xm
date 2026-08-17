@@ -82,6 +82,12 @@ static const CGFloat kCornerExclusion = 56.0;
 // below it a release is treated as a tap.
 static const CGFloat kScrubSlop = 6.0;
 
+// A touch that covers this much ground within the settle window was a swipe
+// already in flight when the scroll view's touch delay finally delivered it —
+// hand it back to the navigation gestures instead of scrubbing.
+static const CGFloat kSwipeRejectDistance = 12.0;
+static const NSTimeInterval kHoldSettleDuration = 0.12;
+
 // A press shorter than this with no slide is a tap, forwarded to the stock
 // open-fullscreen route. Longer means the user grabbed the bar deliberately —
 // releasing without sliding then does nothing.
@@ -123,16 +129,44 @@ static UIViewController *ViewControllerForView(UIView *view) {
     return nil;
 }
 
-// A horizontal drag on the strip is also a perfectly good "swipe back" as far
-// as Apollo's swipe-anywhere-to-go-back gesture is concerned, and that gesture
-// wins: it cancels UIControl tracking and pops the screen mid-scrub. A
-// stationary hold is likewise a perfectly good context-menu press. Disable the
-// pop recognizer, every pan-like ancestor, and every ancestor long-press for
-// the duration of the touch only (mirrors ApolloStatsRowTouch.xm's loupe
-// handling). The feed's own scroll pan is deliberately left alone — cancelling
-// it is the scroll view's business, and UIScrollView already exempts tracking
-// UIControls from touch cancellation.
-static NSArray<UIGestureRecognizer *> *SuspendCompetingGestures(UIView *view) {
+// Two families of competing gestures, suspended at two different moments:
+//
+// HOLD BLOCKERS (suspended the moment the hold is delivered): the time-based
+// recognizers that fire on a stationary press — the context menu's driver
+// (which on iOS 26 is NOT a UILongPressGestureRecognizer subclass; a
+// class-list allowlist missed it and it cancelled the hold ~400ms in), drag
+// lifts, and friends. Deny-by-default: everything that is neither a pan nor a
+// plain tap (taps only fire on touch-up, when the scrub is over anyway).
+//
+// NAVIGATION PANS (suspended only once a scrub ENGAGES): Apollo's
+// swipe-anywhere back/forward, the interactive pop, swipe actions. A QUICK
+// swipe across the bar must keep navigating exactly like anywhere else on the
+// video — those pans stay armed through the hold and are only taken away when
+// deliberate horizontal movement after the hold turns the touch into a scrub
+// (engagement at 6pt beats a pan's ~10pt activation, so a real scrub is never
+// stolen mid-drag).
+//
+// The feed's own scroll pan is deliberately left alone in both passes —
+// cancelling it is the scroll view's business, and the engaged scrub locks
+// scrolling via scrollEnabled instead. All mirrors ApolloStatsRowTouch.xm's
+// loupe handling.
+static NSArray<UIGestureRecognizer *> *SuspendHoldBlockingGestures(UIView *view) {
+    NSMutableArray<UIGestureRecognizer *> *disabled = [NSMutableArray array];
+    for (UIView *v = view; v; v = v.superview) {
+        UIGestureRecognizer *scrollPan =
+            [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if (g == scrollPan || !g.isEnabled) continue;
+            if ([g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+            if ([g isKindOfClass:[UIPanGestureRecognizer class]]) continue;
+            g.enabled = NO;
+            [disabled addObject:g];
+        }
+    }
+    return disabled;
+}
+
+static NSArray<UIGestureRecognizer *> *SuspendNavigationPans(UIView *view) {
     NSMutableArray<UIGestureRecognizer *> *disabled = [NSMutableArray array];
 
     UIGestureRecognizer *pop =
@@ -144,12 +178,7 @@ static NSArray<UIGestureRecognizer *> *SuspendCompetingGestures(UIView *view) {
             [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
         for (UIGestureRecognizer *g in v.gestureRecognizers) {
             if (g == scrollPan || !g.isEnabled) continue;
-            // Deny-by-default: iOS 26's context-menu driver is NOT a
-            // UILongPressGestureRecognizer subclass (a class-list allowlist
-            // missed it, and it cancelled the hold ~400ms in), so suspend
-            // every ancestor recognizer except plain taps — those only fire
-            // on touch-up, when the scrub is over anyway.
-            if ([g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+            if (![g isKindOfClass:[UIPanGestureRecognizer class]]) continue;
             g.enabled = NO;
             [disabled addObject:g];
         }
@@ -224,6 +253,7 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 @property (nonatomic, assign) CGFloat startX;
 @property (nonatomic, assign) CFTimeInterval touchStartedAt;
 @property (nonatomic, assign) BOOL didScrub;
+@property (nonatomic, assign) BOOL rejectedAsSwipe;
 @property (nonatomic, strong) NSArray<UIGestureRecognizer *> *suspendedGestures;
 @property (nonatomic, assign) BOOL seekInFlight;
 @property (nonatomic, assign) BOOL hasPendingSeek;
@@ -333,30 +363,25 @@ static char kFeedScrubStripKey;
     self.startX = [touch locationInView:self].x;
     self.touchStartedAt = CACurrentMediaTime();
     self.didScrub = NO;
+    self.rejectedAsSwipe = NO;
     self.hasPendingSeek = NO;
 
     // Grabbed for finger-tracking during the drag (see continueTracking).
     UIView *nativeStrip = NodeIvar(self.richMediaNode, "videoGIFProgressView");
     self.nativeStripView = [nativeStrip isKindOfClass:[UIView class]] ? nativeStrip : nil;
 
-    // The touch only reaches us after outlasting the scroll view's touch
-    // delay, so this never fires for a scrolling flick.
-    self.suspendedGestures = SuspendCompetingGestures(self);
-
-    // Screen lock while the bar is held: a finger sliding along the bar always
-    // drifts vertically too, and without this the list bobs up and down under
-    // the drag. Same pattern as the stats-row loupe — first enclosing scroll
-    // view, disabled for the hold, restored on every exit path.
-    for (UIView *v = self.superview; v; v = v.superview) {
-        if ([v isKindOfClass:[UIScrollView class]]) {
-            UIScrollView *scrollView = (UIScrollView *)v;
-            if (scrollView.isScrollEnabled) {
-                scrollView.scrollEnabled = NO;
-                self.lockedScrollView = scrollView;
-            }
-            break;
-        }
-    }
+    // Suspend both families at delivery. This is NOT what steals navigation
+    // swipes from the bar: recognizers observe touches live while the scroll
+    // view's touch delay holds view delivery back, so any swipe the
+    // back/forward pans want has already begun (and cancelled this delivery)
+    // before we get here. Suspending at delivery is what makes the scrub
+    // race-free — recognizers also see each event BEFORE view tracking does,
+    // so deferring the pan suspension to engagement lets a fast slide lose
+    // the touch to the pop gesture between two events.
+    NSMutableArray *suspended =
+        [NSMutableArray arrayWithArray:SuspendHoldBlockingGestures(self)];
+    [suspended addObjectsFromArray:SuspendNavigationPans(self)];
+    self.suspendedGestures = suspended;
     return YES;
 }
 
@@ -367,20 +392,59 @@ static char kFeedScrubStripKey;
 }
 
 - (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    if (self.rejectedAsSwipe) return NO;
+
     CGFloat x = [touch locationInView:self].x;
     if (!self.didScrub) {
-        if (fabs(x - self.startX) < kScrubSlop) return YES;
+        CGFloat travelled = fabs(x - self.startX);
+
+        // Settle window right after delivery: the scroll view REPLAYS the
+        // moves it buffered during its touch delay, so a flick that ended too
+        // fast for the navigation pans to claim live arrives here as a burst
+        // of movement after its touch already lifted. During the window a
+        // touch can only be CLASSIFIED, never engaged — big travel means it
+        // was a flick, and scrubbing off a replay would be acting on a
+        // gesture the user finished before we ever saw it. A genuine hold
+        // sits still through the window, because the finger was deliberately
+        // parked on the bar. (A slower swipe never gets here at all: the
+        // back/forward pans observe touches live and claim it before
+        // delivery, which is what keeps swipe navigation working on the bar.)
+        if (CACurrentMediaTime() - self.touchStartedAt < kHoldSettleDuration) {
+            if (travelled >= kSwipeRejectDistance) {
+                self.rejectedAsSwipe = YES;
+                [self restoreSuspendedGestures];
+                ApolloLog(@"[FeedScrubber] flick over the bar - not a scrub");
+                return NO;
+            }
+            return YES;
+        }
+
+        if (travelled < kScrubSlop) return YES;
         self.didScrub = YES;
         // Confirms the drag reached the strip rather than being claimed by the
         // scroll view or the swipe-back pan — the failure mode to watch for.
         ApolloLog(@"[FeedScrubber] scrub engaged at %.0f%% (duration=%.1fs)",
                   [self fractionForTouch:touch] * 100.0, self.duration);
-        // Pause for the duration of the drag, like every standard scrubber:
-        // with playback stopped, Apollo's progress observer only fires as
-        // seeks land (≈ the finger position), so it stops fighting the
-        // finger-tracked bar with stale playhead widths — and the drag stops
-        // playing chopped-up audio. Resumed on release/cancel, with a dealloc
-        // backstop. The player is never rate-changed outside the touch.
+
+        // Lock the list so vertical finger drift can't bob it under the
+        // drag (stats-row loupe pattern; restored on every exit path)...
+        for (UIView *v = self.superview; v; v = v.superview) {
+            if ([v isKindOfClass:[UIScrollView class]]) {
+                UIScrollView *scrollView = (UIScrollView *)v;
+                if (scrollView.isScrollEnabled) {
+                    scrollView.scrollEnabled = NO;
+                    self.lockedScrollView = scrollView;
+                }
+                break;
+            }
+        }
+
+        // ...and pause for the duration of the drag, like every standard
+        // scrubber: with playback stopped, Apollo's progress observer only
+        // fires as seeks land (≈ the finger position), so it stops fighting
+        // the finger-tracked bar with stale playhead widths — and the drag
+        // stops playing chopped-up audio. Resumed on release/cancel, with a
+        // dealloc backstop. The player is never rate-changed outside the touch.
         if (self.player.rate > 0) {
             self.pausedForScrub = YES;
             [self.player pause];
