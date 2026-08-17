@@ -220,6 +220,7 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 @property (nonatomic, assign) NSTimeInterval duration;       // touch-scoped
 @property (nonatomic, weak) UIView *nativeStripView;         // touch-scoped
 @property (nonatomic, assign) BOOL pausedForScrub;           // touch-scoped
+@property (nonatomic, weak) UIScrollView *lockedScrollView;  // touch-scoped
 @property (nonatomic, assign) CGFloat startX;
 @property (nonatomic, assign) CFTimeInterval touchStartedAt;
 @property (nonatomic, assign) BOOL didScrub;
@@ -245,9 +246,10 @@ static char kFeedScrubStripKey;
 
 - (void)dealloc {
     // Suspended recognizers must never outlive a touch, whatever tore us down,
-    // and neither must a scrub-pause.
+    // and neither must a scrub-pause or the scroll lock.
     RestoreCompetingGestures(_suspendedGestures);
     if (_pausedForScrub && _player) [_player play];
+    if (_lockedScrollView) _lockedScrollView.scrollEnabled = YES;
 }
 
 #pragma mark Hit testing
@@ -340,7 +342,28 @@ static char kFeedScrubStripKey;
     // The touch only reaches us after outlasting the scroll view's touch
     // delay, so this never fires for a scrolling flick.
     self.suspendedGestures = SuspendCompetingGestures(self);
+
+    // Screen lock while the bar is held: a finger sliding along the bar always
+    // drifts vertically too, and without this the list bobs up and down under
+    // the drag. Same pattern as the stats-row loupe — first enclosing scroll
+    // view, disabled for the hold, restored on every exit path.
+    for (UIView *v = self.superview; v; v = v.superview) {
+        if ([v isKindOfClass:[UIScrollView class]]) {
+            UIScrollView *scrollView = (UIScrollView *)v;
+            if (scrollView.isScrollEnabled) {
+                scrollView.scrollEnabled = NO;
+                self.lockedScrollView = scrollView;
+            }
+            break;
+        }
+    }
     return YES;
+}
+
+- (void)unlockScrollView {
+    UIScrollView *locked = self.lockedScrollView;
+    if (locked) locked.scrollEnabled = YES;
+    self.lockedScrollView = nil;
 }
 
 - (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
@@ -390,6 +413,7 @@ static char kFeedScrubStripKey;
 
 - (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
     [self restoreSuspendedGestures];
+    [self unlockScrollView];
 
     if (self.didScrub) {
         CGFloat fraction = touch ? [self fractionForTouch:touch] : 0;
@@ -413,6 +437,7 @@ static char kFeedScrubStripKey;
 
 - (void)cancelTrackingWithEvent:(UIEvent *)event {
     [self restoreSuspendedGestures];
+    [self unlockScrollView];
     [self resumeIfPausedForScrub];
     self.player = nil;
     self.didScrub = NO;
