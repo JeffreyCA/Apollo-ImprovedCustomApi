@@ -478,6 +478,14 @@ static WKWebsiteDataStore *ApolloDevvitDataStoreForIdentity(NSString *identity, 
 @property (nonatomic) BOOL feedContext;
 // Post-reveal row-height corrections already spent (hard-capped).
 @property (nonatomic) NSInteger heightCorrections;
+// Candidate post-reveal height awaiting a quick confirm probe; a correction
+// only commits once the same value is seen twice, so a mid-animation or
+// mid-load reading can never become the cell height (or burn budget).
+@property (nonatomic) CGFloat pendingProbeHeight;
+// Budget exhausted: stop measuring until the next explicit tap re-arms it —
+// without the flag, a frozen-but-moved widget would re-confirm its unappliable
+// height on every probe forever at the confirm cadence.
+@property (nonatomic) BOOL heightFrozen;
 // Bumps every time a measured height lands; consumer re-queries the registry.
 @property (nonatomic, copy) void (^onMeasuredHeight)(NSString *fullName, CGFloat height);
 @end
@@ -594,6 +602,16 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 
 - (void)apolloDevvitTapPoke:(UITapGestureRecognizer *)gesture {
     if (!self.revealed || !self.webView) return;
+    // An explicit tap re-arms the correction budget. The budget exists to stop
+    // a widget that resizes ITSELF forever from re-measuring the table
+    // indefinitely — but expand/collapse taps are the user asking for resizes,
+    // and configureForPermalink's same-post early return means the budget never
+    // refilled across cycles on one post: a session of playing with the same
+    // match thread drained all 12 and froze the height (device-reported).
+    // Taps are self-limiting, so a fresh budget per tap keeps both properties.
+    self.heightCorrections = 0;
+    self.heightFrozen = NO;
+    self.pendingProbeHeight = 0.0;
     // Start a fresh brisk poll loop timed for the page's expand/collapse
     // animation to have finished; bumping the generation orphans whatever idle
     // tick was pending, so loops never double up. handleProbeResult then keeps
@@ -621,6 +639,8 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     self.failed = NO;
     self.autoRetried = NO;
     self.heightCorrections = 0;  // fresh correction budget per post
+    self.heightFrozen = NO;
+    self.pendingProbeHeight = 0.0;
     self.coverView.alpha = 1.0;
     [self.spinner startAnimating];
     self.statusLabel.text = @"Loading interactive post…";
@@ -705,6 +725,8 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     NSInteger gen = ++self.pollGeneration;
     self.stableSamples = 0;
     self.lastProbeHeight = 0;
+    self.pendingProbeHeight = 0.0;
+    self.heightFrozen = NO;
     [self pollAfter:0.5 attempt:0 generation:gen];
 }
 
@@ -808,16 +830,38 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     // a few times, which the old 3 could not.
     CGFloat hysteresis = (self.heightCorrections == 0) ? 8.0 : 24.0;
     BOOL changed = NO;
-    if (found && h >= kApolloDevvitMinHeight && fabs(h - self.lastProbeHeight) > hysteresis &&
-        self.heightCorrections < kApolloDevvitMaxHeightCorrections) {
-        self.heightCorrections += 1;
-        self.lastProbeHeight = h;
-        changed = YES;
-        ApolloLog(@"[Devvit] %@ height corrected to %.0fpt (%ld/%ld)", self.fullName, h,
-                  (long)self.heightCorrections, (long)kApolloDevvitMaxHeightCorrections);
-        if (ApolloDevvitStoreHeight(self.fullName, h) && self.onMeasuredHeight) {
-            self.onMeasuredHeight(self.fullName, h);
+    if (!self.heightFrozen && found && h >= kApolloDevvitMinHeight &&
+        fabs(h - self.lastProbeHeight) > hysteresis) {
+        if (self.pendingProbeHeight > 0.0 && fabs(h - self.pendingProbeHeight) <= 2.0) {
+            // Seen twice → this is a settled height, not a frame of the
+            // expand/collapse animation or a half-loaded expanded shell.
+            // (Committing first sightings was how a device ended up frozen at
+            // ~220pt: the mid-load value both became the cell height AND spent
+            // the budget's last correction.)
+            self.pendingProbeHeight = 0.0;
+            if (self.heightCorrections >= kApolloDevvitMaxHeightCorrections) {
+                self.heightFrozen = YES;
+                ApolloLog(@"[Devvit] %@ correction budget exhausted — frozen until the next tap", self.fullName);
+            } else {
+                self.heightCorrections += 1;
+                self.lastProbeHeight = h;
+                changed = YES;
+                ApolloLog(@"[Devvit] %@ height corrected to %.0fpt (%ld/%ld)", self.fullName, h,
+                          (long)self.heightCorrections, (long)kApolloDevvitMaxHeightCorrections);
+                if (ApolloDevvitStoreHeight(self.fullName, h) && self.onMeasuredHeight) {
+                    self.onMeasuredHeight(self.fullName, h);
+                }
+            }
+        } else {
+            // First sighting of a new height — confirm on a quick follow-up
+            // instead of the normal cadence, so a real change still commits
+            // well under a second after the tap.
+            self.pendingProbeHeight = h;
+            [self pollAfter:0.3 attempt:0 generation:gen];
+            return;
         }
+    } else {
+        self.pendingProbeHeight = 0.0;
     }
     // `attempt` counts consecutive still polls here; a change restarts the
     // brisk window so an expand → settle → collapse sequence stays responsive.
