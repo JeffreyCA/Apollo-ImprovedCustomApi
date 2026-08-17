@@ -31,9 +31,9 @@ Manual validation steps for the Share Link Host feature.
 - Share as Image with **Include Link** enabled and confirm the included URL uses `vxreddit.com`.
 - Wait briefly for link previews to load before sending when testing Messages.
 
-## fxreddit
+## fxReddit (fxddit.com)
 
-- Select **fxreddit**.
+- Select **fxReddit (fxddit.com)**.
 - Use **Copy Link** and confirm the copied URL uses `fxddit.com`.
 - Share the post to Messages, Discord, and Telegram and confirm the shared URL uses `fxddit.com`.
 - Wait briefly for rich-preview metadata to load where supported.

@@ -99,6 +99,26 @@ NSInteger sImageUploadProvider = ImageUploadProviderImgur;
 NSInteger sCommentLinkHost = CommentLinkHostOff;
 NSInteger sShareLinkHost = ShareLinkHostDefault;
 
+NSString *ApolloShareLinkHostDomain(ShareLinkHost host) {
+    switch (host) {
+        case ShareLinkHostOldReddit: return @"old.reddit.com";
+        case ShareLinkHostVXReddit:  return @"vxreddit.com";
+        case ShareLinkHostFXReddit:  return @"fxddit.com";
+        case ShareLinkHostDefault:
+        default:                     return nil;
+    }
+}
+
+NSString *ApolloShareLinkHostDisplayName(ShareLinkHost host) {
+    switch (host) {
+        case ShareLinkHostOldReddit: return @"old.reddit";
+        case ShareLinkHostVXReddit:  return @"vxReddit";
+        case ShareLinkHostFXReddit:  return @"fxReddit (fxddit.com)";
+        case ShareLinkHostDefault:
+        default:                     return @"Reddit";
+    }
+}
+
 NSString *sLatestRedditBearerToken = nil;
 
 BOOL sEnableBulkTranslation = NO;

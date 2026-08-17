@@ -392,6 +392,8 @@ typedef NS_ENUM(NSInteger, ShareLinkHost) {
     ShareLinkHostVXReddit = 2,
     ShareLinkHostFXReddit = 3,
 };
+NSString *ApolloShareLinkHostDomain(ShareLinkHost host);
+NSString *ApolloShareLinkHostDisplayName(ShareLinkHost host);
 extern NSInteger sShareLinkHost;
 
 // Most recently observed Reddit bearer token, captured from outgoing Authorization

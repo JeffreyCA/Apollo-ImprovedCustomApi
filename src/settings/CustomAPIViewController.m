@@ -291,16 +291,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     });
 }
 
-static NSString *ApolloShareLinkHostDisplayName(ShareLinkHost host) {
-    switch (host) {
-        case ShareLinkHostOldReddit: return @"old.reddit";
-        case ShareLinkHostVXReddit:  return @"vxReddit";
-        case ShareLinkHostFXReddit:  return @"fxreddit";
-        case ShareLinkHostDefault:
-        default:                     return @"Reddit";
-    }
-}
-
 - (NSString *)shareLinkHostText {
     return ApolloShareLinkHostDisplayName((ShareLinkHost)sShareLinkHost);
 }
@@ -1746,7 +1736,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     };
 
     return [ApolloSettingsSection sectionWithTitle:@"Sharing"
-                                            footer:@"Choose which Reddit host Apollo uses for shared post and comment links, including Copy Link and links included with shared media."
+                                            footer:@"Choose which Reddit host Apollo uses for shared post and comment links, including Copy Link and links included with shared media. fxReddit uses fxddit.com."
                                               rows:@[ shareLinkHost ]];
 }
 
