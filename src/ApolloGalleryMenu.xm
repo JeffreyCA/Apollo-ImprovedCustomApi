@@ -18,12 +18,14 @@
 // per-controller memoization of `matches`, which only ever runs this once per
 // sheet instance), so no later, unrelated sheet can pick it up.
 //
-// Popular/All, special feeds and search results never get the row: subreddit
-// slugs and canonical multireddit paths are resolved by ApolloSubredditHeaders,
-// whose helpers gate on Apollo's own PostsType tag. User profiles DO get it
-// (their "..." arms on ProfileViewController below, resolved to "u/<name>");
-// the signed-in user's own profile tab has no native "..." at all, so
-// ApolloProfileMoreMenu.xm builds one with Gallery View built in.
+// Which screens get the row: every feed that has a listing behind it. Subreddit
+// slugs, canonical multireddit paths and the Popular/All/Mod pseudo-subreddit
+// slugs all come from ApolloSubredditHeaders, whose helpers gate on Apollo's own
+// PostsType tag; Home is resolved here, as is a user profile (its "..." arms on
+// ProfileViewController below, resolved to "u/<name>"). The signed-in user's own
+// profile tab has no native "..." at all, so ApolloProfileMoreMenu.xm builds one
+// with Gallery View built in. Search results and every unrelated sheet resolve
+// to nil, which is what keeps the row off them.
 
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
@@ -41,6 +43,9 @@
 extern NSString *ApolloSubredditNameFromViewController(UIViewController *viewController);
 extern NSString *ApolloMultiredditPathFromViewController(UIViewController *viewController);
 extern NSInteger ApolloPostsTypeTagFromViewController(UIViewController *viewController);
+// The complement of the above for Apollo's three pseudo-subreddit feeds:
+// "popular", "all" or "mod" — the slugs their listings live at.
+extern NSString *ApolloSpecialFeedSlugFromViewController(UIViewController *viewController);
 // Defined in ApolloUserAvatars.xm — the username a profile screen is showing,
 // nil while it can't be determined yet.
 extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController);
@@ -111,11 +116,10 @@ static NSString *ApolloGalleryMenuProfileIdentifierForOwner(UIViewController *ow
     return username.length > 0 ? [@"u/" stringByAppendingString:username] : nil;
 }
 
-// "~home" when the owner is the signed-in HOME front page. Gated on the nav
-// title AND the PostsType tag being none of subreddit(0)/multireddit(1)/
-// random(5), so Popular/All/profile feeds (whose titles differ) and every
-// named feed stay excluded. The sentinel can't collide with a real slug —
-// "~" is invalid in subreddit names.
+// "~home" when the owner is the signed-in HOME front page — the one feed whose
+// listings live at the API root rather than under a slug, which is why it needs
+// a sentinel instead of joining the pseudo-subreddits above. It can't collide
+// with a real slug: "~" is invalid in subreddit names.
 static NSString *ApolloGalleryMenuHomeIdentifierForOwner(UIViewController *owner) {
     static Class postsClass = Nil;
     static dispatch_once_t once;
@@ -123,8 +127,8 @@ static NSString *ApolloGalleryMenuHomeIdentifierForOwner(UIViewController *owner
     if (!postsClass || ![owner isKindOfClass:postsClass]) return nil;
     // Home's tag measured at 6 (2026-08-14 sim probe; subreddit=0,
     // multireddit=1, random=5 per ApolloSubredditHeaders). The nav title is a
-    // second lock so a future re-numbering fails closed rather than putting
-    // Gallery View on Popular/All.
+    // second lock so a future re-numbering fails closed rather than pointing a
+    // root-path feed at the wrong listing.
     NSInteger tag = ApolloPostsTypeTagFromViewController(owner);
     if (tag != 6) return nil;
     NSString *title = owner.navigationItem.title ?: owner.title;
@@ -132,16 +136,25 @@ static NSString *ApolloGalleryMenuHomeIdentifierForOwner(UIViewController *owner
     return @"~home";
 }
 
-// Bare subreddit slug, canonical multireddit path, or "u/<name>" profile
-// identifier for a claimed controller. Nil keeps Popular/All, special feeds,
-// and every unrelated sheet untouched.
-static NSString *ApolloGalleryMenuListingIdentifierForController(id actionController) {
-    UIViewController *owner = ApolloGalleryMenuOwnerForController(actionController);
+// Bare subreddit slug (real or one of the Popular/All/Mod pseudo-subreddits),
+// canonical multireddit path, "u/<name>" profile identifier, or the "~home"
+// sentinel — whichever this screen's feed is. Nil for search results and every
+// other screen, which is what keeps the row off them.
+//
+// Every gate goes through this one function: the arm hook, the spec's `matches`
+// and the open path all have to agree on whether a screen has a gallery, and
+// three hand-kept copies of the chain could drift apart.
+static NSString *ApolloGalleryMenuIdentifierForOwner(UIViewController *owner) {
     if (!owner) return nil;
     return ApolloSubredditNameFromViewController(owner)
         ?: ApolloMultiredditPathFromViewController(owner)
+        ?: ApolloSpecialFeedSlugFromViewController(owner)
         ?: ApolloGalleryMenuProfileIdentifierForOwner(owner)
         ?: ApolloGalleryMenuHomeIdentifierForOwner(owner);
+}
+
+static NSString *ApolloGalleryMenuListingIdentifierForController(id actionController) {
+    return ApolloGalleryMenuIdentifierForOwner(ApolloGalleryMenuOwnerForController(actionController));
 }
 
 static NSString *ApolloGalleryMenuSourceDescription(NSString *listingIdentifier) {
@@ -249,16 +262,10 @@ static void ApolloGalleryMenuResolveInheritedSort(UIViewController *owner,
 
 static void ApolloGalleryMenuOpenForController(id actionController) {
     UIViewController *owner = ApolloGalleryMenuOwnerForController(actionController);
-    NSString *subreddit = owner ? ApolloSubredditNameFromViewController(owner) : nil;
-    if (subreddit.length == 0 && owner) {
-        // Keep the established presentation call below: PR #767 wraps that
-        // exact call in the Liquid Glass dismissal completion, so a canonical
-        // multireddit path (and the "u/<name>" profile identifier)
-        // automatically receives the same crash fix.
-        subreddit = ApolloMultiredditPathFromViewController(owner)
-            ?: ApolloGalleryMenuProfileIdentifierForOwner(owner)
-            ?: ApolloGalleryMenuHomeIdentifierForOwner(owner);
-    }
+    // Keep the established presentation call below: PR #767 wraps that exact
+    // call in the Liquid Glass dismissal completion, so every identifier kind
+    // automatically receives the same crash fix.
+    NSString *subreddit = ApolloGalleryMenuIdentifierForOwner(owner);
     if (subreddit.length == 0 || !owner) {
         ApolloLog(@"[GalleryMenu] Gallery View tapped but the listing could not be resolved");
         return;
@@ -313,9 +320,7 @@ static void ApolloGalleryMenuOpenHiddenContentForController(id actionController)
     // Only arm for feeds a gallery makes sense for; that keeps every other
     // sheet (and every other feed type) completely untouched.
     UIViewController *viewController = (UIViewController *)self;
-    NSString *listingIdentifier = ApolloSubredditNameFromViewController(viewController)
-        ?: ApolloMultiredditPathFromViewController(viewController)
-        ?: ApolloGalleryMenuHomeIdentifierForOwner(viewController);
+    NSString *listingIdentifier = ApolloGalleryMenuIdentifierForOwner(viewController);
     if (listingIdentifier.length > 0) {
         sApolloGalleryArmedVC = (UIViewController *)self;
         sApolloGalleryArmedAt = CACurrentMediaTime();
@@ -379,8 +384,8 @@ static NSUInteger ApolloGalleryMenuInsertionIndex(NSArray<UIMenuElement *> *chil
 
     spec.matches = ^BOOL(id actionController, NSString *menuTitle) {
         (void)menuTitle;
-        // Matches a single-subreddit feed, a multireddit, OR a user profile;
-        // nil for Popular/All, special feeds, and every unrelated sheet.
+        // Matches any feed with a gallery behind it — subreddit, multireddit,
+        // Home, Popular/All/Mod, or a user profile — and nothing else.
         return ApolloGalleryMenuListingIdentifierForController(actionController).length > 0;
     };
     spec.title = ^NSString *(id actionController, UITableViewCell *donor) {

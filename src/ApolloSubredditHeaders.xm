@@ -1215,6 +1215,44 @@ NSString *ApolloSubredditNameFromViewController(UIViewController *viewController
     return nil;
 }
 
+// The slug for one of Apollo's three pseudo-subreddit feeds — Popular Posts,
+// All Posts, Moderator Posts — and nil for everything else, including real
+// subreddits.
+//
+// PostsType carries all three as ordinary `.subreddit` cases, so the tag alone
+// can't separate them from a real subreddit; ApolloNormalizedSubredditName is
+// what rejects them, because a pseudo-subreddit has no banner/icon/sidebar for
+// the header feature to install. Gallery View wants the opposite: Reddit serves
+// all three from ordinary listing paths (/r/popular, /r/all, /r/mod), so the
+// grid needs nothing new once the slug is known.
+//
+// The slug comes from navigationItem.title, which Apollo sets from the
+// PostsType payload rather than the friendly display name. Measured in the sim
+// (2026-08-17): the moderator feed's visible title reads "Modded Subs" while
+// navigationItem.title is "Mod", matching its own "Search r/Mod" placeholder.
+// `currentSubreddit` stays nil on all three — Apollo never fetches an about for
+// them — so it can't be the source here the way it is for a real subreddit.
+NSString *ApolloSpecialFeedSlugFromViewController(UIViewController *viewController) {
+    if (!viewController) return nil;
+
+    uint8_t tag = 0;
+    if (!ApolloSubredditPostsTypeTag(viewController, &tag)) return nil;
+    if (tag != kApolloPostsTypeSubreddit) return nil;
+
+    NSString *title = viewController.navigationItem.title;
+    if (title.length == 0) title = viewController.title;
+    NSString *slug = [title stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]].lowercaseString;
+    if ([slug hasPrefix:@"r/"]) slug = [slug substringFromIndex:2];
+
+    static NSSet<NSString *> *specialSlugs = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        specialSlugs = [NSSet setWithObjects:@"popular", @"all", @"mod", nil];
+    });
+    return [specialSlugs containsObject:slug] ? slug : nil;
+}
+
 // Resolve the canonical `/user/<owner>/m/<name>` path for a multireddit feed.
 // Gallery View uses the path rather than rebuilding it from the navigation
 // title, because public multis can belong to a user other than the active

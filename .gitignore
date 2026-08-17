@@ -35,6 +35,6 @@ widgets/Info.plist
 # .sim-<name> variants so parallel runs don't clobber each other)
 .sim/
 .sim-*/
-.sim[0-9]/
+.sim[0-9]*/
 widgets/build/
 /.agents
