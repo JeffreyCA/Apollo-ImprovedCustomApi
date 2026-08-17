@@ -400,8 +400,18 @@ typedef NS_ENUM(NSInteger, ShareLinkHost) {
     ShareLinkHostVXReddit = 2,
     ShareLinkHostFXReddit = 3,
 };
+// extern "C" so the ObjC++ (.xm) caller in ApolloShareAsImageLink.xm and the
+// ObjC (.m) definitions in ApolloState.m agree on the unmangled symbol name.
+#ifdef __cplusplus
+extern "C" {
+#endif
+// nil for ShareLinkHostDefault — callers keep Apollo's original host.
 NSString *ApolloShareLinkHostDomain(ShareLinkHost host);
+// Settings-facing label for the picker row and its detail text.
 NSString *ApolloShareLinkHostDisplayName(ShareLinkHost host);
+#ifdef __cplusplus
+}
+#endif
 extern NSInteger sShareLinkHost;
 
 // Most recently observed Reddit bearer token, captured from outgoing Authorization

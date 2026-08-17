@@ -42,6 +42,7 @@
 #import <UIKit/UIKit.h>
 #import <LinkPresentation/LinkPresentation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 
