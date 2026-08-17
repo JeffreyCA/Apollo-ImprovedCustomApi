@@ -175,6 +175,13 @@ static const CGFloat kApolloDevvitMaxHeight = 900.0;
 // idle once it has held still, and a budget that stops an oscillating widget
 // from re-measuring a table forever.
 static const NSTimeInterval kApolloDevvitActivePollInterval = 1.0;
+// Tap-to-commit latency budget: first look right after the tap, and a quick
+// re-look to confirm stability. Devvit's expand lays out its final height
+// immediately (the animation is visual, not a height tween), so the pair
+// usually commits ~0.25s after the finger — and if a page IS mid-change, the
+// confirm just repeats until two reads agree, so speed never costs safety.
+static const NSTimeInterval kApolloDevvitTapProbeDelay = 0.12;
+static const NSTimeInterval kApolloDevvitConfirmProbeDelay = 0.15;
 static const NSTimeInterval kApolloDevvitIdlePollInterval = 6.0;
 static const NSInteger kApolloDevvitActivePollCount = 8;
 static const NSInteger kApolloDevvitMaxHeightCorrections = 12;
@@ -600,6 +607,24 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     return YES;
 }
 
+// Coming back on screen is the other moment the cell can be out of step with
+// the page: while the user was in another thread the widget kept its DOM (an
+// expanded view stays expanded, a live match keeps growing) but off-window the
+// watchdog deliberately skips the JS probe, and Apollo's swipe-forward
+// navigation restores the SAME widget instance — budget state and all. Treat
+// re-entry like a tap: re-arm and look right away, so a revisited thread heals
+// itself instead of loading clipped until the user happens to touch it
+// (device-reported: "came back and loaded like this").
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (!self.window || !self.revealed || !self.webView) return;
+    self.heightCorrections = 0;
+    self.heightFrozen = NO;
+    self.pendingProbeHeight = 0.0;
+    NSInteger gen = ++self.pollGeneration;
+    [self pollAfter:kApolloDevvitTapProbeDelay attempt:0 generation:gen];
+}
+
 - (void)apolloDevvitTapPoke:(UITapGestureRecognizer *)gesture {
     if (!self.revealed || !self.webView) return;
     // An explicit tap re-arms the correction budget. The budget exists to stop
@@ -617,7 +642,7 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     // tick was pending, so loops never double up. handleProbeResult then keeps
     // polling briskly while the height is still settling.
     NSInteger gen = ++self.pollGeneration;
-    [self pollAfter:0.35 attempt:0 generation:gen];
+    [self pollAfter:kApolloDevvitTapProbeDelay attempt:0 generation:gen];
 }
 
 - (void)coverTapped {
@@ -857,7 +882,7 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
             // instead of the normal cadence, so a real change still commits
             // well under a second after the tap.
             self.pendingProbeHeight = h;
-            [self pollAfter:0.3 attempt:0 generation:gen];
+            [self pollAfter:kApolloDevvitConfirmProbeDelay attempt:0 generation:gen];
             return;
         }
     } else {
