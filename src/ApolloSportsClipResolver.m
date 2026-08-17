@@ -2,9 +2,14 @@
 //
 // Per-host recipes (all verified live 2026-07-07: https progressive mp4 with
 // embedded aac audio, ranged GETs honored, NO Referer/cookie/UA requirements):
-//   streamin.link/.me/.one/.fun/.top — mp4 is predictable from the clip id:
-//     https://w-cdn.streamin.top/uploads/<id>.mp4 (page og:video carries the
-//     same URL plus a cosmetic ?age cache-buster). Poster b-cdn…/images/<id>.jpg.
+//   streamin.link/.me/.one/.fun/.top — the filename is predictable from the
+//     clip id (/uploads/<id>.mp4) but the CDN host is not: uploads are spread
+//     across c-cdn and w-cdn and 404 on the host that doesn't hold them
+//     (2026-08-16: newest clips c-cdn-only, ~month-old w-cdn-only). Probe
+//     c-cdn, then w-cdn, then fall back to the share page's og:video (minus
+//     its cosmetic ?age cache-buster), which is authoritative. Poster
+//     b-cdn…/images/<id>.jpg. og:video:width/height are a fixed 640x360
+//     template value on every clip — never treat them as real dimensions.
 //   streamff.pro/.com/.link — page is a JS SPA and its og:video is broken
 //     (points at the page itself). Authoritative: GET
 //     https://ffedge.streamff.com/share/<id> -> JSON array, [0].external_url.
@@ -364,11 +369,65 @@ static void SCFinishWithCandidate(NSString *tag, NSURL *mp4, NSURL *poster,
     });
 }
 
-// streamin: fully predictable from the clip id.
-static void SCResolveStreamin(NSString *clipID, void (^completion)(NSDictionary *)) {
-    NSURL *mp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://w-cdn.streamin.top/uploads/%@.mp4", clipID]];
+// streamin: the filename is predictable from the clip id, but WHICH CDN host
+// holds it is not — uploads are distributed across c-cdn and w-cdn, and a
+// clip missing from one 404s there (verified 2026-08-16: recent clips are
+// c-cdn-only, ~month-old clips w-cdn-only, many exist on both). Probing a
+// single hardcoded host is what made new r/soccer clips show an empty player.
+//
+// Order: c-cdn (holds the newest uploads, i.e. what a feed actually shows),
+// then w-cdn, then the share page's og:video, which is the authoritative
+// pointer and self-heals if uploads later move to a host not listed here.
+// Each candidate is probed, so a guess can never produce a dead player.
+static void SCResolveStreaminPage(NSString *clipID, NSString *originalURL,
+                                  NSURL *poster, void (^completion)(NSDictionary *));
+
+static void SCResolveStreamin(NSString *clipID, NSString *originalURL, void (^completion)(NSDictionary *)) {
     NSURL *poster = [NSURL URLWithString:[NSString stringWithFormat:@"https://b-cdn.streamin.top/images/%@.jpg", clipID]];
-    SCFinishWithCandidate(@"streamin", mp4, poster, 0, 0, 0, completion);
+    NSURL *current = [NSURL URLWithString:[NSString stringWithFormat:@"https://c-cdn.streamin.top/uploads/%@.mp4", clipID]];
+    NSURL *legacy  = [NSURL URLWithString:[NSString stringWithFormat:@"https://w-cdn.streamin.top/uploads/%@.mp4", clipID]];
+
+    SCProbeVideoURL(current, ^(BOOL ok) {
+        if (ok) {
+            ApolloLog(@"[SportsClips] streamin resolved mp4=%@ poster=yes", current.absoluteString);
+            completion(SCStreamableJSON(current, poster, 0, 0, 0));
+            return;
+        }
+        SCProbeVideoURL(legacy, ^(BOOL legacyOK) {
+            if (legacyOK) {
+                ApolloLog(@"[SportsClips] streamin resolved mp4=%@ poster=yes (legacy cdn)", legacy.absoluteString);
+                completion(SCStreamableJSON(legacy, poster, 0, 0, 0));
+                return;
+            }
+            SCResolveStreaminPage(clipID, originalURL, poster, completion);
+        });
+    });
+}
+
+// Fallback: ask the share page where the file actually lives. og:video carries
+// a cosmetic "?Nhoursago" cache-buster that's stripped. An absent og:video is
+// streamin's deleted-clip marker. The page also reports og:video:width/height,
+// but they're a hardcoded 640x360 template value on every clip (verified
+// across six), so dimensions stay unknown rather than lying to the share paths.
+static void SCResolveStreaminPage(NSString *clipID, NSString *originalURL,
+                                  NSURL *poster, void (^completion)(NSDictionary *)) {
+    NSURL *page = SCURLFromString(originalURL)
+        ?: [NSURL URLWithString:[NSString stringWithFormat:@"https://streamin.me/v/%@", clipID]];
+    SCFetch(page, @"GET", ^(NSData *data, NSHTTPURLResponse *http) {
+        NSString *html = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        NSString *raw = SCMetaContent(html, @"og:video:secure_url") ?: SCMetaContent(html, @"og:video");
+        NSUInteger q = [raw rangeOfString:@"?"].location;
+        if (q != NSNotFound) raw = [raw substringToIndex:q];
+        NSURL *mp4 = SCURLFromString(raw);
+        if (!mp4) {
+            ApolloLog(@"[SportsClips] streamin page had no og:video for %@ (http %ld) — deleted clip",
+                      clipID, (long)(http ? http.statusCode : 0));
+            completion(nil);
+            return;
+        }
+        NSURL *pagePoster = SCURLFromString(SCMetaContent(html, @"og:image")) ?: poster;
+        SCFinishWithCandidate(@"streamin(page)", mp4, pagePoster, 0, 0, 0, completion);
+    });
 }
 
 // dubz: predictable from the clip id, but the host's storage is split by URL
@@ -589,7 +648,7 @@ static void SCResolveKindAndID(SCHostKind kind, NSString *clipID, NSString *orig
 
     ApolloLog(@"[SportsClips] resolving id=%@ kind=%ld", clipID, (long)kind);
     switch (kind) {
-        case SCHostStreamin:  SCResolveStreamin(clipID, cacheAndComplete); break;
+        case SCHostStreamin:  SCResolveStreamin(clipID, originalURL, cacheAndComplete); break;
         case SCHostStreamff:  SCResolveStreamff(clipID, cacheAndComplete); break;
         case SCHostStreamain: SCResolveStreamain(clipID, originalURL, cacheAndComplete); break;
         case SCHostBangr:     SCResolveBangr(clipID, cacheAndComplete); break;
