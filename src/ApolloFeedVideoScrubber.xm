@@ -1,8 +1,10 @@
 // ApolloFeedVideoScrubber.xm
 //
 // "Feed Video Scrubber" — press and hold the thin progress bar at the bottom
-// of a feed video, then slide left or right to scrub it, without leaving the
-// feed. Off by default (sFeedVideoScrubber, toggle under Posts & Feeds).
+// of an inline video, then slide left or right to scrub it, without opening
+// the fullscreen player. Covers feed cells AND the post's own video at the
+// top of comments. Off by default (sFeedVideoScrubber, toggle under
+// Posts & Feeds).
 //
 //     ┌────────────────────────────────────┐
 //     │                                    │
@@ -44,11 +46,12 @@
 //     playing AVPlayer and no native progress strip; the strip refuses the
 //     hit outright (pointInside), so their touches pass through untouched.
 //
-// The touch strip is installed lazily from LargePostCellNode's visibility
-// event — the same callback the feed-unmute feature rides in
-// ApolloVideoUnmute.xm (separate %hook in a separate file; they chain).
-// It lives as a subview of the RichMediaNode's view, so it dies with the
-// cell, and it is retained by the node through an associated object.
+// The touch strip is installed lazily from the cell visibility events of
+// LargePostCellNode (feed) and RichMediaHeaderCellNode/CommentsHeaderCellNode
+// (the post's video in comments) — the same callbacks the feed-unmute feature
+// rides in ApolloVideoUnmute.xm (separate %hooks in separate files; they
+// chain). It lives as a subview of the RichMediaNode's view, so it dies with
+// the cell, and it is retained by the node through an associated object.
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"          // sFeedVideoScrubber
@@ -98,13 +101,6 @@ static id NodeIvar(id object, const char *name) {
         cls = class_getSuperclass(cls);
     }
     return nil;
-}
-
-static BOOL NodeBoolIvar(id object, const char *name) {
-    if (!object || !name) return NO;
-    Ivar ivar = class_getInstanceVariable([object class], name);
-    if (!ivar) return NO;
-    return *(BOOL *)((uint8_t *)(__bridge void *)object + ivar_getOffset(ivar));
 }
 
 // A loaded node's view, without forcing a view to be created off-screen.
@@ -222,6 +218,8 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 @property (nonatomic, weak) id videoNode;
 @property (nonatomic, strong) AVPlayer *player;              // touch-scoped
 @property (nonatomic, assign) NSTimeInterval duration;       // touch-scoped
+@property (nonatomic, weak) UIView *nativeStripView;         // touch-scoped
+@property (nonatomic, assign) BOOL pausedForScrub;           // touch-scoped
 @property (nonatomic, assign) CGFloat startX;
 @property (nonatomic, assign) CFTimeInterval touchStartedAt;
 @property (nonatomic, assign) BOOL didScrub;
@@ -246,8 +244,10 @@ static char kFeedScrubStripKey;
 }
 
 - (void)dealloc {
-    // Suspended recognizers must never outlive a touch, whatever tore us down.
+    // Suspended recognizers must never outlive a touch, whatever tore us down,
+    // and neither must a scrub-pause.
     RestoreCompetingGestures(_suspendedGestures);
+    if (_pausedForScrub && _player) [_player play];
 }
 
 #pragma mark Hit testing
@@ -333,6 +333,10 @@ static char kFeedScrubStripKey;
     self.didScrub = NO;
     self.hasPendingSeek = NO;
 
+    // Grabbed for finger-tracking during the drag (see continueTracking).
+    UIView *nativeStrip = NodeIvar(self.richMediaNode, "videoGIFProgressView");
+    self.nativeStripView = [nativeStrip isKindOfClass:[UIView class]] ? nativeStrip : nil;
+
     // The touch only reaches us after outlasting the scroll view's touch
     // delay, so this never fires for a scrolling flick.
     self.suspendedGestures = SuspendCompetingGestures(self);
@@ -348,9 +352,40 @@ static char kFeedScrubStripKey;
         // scroll view or the swipe-back pan — the failure mode to watch for.
         ApolloLog(@"[FeedScrubber] scrub engaged at %.0f%% (duration=%.1fs)",
                   [self fractionForTouch:touch] * 100.0, self.duration);
+        // Pause for the duration of the drag, like every standard scrubber:
+        // with playback stopped, Apollo's progress observer only fires as
+        // seeks land (≈ the finger position), so it stops fighting the
+        // finger-tracked bar with stale playhead widths — and the drag stops
+        // playing chopped-up audio. Resumed on release/cancel, with a dealloc
+        // backstop. The player is never rate-changed outside the touch.
+        if (self.player.rate > 0) {
+            self.pausedForScrub = YES;
+            [self.player pause];
+        }
     }
-    [self scrubToFraction:[self fractionForTouch:touch] finished:NO];
+    CGFloat fraction = [self fractionForTouch:touch];
+    [self trackFingerOnNativeStrip:fraction];
+    [self scrubToFraction:fraction finished:NO];
     return YES;
+}
+
+// The native strip is driven by Apollo's progress observer, which only moves
+// as each seek actually lands — on slow-seeking streams that reads as the bar
+// stuttering after the finger. While a drag is live, write the strip's fill
+// from the finger directly so the grab feels instant; Apollo's next progress
+// update simply takes over again after release (and with the player paused
+// for the drag, its updates come from landed seeks ≈ the finger anyway).
+//
+// VideoGIFProgressView's shape (recovered at runtime): the effect view itself
+// is the full-width track; its Swift `progress` property has no ObjC setter,
+// and layoutSubviews lays the `progressBarView` ivar out from it. Setting the
+// fill view's frame is the least invasive way in — no Swift ivar writes.
+- (void)trackFingerOnNativeStrip:(CGFloat)fraction {
+    UIView *fill = NodeIvar(self.nativeStripView, "progressBarView");
+    if (![fill isKindOfClass:[UIView class]] || !fill.superview) return;
+    CGRect frame = fill.frame;
+    frame.size.width = MAX(0.0, MIN(1.0, fraction)) * fill.superview.bounds.size.width;
+    fill.frame = frame;
 }
 
 - (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
@@ -359,6 +394,7 @@ static char kFeedScrubStripKey;
     if (self.didScrub) {
         CGFloat fraction = touch ? [self fractionForTouch:touch] : 0;
         [self scrubToFraction:fraction finished:YES];
+        [self resumeIfPausedForScrub];
     } else if (CACurrentMediaTime() - self.touchStartedAt < kForwardTapMaxDuration) {
         // A plain tap: hand it to the stock route so tapping the bottom of a
         // video still opens it fullscreen, scrubber or no scrubber.
@@ -377,6 +413,7 @@ static char kFeedScrubStripKey;
 
 - (void)cancelTrackingWithEvent:(UIEvent *)event {
     [self restoreSuspendedGestures];
+    [self resumeIfPausedForScrub];
     self.player = nil;
     self.didScrub = NO;
 }
@@ -384,6 +421,14 @@ static char kFeedScrubStripKey;
 - (void)restoreSuspendedGestures {
     RestoreCompetingGestures(self.suspendedGestures);
     self.suspendedGestures = nil;
+}
+
+// Play/pause across the drag must balance on every exit path — a video left
+// paused would read as "the scrubber broke my feed video".
+- (void)resumeIfPausedForScrub {
+    if (!self.pausedForScrub) return;
+    self.pausedForScrub = NO;
+    [self.player play];
 }
 
 #pragma mark Seeking
@@ -438,9 +483,6 @@ static char kFeedScrubStripKey;
 // it re-asserts geometry as cells scroll, resize, and re-lay out.
 static void EnsureScrubStrip(id richMediaNode) {
     if (!richMediaNode) return;
-    // The comments header is a different context with its own expectations
-    // (and its own unmute setting); the feed strip stays out of it.
-    if (NodeBoolIvar(richMediaNode, "isShownInCommentsHeader")) return;
 
     UIView *host = ViewForNode(richMediaNode);
     if (!host) return;
@@ -480,6 +522,11 @@ static void EnsureScrubStrip(id richMediaNode) {
 // separate files chain normally. Events 0 (visible) and 1 (visible rect
 // changed) both position the strip; 2 (invisible) needs nothing, the strip
 // just goes off-screen with its cell.
+//
+// RichMediaHeaderCellNode / CommentsHeaderCellNode: the post's own video at
+// the top of comments — the user wants the same hold-to-scrub there, so the
+// strip rides those cells' visibility events too (the media is the same
+// RichMediaNode either way).
 // ---------------------------------------------------------------------------
 %group FeedScrubStrip
 
@@ -501,6 +548,40 @@ static void EnsureScrubStrip(id richMediaNode) {
 
 %end
 
+%group ScrubStripCommentsHeader
+
+%hook RichMediaHeaderCellNode
+
+- (void)cellNodeVisibilityEvent:(unsigned long long)event
+                   inScrollView:(id)scrollView
+                  withCellFrame:(CGRect)frame {
+    %orig;
+    if (!sFeedVideoScrubber) return;
+    if (event != 0 && event != 1) return;
+    EnsureScrubStrip(NodeIvar(self, "richMediaNode"));
+}
+
+%end
+
+%end
+
+%group ScrubStripCommentsHeader2
+
+%hook CommentsHeaderCellNode
+
+- (void)cellNodeVisibilityEvent:(unsigned long long)event
+                   inScrollView:(id)scrollView
+                  withCellFrame:(CGRect)frame {
+    %orig;
+    if (!sFeedVideoScrubber) return;
+    if (event != 0 && event != 1) return;
+    EnsureScrubStrip(NodeIvar(self, "richMediaNode"));
+}
+
+%end
+
+%end
+
 %ctor {
     Class largePostCellClass = objc_getClass("_TtC6Apollo17LargePostCellNode");
     if (!largePostCellClass) {
@@ -508,5 +589,17 @@ static void EnsureScrubStrip(id richMediaNode) {
         return;
     }
     %init(FeedScrubStrip, LargePostCellNode = largePostCellClass);
-    ApolloLog(@"[FeedScrubber] module loaded (hold the progress bar of a feed video to scrub)");
+
+    // Each header class inits in its own group so a missing one (binary drift)
+    // costs only that context, never the feed.
+    Class headerCellClass = objc_getClass("_TtC6Apollo23RichMediaHeaderCellNode");
+    if (headerCellClass) {
+        %init(ScrubStripCommentsHeader, RichMediaHeaderCellNode = headerCellClass);
+    }
+    Class commentsHeaderCellClass = objc_getClass("_TtC6Apollo22CommentsHeaderCellNode");
+    if (commentsHeaderCellClass) {
+        %init(ScrubStripCommentsHeader2, CommentsHeaderCellNode = commentsHeaderCellClass);
+    }
+    ApolloLog(@"[FeedScrubber] module loaded (hold a video's progress bar to scrub; comments header %@)",
+              (headerCellClass || commentsHeaderCellClass) ? @"covered" : @"unavailable");
 }
