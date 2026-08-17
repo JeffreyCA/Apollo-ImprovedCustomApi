@@ -1122,6 +1122,15 @@ static void ApolloHLFetchHighlights(NSString *subredditName, BOOL force, void (^
                 ApolloHLRestSig()[key] = ApolloHLItemsContentSig(items);
                 ApolloHLPersistSub(key); // keep the relaunch snapshot fresh (#909)
             }
+            // A failed request that parsed nothing must be indistinguishable from
+            // an in-flight dedupe, not from "this sub has no pinned posts" — every
+            // caller treats nil as "do nothing, try again later", while an empty
+            // ARRAY is a real answer that ApolloHLRefreshSub acts on by tearing the
+            // carousel down and negative-caching (dropping the disk snapshot with
+            // it). Seen live: a stale OAuth token 401s on the first launch after a
+            // couple of days away and the sub's carousel vanished until the next
+            // successful refetch. Only a 200 may report an empty listing.
+            if (status != 200 && completionItems.count == 0) completionItems = nil;
             if (completion) completion(completionItems);
         });
     }] resume];
@@ -2160,6 +2169,29 @@ static void ApolloHLEnrichViaInfo(NSArray<ApolloHLItem *> *webItems, NSArray<Apo
 // sub and upgrade the carousel when it lands (only if it found more than the API).
 static void ApolloHLRemoveCarousel(NSString *subreddit); // defined with ApolloHLRefreshSub
 
+// The web set contributed nothing the carousel may show (every scraped item is
+// feed-owned). Fall back to the REST set — it can still hold a pin the scrape
+// missed — and if that is empty too, take down whatever carousel is on display
+// (a stale disk seed, or the fast paint from this very upgrade) instead of
+// stranding it. One helper, called from BOTH zero-item exits of the web
+// upgrade: the pre-enrichment id-filter and the post-enrichment flag-filter.
+// Returning early from only one of them left the other stranded. Main queue.
+static void ApolloHLWebSetAllFeedOwned(NSString *sub) {
+    NSArray<ApolloHLItem *> *restOnly = ApolloHLCarouselItems(ApolloHLRestCache()[sub] ?: @[]);
+    if (restOnly.count > 0) {
+        if (![ApolloHLItemsContentSig(restOnly) isEqualToString:ApolloHLItemsContentSig(ApolloHLCache()[sub])]) {
+            ApolloLog(@"[Highlights] r/%@ web set is all feed-owned → falling back to %lu REST highlight(s)",
+                      sub, (unsigned long)restOnly.count);
+            ApolloHLApplyItems(sub, restOnly);
+        }
+    } else if (ApolloHLCache()[sub].count > 0) {
+        ApolloLog(@"[Highlights] r/%@ every highlight is feed-owned → removing carousel", sub);
+        ApolloHLCache()[sub] = @[];
+        ApolloHLPersistSub(sub);
+        ApolloHLRemoveCarousel(sub);
+    }
+}
+
 static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
     if (!sCommunityHighlights || !sCommunityHighlightsWeb) return;
     NSString *sub = subreddit.lowercaseString;
@@ -2199,7 +2231,7 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
         // by the ids the REST parse already resolved (the enrichment below then
         // re-checks the items themselves, for a sub the REST fetch hasn't reached).
         items = ApolloHLDropFeedOwned(sub, items);
-        if (items.count == 0) return;
+        if (items.count == 0) { ApolloHLWebSetAllFeedOwned(sub); return; }
         NSArray<ApolloHLItem *> *cur = ApolloHLCache()[sub];
         BOOL grew = items.count > cur.count;
         BOOL differs = ![ApolloHLItemsContentSig(items) isEqualToString:ApolloHLItemsContentSig(cur)];
@@ -2218,26 +2250,7 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
             // authoritative drop of anything the feed owns — including a post the
             // ids above couldn't cover because the REST fetch never landed.
             NSArray<ApolloHLItem *> *enriched = ApolloHLCarouselItems(enrichedAll);
-            if (enriched.count == 0) {
-                // Everything the scrape found belongs to the feed. Fall back to the
-                // REST set (it can still hold a pin the scrape missed); if that is
-                // empty too the sub has nothing left to show, so take the carousel
-                // the fast path painted down instead of stranding it.
-                NSArray<ApolloHLItem *> *restOnly = ApolloHLCarouselItems(ApolloHLRestCache()[sub] ?: @[]);
-                if (restOnly.count > 0) {
-                    if (![ApolloHLItemsContentSig(restOnly) isEqualToString:ApolloHLItemsContentSig(ApolloHLCache()[sub])]) {
-                        ApolloLog(@"[Highlights] r/%@ web set is all feed-owned → falling back to %lu REST highlight(s)",
-                                  sub, (unsigned long)restOnly.count);
-                        ApolloHLApplyItems(sub, restOnly);
-                    }
-                } else if (ApolloHLCache()[sub].count > 0) {
-                    ApolloLog(@"[Highlights] r/%@ every highlight is feed-owned → removing carousel", sub);
-                    ApolloHLCache()[sub] = @[];
-                    ApolloHLPersistSub(sub);
-                    ApolloHLRemoveCarousel(sub);
-                }
-                return;
-            }
+            if (enriched.count == 0) { ApolloHLWebSetAllFeedOwned(sub); return; }
             BOOL metadataChanged = ![ApolloHLItemsPresentationSig(enriched) isEqualToString:preEnrichmentSig];
             NSArray<ApolloHLItem *> *shown = ApolloHLCache()[sub];
             BOOL setChanged = ![ApolloHLItemsContentSig(enriched) isEqualToString:ApolloHLItemsContentSig(shown)];
