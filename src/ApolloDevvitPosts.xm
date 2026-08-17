@@ -461,7 +461,7 @@ static WKWebsiteDataStore *ApolloDevvitDataStoreForIdentity(NSString *identity, 
 // stable. One instance per on-screen devvit post; feed instances are torn
 // down when their cell leaves the preload range.
 
-@interface ApolloDevvitWidgetView : UIView <WKNavigationDelegate, WKUIDelegate>
+@interface ApolloDevvitWidgetView : UIView <WKNavigationDelegate, WKUIDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) UIView *coverView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
@@ -500,6 +500,21 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
         self.clipsToBounds = YES;
         self.backgroundColor = [UIColor clearColor];
         [self buildCover];
+        // A tap inside the widget is the moment its height is about to change —
+        // "open the full match thread" grows it several hundred points, the ✕
+        // shrinks it back — and the idle watchdog's next look can be seconds
+        // away, which reads as content clipped under the old cell height until
+        // the poll happens to land (user-reported jank). Watch the taps
+        // ourselves and probe right after each one. Passive: recognizes
+        // alongside WebKit's own gestures and never cancels the touch, so the
+        // page sees every tap exactly as before.
+        UITapGestureRecognizer *poke =
+            [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apolloDevvitTapPoke:)];
+        poke.cancelsTouchesInView = NO;
+        poke.delaysTouchesBegan = NO;
+        poke.delaysTouchesEnded = NO;
+        poke.delegate = self;
+        [self addGestureRecognizer:poke];
         // Cap total live WEB VIEWS (not widget shells): a torn-down widget
         // stays in the weak table with webView == nil and costs nothing, so
         // both the count and the eviction must look at webView, or the cap
@@ -568,6 +583,23 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     UITapGestureRecognizer *retry =
         [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(coverTapped)];
     [cover addGestureRecognizer:retry];
+}
+
+// Coexist with WKWebView's internal recognizers — without this the system
+// tap wins and ours never fires.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
+}
+
+- (void)apolloDevvitTapPoke:(UITapGestureRecognizer *)gesture {
+    if (!self.revealed || !self.webView) return;
+    // Start a fresh brisk poll loop timed for the page's expand/collapse
+    // animation to have finished; bumping the generation orphans whatever idle
+    // tick was pending, so loops never double up. handleProbeResult then keeps
+    // polling briskly while the height is still settling.
+    NSInteger gen = ++self.pollGeneration;
+    [self pollAfter:0.35 attempt:0 generation:gen];
 }
 
 - (void)coverTapped {
