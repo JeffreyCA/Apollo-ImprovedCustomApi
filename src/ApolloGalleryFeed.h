@@ -126,6 +126,13 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
     ApolloGalleryTopWindowAll,
 };
 
+// Whether the sort's listing takes the `&t=` time window. The single source of
+// truth for it — the request builder, the feed's reset-on-window-change, and
+// the sort menu's checkmarks must all agree on which sorts a window applies to.
+static inline BOOL ApolloGallerySortUsesWindow(ApolloGallerySort sort) {
+    return sort == ApolloGallerySortTop || sort == ApolloGallerySortControversial;
+}
+
 // A subreddit's, multireddit's, or user profile's media feed. Not thread-safe:
 // drive it from the main thread (completions are always delivered there).
 @interface ApolloGalleryFeed : NSObject

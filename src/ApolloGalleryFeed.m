@@ -404,9 +404,10 @@ static NSString *ApolloGalleryBearerForClient(id client) {
 - (void)setTopWindow:(ApolloGalleryTopWindow)topWindow {
     if (_topWindow == topWindow) return;
     _topWindow = topWindow;
-    // The window only affects the "top" listing, so changing it under any other
-    // sort costs nothing and shouldn't throw the loaded pictures away.
-    if (_sort == ApolloGallerySortTop) [self reset];
+    // The window only affects listings that send `&t=` (top and controversial),
+    // so changing it under any other sort costs nothing and shouldn't throw the
+    // loaded pictures away.
+    if (ApolloGallerySortUsesWindow(_sort)) [self reset];
 }
 
 - (void)setSort:(ApolloGallerySort)sort topWindow:(ApolloGalleryTopWindow)topWindow {
@@ -414,10 +415,11 @@ static NSString *ApolloGalleryBearerForClient(id client) {
     BOOL windowChanged = (_topWindow != topWindow);
     if (!sortChanged && !windowChanged) return;
     // Assign the ivars directly, then reset once — going through the property
-    // setters would reset twice when both change.
+    // setters would reset twice when both change. When only the window changed,
+    // the loaded page is stale exactly when the sort sends `&t=`.
     _sort = sort;
     _topWindow = topWindow;
-    if (sortChanged || sort == ApolloGallerySortTop) [self reset];
+    if (sortChanged || ApolloGallerySortUsesWindow(sort)) [self reset];
 }
 
 - (void)reset {
@@ -553,7 +555,7 @@ static NSString *ApolloGalleryBearerForClient(id client) {
     if (self.sortsViaQueryParameter) {
         [query appendFormat:@"&sort=%@", [self sortQueryValue]];
     }
-    if (self.sort == ApolloGallerySortTop || self.sort == ApolloGallerySortControversial) {
+    if (ApolloGallerySortUsesWindow(self.sort)) {
         [query appendFormat:@"&t=%@", [self topWindowParameter]];
     }
     if (after.length > 0) {

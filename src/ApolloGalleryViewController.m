@@ -894,10 +894,6 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
                         children:children];
 }
 
-static BOOL ApolloGallerySortUsesWindow(ApolloGallerySort sort) {
-    return sort == ApolloGallerySortTop || sort == ApolloGallerySortControversial;
-}
-
 - (void)apollo_applySort:(ApolloGallerySort)sort topWindow:(ApolloGalleryTopWindow)window {
     if (self.feed.sort == sort && (!ApolloGallerySortUsesWindow(sort) || self.feed.topWindow == window)) return;
     [self.feed setSort:sort topWindow:window];
