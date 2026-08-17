@@ -1366,31 +1366,18 @@ static void RecentlyReadClearThumbTask(UIImageView *thumbnailView, NSURLSessionD
 
 @end
 
-// Add "Recently Read" button to ProfileViewController navigation bar
-%hook ProfileViewController
-
-- (void)viewDidLoad {
-    %orig;
-
-    UIBarButtonItem *recentItem = [[UIBarButtonItem alloc]
-        initWithImage:[UIImage systemImageNamed:@"clock.arrow.circlepath"]
-        style:UIBarButtonItemStylePlain
-        target:self
-        action:@selector(apollo_showRecentlyRead)];
-
-    UIViewController *vc = (UIViewController *)self;
-    NSMutableArray *items = [NSMutableArray arrayWithArray:vc.navigationItem.rightBarButtonItems ?: @[]];
-    [items addObject:recentItem];
-    vc.navigationItem.rightBarButtonItems = items;
-}
-
-%new
-- (void)apollo_showRecentlyRead {
+// Recently Read used to be its own clock button in the profile's navigation
+// bar; it now lives inside the profile tab's "..." menu instead
+// (ApolloProfileMoreMenu.xm), which calls this to push the screen.
+void ApolloRecentlyReadPresentFromViewController(UIViewController *fromViewController) {
+    UINavigationController *navigationController = fromViewController.navigationController;
+    if (!navigationController) {
+        ApolloLog(@"[RecentlyRead] No navigation controller to push Recently Read from %@", fromViewController);
+        return;
+    }
     RecentlyReadViewController *vc = [[RecentlyReadViewController alloc] initWithStyle:UITableViewStyleGrouped];
-    [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
+    [navigationController pushViewController:vc animated:YES];
 }
-
-%end
 
 // MARK: - Bump Recently Read on Revisit
 //
@@ -1511,5 +1498,5 @@ static void ApolloCommentsVCTryMarkRead(id commentsVC, const char *trigger) {
         rebind_symbols((struct rebinding[1]){{"swift_allocObject", (void *)hooked_swift_allocObject, (void **)&orig_swift_allocObject}}, 1);
     }
 
-    %init(ProfileViewController=objc_getClass("_TtC6Apollo21ProfileViewController"));
+    %init;
 }

@@ -31,6 +31,7 @@
 #import <objc/message.h>
 #import "ApolloState.h"
 #import "ApolloCommon.h"
+#import "ApolloScrapeWebView.h"
 #import "ApolloSubredditHighlights.h"
 
 #pragma mark - Minimal runtime interfaces
@@ -107,6 +108,8 @@ static const void *kApolloHLWrapperMarkerKey   = &kApolloHLWrapperMarkerKey;  //
 static const void *kApolloHLTeardownMarkerKey  = &kApolloHLTeardownMarkerKey; // BOOL on the VC
 static const void *kApolloHLActiveSubKey       = &kApolloHLActiveSubKey;      // NSString sub added to the hide-set by this VC
 static const void *kApolloHLContainerKey       = &kApolloHLContainerKey;      // ApolloHLHeaderContainerView on the VC (headers-on coexistence)
+static const void *kApolloHLHeaderChangeGenKey     = &kApolloHLHeaderChangeGenKey;     // NSNumber on the table: latest ApplyHeaderChange generation
+static const void *kApolloHLHeaderChangePendingKey = &kApolloHLHeaderChangePendingKey; // BOOL on the table: a deferred header change awaits scroll settle
 static char kApolloHLHiddenRowsKey;            // NSMutableSet<NSNumber*> of de-duped sticky rows, per ASTableNode
 static char kApolloHLStickyCountKey;           // NSNumber (REST sticky count N) per feed ASTableNode — breaker rule
 static char kApolloHLSwitchPendingKey;         // BOOL on the VC — an in-place-switch re-install is already scheduled
@@ -364,13 +367,20 @@ static BOOL ApolloHLDidCollapseContains(NSString *sub) {
     if (sub.length == 0) return NO;
     @synchronized(ApolloHLDeDupLock()) { return [ApolloHLDidCollapseSubs() containsObject:sub]; }
 }
-static void ApolloHLDidCollapseAdd(NSString *sub) {
-    if (sub.length == 0) return;
-    @synchronized(ApolloHLDeDupLock()) { [ApolloHLDidCollapseSubs() addObject:sub]; }
-}
 static void ApolloHLDidCollapseRemove(NSString *sub) {
     if (sub.length == 0) return;
     @synchronized(ApolloHLDeDupLock()) { [ApolloHLDidCollapseSubs() removeObject:sub]; }
+}
+
+// Hot Texture layout transaction: membership and the resulting "did collapse"
+// mark describe one decision, so perform both under one monitor entry.
+static BOOL ApolloHLHideAndMarkCollapsed(NSString *sub) {
+    if (sub.length == 0) return NO;
+    @synchronized(ApolloHLDeDupLock()) {
+        if (![ApolloHLHideSubs() containsObject:sub]) return NO;
+        [ApolloHLDidCollapseSubs() addObject:sub];
+        return YES;
+    }
 }
 
 // Lowercased subreddit -> number of leading stickied posts the REST `hot` fetch
@@ -396,6 +406,149 @@ static NSMutableDictionary<NSString *, NSString *> *ApolloHLRestSig(void) {
     static NSMutableDictionary *d; static dispatch_once_t once;
     dispatch_once(&once, ^{ d = [NSMutableDictionary dictionary]; });
     return d;
+}
+
+#pragma mark - Disk persistence (snap-free installs across launches, #909)
+
+// The carousel used to exist only after an async REST fetch, so on the first
+// open of a subreddit each launch Apollo's posts almost always rendered first
+// and the late tableHeaderView install visibly shoved the whole feed down.
+// Persisting a small per-sub snapshot across launches lets any previously-seen
+// subreddit build its carousel SYNCHRONOUSLY in the very first layout pass —
+// before the posts land — so the layout never shifts. A seeded snapshot is
+// deliberately given its ORIGINAL fetch date, which is normally far past the
+// freshness TTL, so ApolloHLMaybeRefreshStale immediately revalidates it in the
+// background (rebuilding only on a real change, tearing down + un-persisting if
+// a mod unpinned everything). MAIN-QUEUE ONLY, like every other cache here.
+static NSString *const kApolloHLDiskCacheDefaultsKey = @"CommunityHighlightsDiskCache";
+// Keep only the most recently fetched subs; each entry is ~1-2KB of titles/URLs.
+static NSUInteger const kApolloHLDiskCacheMaxSubs = 40;
+
+static NSString *ApolloHLStringValue(id v); // defined with the parse helpers below
+
+static NSDictionary *ApolloHLItemToPlist(ApolloHLItem *it) {
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    if (it.title) d[@"t"] = it.title;
+    if (it.permalink) d[@"p"] = it.permalink;
+    if (it.fullName) d[@"f"] = it.fullName;
+    if (it.flairText) d[@"fl"] = it.flairText;
+    if (it.numComments) d[@"c"] = @(it.numComments);
+    if (it.thumbnailURL.absoluteString) d[@"u"] = it.thumbnailURL.absoluteString;
+    if (it.isSpoiler) d[@"s"] = @YES;
+    return d;
+}
+
+static NSArray<NSDictionary *> *ApolloHLItemsToPlist(NSArray<ApolloHLItem *> *items) {
+    NSMutableArray *out = [NSMutableArray array];
+    for (ApolloHLItem *it in items) [out addObject:ApolloHLItemToPlist(it)];
+    return out;
+}
+
+// Defensive decode: the defaults plist is user-reachable state, so validate every
+// field's type and require at least a title + permalink (what a card needs).
+static NSArray<ApolloHLItem *> *ApolloHLItemsFromPlist(id plist) {
+    if (![plist isKindOfClass:[NSArray class]]) return nil;
+    NSMutableArray<ApolloHLItem *> *out = [NSMutableArray array];
+    for (NSDictionary *d in (NSArray *)plist) {
+        if (![d isKindOfClass:[NSDictionary class]]) continue;
+        NSString *title = ApolloHLStringValue(d[@"t"]), *permalink = ApolloHLStringValue(d[@"p"]);
+        if (title.length == 0 || permalink.length == 0) continue;
+        ApolloHLItem *it = [[ApolloHLItem alloc] init];
+        it.title = title;
+        it.permalink = permalink;
+        it.fullName = ApolloHLStringValue(d[@"f"]);
+        it.flairText = ApolloHLStringValue(d[@"fl"]);
+        if ([d[@"c"] isKindOfClass:[NSNumber class]]) it.numComments = [d[@"c"] longLongValue];
+        NSString *thumb = ApolloHLStringValue(d[@"u"]);
+        if (thumb.length) it.thumbnailURL = [NSURL URLWithString:thumb];
+        it.isSpoiler = [d[@"s"] isKindOfClass:[NSNumber class]] && [d[@"s"] boolValue];
+        [out addObject:it];
+    }
+    return out;
+}
+
+// sub (lowercase) -> { items: displayed set, rest: pure REST set, n: sticky
+// count, sig: REST content sig, t: fetch NSDate }. Loaded once, written through.
+static NSMutableDictionary<NSString *, NSDictionary *> *ApolloHLDiskCache(void) {
+    static NSMutableDictionary *cache; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSDictionary *saved = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kApolloHLDiskCacheDefaultsKey];
+        cache = [saved isKindOfClass:[NSDictionary class]] ? [saved mutableCopy] : [NSMutableDictionary dictionary];
+    });
+    return cache;
+}
+
+// Coalesced: encoding re-serializes the whole (up-to-40-sub) dictionary, and a
+// REST completion + ApplyItems often persist back-to-back, so batch every save
+// requested in one runloop turn into a single defaults write. MAIN-QUEUE ONLY,
+// like every other cache here.
+static void ApolloHLDiskCacheSave(void) {
+    static BOOL scheduled;
+    if (scheduled) return;
+    scheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        scheduled = NO;
+        NSMutableDictionary *cache = ApolloHLDiskCache();
+        if (cache.count > kApolloHLDiskCacheMaxSubs) {
+            // Evict the least recently fetched subs first.
+            NSArray<NSString *> *oldestFirst = [cache.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+                NSDate *da = [cache[a][@"t"] isKindOfClass:[NSDate class]] ? cache[a][@"t"] : [NSDate distantPast];
+                NSDate *db = [cache[b][@"t"] isKindOfClass:[NSDate class]] ? cache[b][@"t"] : [NSDate distantPast];
+                return [da compare:db];
+            }];
+            for (NSUInteger i = 0; i + kApolloHLDiskCacheMaxSubs < oldestFirst.count; i++) [cache removeObjectForKey:oldestFirst[i]];
+        }
+        [[NSUserDefaults standardUserDefaults] setObject:cache forKey:kApolloHLDiskCacheDefaultsKey];
+    });
+}
+
+// Snapshot the sub's current in-memory state to disk. A sub whose highlights are
+// (now) empty is removed instead — an absent entry costs nothing on the next
+// launch (no carousel = nothing to install early), and keeping only real
+// carousels makes the recency cap meaningful.
+static void ApolloHLPersistSub(NSString *subreddit) {
+    NSString *key = subreddit.lowercaseString;
+    if (key.length == 0) return;
+    NSArray<ApolloHLItem *> *displayed = ApolloHLCache()[key];
+    NSArray<ApolloHLItem *> *rest = ApolloHLRestCache()[key];
+    if (displayed.count == 0 && rest.count == 0) {
+        if (ApolloHLDiskCache()[key]) {
+            [ApolloHLDiskCache() removeObjectForKey:key];
+            ApolloHLDiskCacheSave();
+        }
+        return;
+    }
+    NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+    entry[@"items"] = ApolloHLItemsToPlist(displayed ?: @[]);
+    entry[@"rest"] = ApolloHLItemsToPlist(rest ?: @[]);
+    if (ApolloHLStickyCount()[key]) entry[@"n"] = ApolloHLStickyCount()[key];
+    if (ApolloHLRestSig()[key]) entry[@"sig"] = ApolloHLRestSig()[key];
+    entry[@"t"] = ApolloHLFetchTime()[key] ?: [NSDate date];
+    ApolloHLDiskCache()[key] = entry;
+    ApolloHLDiskCacheSave();
+}
+
+// Seed the in-memory caches from disk the first time a sub is consulted this
+// session, so the carousel can install synchronously (no snap). No-ops once the
+// session knows the sub (a real fetch or an earlier seed already populated it).
+static void ApolloHLSeedFromDisk(NSString *subreddit) {
+    NSString *key = subreddit.lowercaseString;
+    if (key.length == 0 || ApolloHLCache()[key] || ApolloHLFetchTime()[key]) return;
+    NSDictionary *entry = ApolloHLDiskCache()[key];
+    if (![entry isKindOfClass:[NSDictionary class]]) return;
+    NSArray<ApolloHLItem *> *rest = ApolloHLItemsFromPlist(entry[@"rest"]) ?: @[];
+    NSArray<ApolloHLItem *> *displayed = ApolloHLItemsFromPlist(entry[@"items"]) ?: @[];
+    // Partial mode must never resurrect a persisted Full-mode (web-upgraded) set.
+    NSArray<ApolloHLItem *> *use = sCommunityHighlightsWeb ? (displayed.count ? displayed : rest) : rest;
+    if (use.count == 0) return;
+    ApolloHLCache()[key] = use;
+    ApolloHLRestCache()[key] = rest;
+    if ([entry[@"n"] isKindOfClass:[NSNumber class]]) ApolloHLStickyCount()[key] = entry[@"n"];
+    if ([entry[@"sig"] isKindOfClass:[NSString class]]) ApolloHLRestSig()[key] = entry[@"sig"];
+    // Keep the ORIGINAL fetch date: it is (almost always) past the freshness TTL,
+    // so the very next ApolloHLMaybeRefreshStale revalidates in the background.
+    ApolloHLFetchTime()[key] = [entry[@"t"] isKindOfClass:[NSDate class]] ? entry[@"t"] : [NSDate distantPast];
+    ApolloLog(@"[Highlights] r/%@ seeded %lu highlights from disk", key, (unsigned long)use.count);
 }
 
 #pragma mark - Per-subreddit collapsed state (persisted)
@@ -545,8 +698,19 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
 // more than the REST-sized two cards, take one confirming probe before finishing
 // so bestItems can grow to the complete set without restoring the old 3s delay.
 @property (nonatomic) BOOL awaitingLargeSetConfirmation;
+// The poll saw Reddit's "Prove your humanity" interstitial at least once this
+// fetch. A challenged load that still times out is retryable (the challenge is
+// served per-request), unlike a clean page that genuinely has no highlights.
+@property (nonatomic) BOOL sawChallenge;
 @end
 @implementation ApolloHLWebFetch
+// Last-resort insurance: Create attaches the web view, so the window (not this
+// object) holds the strong reference — dropping the fetch without Destroy would
+// orphan an attached web view behind the app. Every normal path already goes
+// through Destroy; this makes "no orphaned attached web view" structural.
+- (void)dealloc {
+    ApolloScrapeWebViewDestroy(_web);
+}
 
 // A single non-persistent (in-memory) WKWebsiteDataStore, reused for every
 // highlights scrape this app session.
@@ -573,7 +737,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
 + (WKWebsiteDataStore *)apollo_scrapeDataStore {
     static WKWebsiteDataStore *store;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ store = [WKWebsiteDataStore nonPersistentDataStore]; });
+    dispatch_once(&once, ^{ store = ApolloScrapeWebViewSharedDataStore(); });
     return store;
 }
 
@@ -581,22 +745,21 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     self.sub = sub; self.done = done; self.polls = 0;
     self.startedAt = [NSDate date]; self.bestItems = nil; self.pollScheduled = NO; self.evaluationInFlight = NO;
     self.awaitingLargeSetConfirmation = NO;
-    UIWindow *win = nil;
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-        if (![s isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene *)s).windows) { if (w.isKeyWindow) win = w; }
-    }
-    if (!win) win = UIApplication.sharedApplication.windows.firstObject;
-    if (!win) { [self finish:nil]; return; }
+    self.sawChallenge = NO;
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     config.websiteDataStore = [ApolloHLWebFetch apollo_scrapeDataStore];
-    self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:config];
-    self.web.navigationDelegate = self;
-    self.web.alpha = 0.011; self.web.userInteractionEnabled = NO;
-    [win insertSubview:self.web atIndex:0];
-    [self.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://www.reddit.com/r/%@/", sub]]]];
-    ApolloLog(@"[Highlights][web] loading r/%@ for full highlights", sub);
-    [self pollAfter:kApolloHLWebInitialPollDelay];
+    __weak typeof(self) ws = self;
+    ApolloScrapeWebViewCreate(config, ^(WKWebView *web) {
+        ApolloHLWebFetch *ss = ws;
+        // The blocker resolve is async, so the fetch may already have been
+        // cancelled (done cleared) by the time we get here.
+        if (!ss || !ss.done) return;
+        ss.web = web;
+        web.navigationDelegate = ss;
+        [web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://www.reddit.com/r/%@/", sub]]]];
+        ApolloLog(@"[Highlights][web] loading r/%@ for full highlights", sub);
+        [ss pollAfter:kApolloHLWebInitialPollDelay];
+    });
 }
 - (void)pollAfter:(double)delay {
     // didFinishNavigation and the fallback timer can both ask for a probe. Keep
@@ -614,7 +777,10 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     if (!self.web || self.evaluationInFlight) return;
     NSTimeInterval elapsed = self.startedAt ? -self.startedAt.timeIntervalSinceNow : 0.0;
     if (elapsed >= kApolloHLWebTimeout) {
-        ApolloLog(@"[Highlights][web] r/%@ timed out after %.1fs (%d probes)", self.sub, elapsed, self.polls);
+        if (self.sawChallenge && self.bestItems.count == 0)
+            ApolloLog(@"[Highlights][web] r/%@ blocked by Reddit's bot challenge after %.1fs — will retry later", self.sub, elapsed);
+        else
+            ApolloLog(@"[Highlights][web] r/%@ timed out after %.1fs (%d probes)", self.sub, elapsed, self.polls);
         [self finish:self.bestItems ?: @[]];
         return;
     }
@@ -623,7 +789,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     NSString *js = @"(function(){"
         "var all=document.querySelectorAll('*'),heading=null;"
         "for(var i=0;i<all.length;i++){var e=all[i];if(e.children.length===0&&(e.textContent||'').trim().toLowerCase()==='community highlights'){heading=e;break;}}"
-        "if(!heading)return JSON.stringify({n:0});"
+        "if(!heading)return JSON.stringify({n:0,t:document.title});"
         "var c=heading;for(var d=0;d<7&&c.parentElement;d++){c=c.parentElement;if(c.querySelectorAll('a[href*=\"/comments/\"]').length>=1)break;}"
         "var links=c.querySelectorAll('a[href*=\"/comments/\"]');var seen={},out=[];"
         "for(var j=0;j<links.length;j++){var l=links[j];var h=(l.getAttribute('href')||'').split('?')[0];if(!h||seen[h])continue;var t=(l.textContent||'').trim().split('\\n')[0].trim();if(!t)continue;seen[h]=1;"
@@ -638,6 +804,11 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
         if (!ss.web) return;
         NSArray<ApolloHLItem *> *items = [ApolloHLWebFetch parseItems:res];
         if (items.count > ss.bestItems.count) ss.bestItems = items;
+        // "Reddit - Prove your humanity" = the bot-challenge interstitial. Keep
+        // polling — it can clear itself mid-fetch — but remember we saw it so a
+        // timeout is classified as blocked-not-empty.
+        if ([res isKindOfClass:[NSString class]] && [(NSString *)res containsString:@"Prove your humanity"])
+            ss.sawChallenge = YES;
         NSTimeInterval now = ss.startedAt ? -ss.startedAt.timeIntervalSinceNow : 0.0;
         if (ss.bestItems.count > 2 && !ss.awaitingLargeSetConfirmation && now < kApolloHLWebTimeout) {
             ss.awaitingLargeSetConfirmation = YES;
@@ -648,7 +819,10 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
             ApolloLog(@"[Highlights][web] r/%@ extracted %lu highlights in %.2fs (probe#%d)", ss.sub, (unsigned long)ss.bestItems.count, now, ss.polls);
             [ss finish:ss.bestItems];
         } else if (now >= kApolloHLWebTimeout) {
-            ApolloLog(@"[Highlights][web] r/%@ timed out after %.1fs (%d probes, last error=%@)", ss.sub, now, ss.polls, e.localizedDescription ?: @"nil");
+            if (ss.sawChallenge && ss.bestItems.count == 0)
+                ApolloLog(@"[Highlights][web] r/%@ blocked by Reddit's bot challenge after %.1fs — will retry later", ss.sub, now);
+            else
+                ApolloLog(@"[Highlights][web] r/%@ timed out after %.1fs (%d probes, last error=%@)", ss.sub, now, ss.polls, e.localizedDescription ?: @"nil");
             [ss finish:ss.bestItems ?: @[]];
         } else {
             [ss pollAfter:kApolloHLWebPollInterval];
@@ -679,7 +853,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     return out;
 }
 - (void)finish:(NSArray<ApolloHLItem *> *)items {
-    if (self.web) { self.web.navigationDelegate = nil; [self.web removeFromSuperview]; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     self.pollScheduled = NO; self.evaluationInFlight = NO; self.awaitingLargeSetConfirmation = NO;
     self.startedAt = nil; self.bestItems = nil;
     void (^d)(NSArray *) = self.done; self.done = nil;
@@ -688,9 +862,7 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
 - (void)cancel {
     self.done = nil;
     if (self.web) {
-        self.web.navigationDelegate = nil;
-        [self.web stopLoading];
-        [self.web removeFromSuperview];
+        ApolloScrapeWebViewDestroy(self.web);
         self.web = nil;
     }
     self.pollScheduled = NO; self.evaluationInFlight = NO; self.awaitingLargeSetConfirmation = NO;
@@ -765,6 +937,7 @@ static void ApolloHLFetchHighlights(NSString *subredditName, BOOL force, void (^
                 ApolloHLStickyCount()[key] = @(items.count);
                 ApolloHLFetchTime()[key] = [NSDate date];
                 ApolloHLRestSig()[key] = ApolloHLItemsContentSig(items);
+                ApolloHLPersistSub(key); // keep the relaunch snapshot fresh (#909)
             }
             if (completion) completion(completionItems);
         });
@@ -1101,7 +1274,7 @@ static void ApolloHLToggleCollapsed(NSString *sub); // fwd (defined after ApplyI
     }
     if (permalink.length == 0) return;
     NSString *full = [permalink hasPrefix:@"http"] ? permalink
-                   : [NSString stringWithFormat:@"https://reddit.com%@", permalink];
+                   : [@"https://reddit.com" stringByAppendingString:permalink];
     NSURL *url = [NSURL URLWithString:full];
     if (!url) return;
     ApolloLog(@"[Highlights] card tapped -> %@", full);
@@ -1150,7 +1323,10 @@ static CGFloat ApolloHLCarouselHeight(void) {
 static ApolloHLCarouselView *ApolloHLBuildCarousel(NSString *sub, NSArray<ApolloHLItem *> *items, CGFloat width) {
     if (items.count == 0) return nil;
     BOOL collapsed = ApolloHLIsCollapsed(sub);
-    CGFloat height = collapsed ? (kApolloHLTitleRowHeight + 8.0) : ApolloHLCarouselHeight();
+    // Collapsed = just the 26pt title row. The row's glyphs (pin y6-20, label text
+    // ~y6-22, chevron y7-18) already sit centered within those 26pt, so any extra
+    // height reads as pure bottom padding and the title looks top-aligned (#910).
+    CGFloat height = collapsed ? kApolloHLTitleRowHeight : ApolloHLCarouselHeight();
     ApolloHLCarouselView *view = [[ApolloHLCarouselView alloc] initWithFrame:CGRectMake(0, 0, width, height)];
     view.backgroundColor = [UIColor clearColor];
     view.subreddit = sub.lowercaseString;
@@ -1272,6 +1448,7 @@ static void ApolloHLClearDeDup(NSString *subreddit) {
 @end
 
 static void ApolloHLApplyStickyCountToTable(UIViewController *vc, NSString *subreddit); // defined near ApolloHLInstall
+static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingView, void (^apply)(void)); // defined with InstallCarousel
 
 UIView *ApolloHLHeaderOriginalSubstitute(NSString *subreddit, UIViewController *hostVC, UIView *realOriginalHeader, CGFloat width) {
     if (!sCommunityHighlights || subreddit.length == 0) return realOriginalHeader;
@@ -1295,6 +1472,10 @@ UIView *ApolloHLHeaderOriginalSubstitute(NSString *subreddit, UIViewController *
     if (realOriginal) [container addSubview:realOriginal];
     if (hostVC) objc_setAssociatedObject(hostVC, kApolloHLContainerKey, container, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
+    // Headers mode can build its wrapper before ApolloHLInstall ever runs for this
+    // VC, so seed here too (idempotent) — the cache read below then succeeds
+    // synchronously for any previously-seen sub and the header never grows late.
+    ApolloHLSeedFromDisk(sub);
     NSArray<ApolloHLItem *> *items = ApolloHLCache()[sub];
     if (items.count > 0) {
         [container installCarousel:ApolloHLBuildCarousel(sub, items, width)];
@@ -1310,16 +1491,21 @@ UIView *ApolloHLHeaderOriginalSubstitute(NSString *subreddit, UIViewController *
                 ApolloHLHeaderContainerView *c = objc_getAssociatedObject(postsVC, kApolloHLContainerKey);
                 if (![c isMemberOfClass:[ApolloHLHeaderContainerView class]] || c.hlCarouselView) return;
                 CGFloat w = c.bounds.size.width > 0 ? c.bounds.size.width : fetchWidth;
-                [c installCarousel:ApolloHLBuildCarousel(sub, fetched, w)];
+                UIView *newCarousel = ApolloHLBuildCarousel(sub, fetched, w);
                 ApolloHLApplyStickyCountToTable(postsVC, sub); // headers mode: publish N now that the REST fetch landed
                 UIView *wrapper = c.superview;
                 UITableView *tv = ApolloHLFindTableView(postsVC);
-                if (wrapper && tv && tv.tableHeaderView == wrapper) {
-                    CGRect wf = wrapper.frame;
-                    wf.size.height = CGRectGetMaxY(c.frame);
-                    wrapper.frame = wf;
-                    [tv setTableHeaderView:wrapper]; // force the table to re-read the header height
-                }
+                // Grow the header through the snap-free applier so a late arrival
+                // (posts already visible) slides in instead of shoving the feed (#909).
+                ApolloHLApplyHeaderChange(tv, newCarousel, ^{
+                    [c installCarousel:newCarousel];
+                    if (wrapper && tv && tv.tableHeaderView == wrapper) {
+                        CGRect wf = wrapper.frame;
+                        wf.size.height = CGRectGetMaxY(c.frame);
+                        wrapper.frame = wf;
+                        [tv setTableHeaderView:wrapper]; // force the table to re-read the header height
+                    }
+                });
             });
             [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHLDataReadyNotification object:nil];
         });
@@ -1364,6 +1550,12 @@ static void ApolloHLRestoreStandaloneHeader(UIViewController *vc) {
         objc_setAssociatedObject(tableView, kApolloHLManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloHLCarouselKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Invalidate any header change still deferred behind a scroll — restoring
+        // the native header makes it obsolete, and it must not fire afterwards
+        // and resurrect the carousel it captured.
+        NSUInteger gen = [objc_getAssociatedObject(tableView, kApolloHLHeaderChangeGenKey) unsignedIntegerValue] + 1;
+        objc_setAssociatedObject(tableView, kApolloHLHeaderChangeGenKey, @(gen), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(tableView, kApolloHLHeaderChangePendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     objc_setAssociatedObject(vc, kApolloHLCarouselKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(vc, kApolloHLWrapperKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1420,6 +1612,90 @@ static void ApolloHLPinCarouselToTop(UITableView *tv, int attempt) {
     });
 }
 
+// #909 cold case: a sub with no persisted snapshot (genuinely first-ever open)
+// still gets its carousel only after the async fetch, i.e. usually after the
+// posts have rendered. Apply that late header change without a hard snap:
+//  - nothing visible yet → plain apply (the ideal, nothing on screen can shift);
+//  - at the top of the feed → animate the shift as one smooth slide, fading the
+//    arriving carousel in with it;
+//  - scrolled away → compensate the content offset so the visible posts do not
+//    move at all (the carousel waits above the viewport for the next scroll-up);
+//  - scroll in flight (touch down or decelerating) → DEFER until it settles:
+//    writing contentOffset mid-deceleration stops the scroll dead, and changing
+//    the header height without the rebase visibly jumps the content, so neither
+//    is acceptable while the table is moving. A per-table generation lets a
+//    newer change (web upgrade, collapse toggle, teardown) supersede a deferred
+//    one, and the pending flag holds InstallCarousel's re-seat short-circuit off
+//    this table until the deferred apply lands.
+
+// The settled-table application: called only when no scroll is in flight.
+static void ApolloHLApplyHeaderChangeNow(UITableView *tableView, UIView *appearingView, void (^apply)(void)) {
+    CGFloat oldHeight = tableView.tableHeaderView.frame.size.height;
+    CGFloat topY = -tableView.adjustedContentInset.top;
+    BOOL atTop = (tableView.contentOffset.y - topY) <= 0.5;
+    if (atTop) {
+        appearingView.alpha = 0.0;
+        [UIView animateWithDuration:0.3 delay:0
+                            options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            apply();
+            appearingView.alpha = 1.0;
+            [tableView layoutIfNeeded];
+        } completion:^(__unused BOOL finished) {
+            // Self-heal: if the animation was interrupted or removed (view left
+            // the hierarchy, a rebuild landed on top), never leave the carousel
+            // stranded invisible under a full-height header.
+            appearingView.alpha = 1.0;
+        }];
+        return;
+    }
+    // Scrolled away but settled: keep the content visually pinned — the carousel
+    // waits above the viewport for the next scroll-up.
+    apply();
+    CGFloat delta = tableView.tableHeaderView.frame.size.height - oldHeight;
+    if (fabs(delta) > 0.5) {
+        // A shrink (collapse toggle) while only slightly scrolled could rebase the
+        // offset above the content top and leave the table over-scrolled; clamp.
+        CGFloat targetY = MAX(tableView.contentOffset.y + delta, topY);
+        tableView.contentOffset = CGPointMake(tableView.contentOffset.x, targetY);
+    }
+}
+
+static void ApolloHLApplyHeaderChangeAttempt(UITableView *tableView, UIView *appearingView, void (^apply)(void), NSNumber *gen, int attempt) {
+    if (!tableView) return; // table died while deferred → the change is moot
+    NSNumber *current = objc_getAssociatedObject(tableView, kApolloHLHeaderChangeGenKey);
+    if (gen && current && ![gen isEqualToNumber:current]) return; // superseded by a newer change
+    BOOL scrollInFlight = tableView.tracking || tableView.dragging || tableView.decelerating;
+    if (scrollInFlight && attempt < 16) { // 16 × 0.25s ≈ 4s; deceleration never lasts that long
+        objc_setAssociatedObject(tableView, kApolloHLHeaderChangePendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        __weak UITableView *weakTable = tableView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloHLApplyHeaderChangeAttempt(weakTable, appearingView, apply, gen, attempt + 1);
+        });
+        return;
+    }
+    objc_setAssociatedObject(tableView, kApolloHLHeaderChangePendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // (Attempt-cap fallback lands here mid-touch: a rebase during an active pan is
+    // the safe case — UIKit rebases the gesture — it is only deceleration we wait out.)
+    if (!tableView.window || tableView.indexPathsForVisibleRows.count == 0) {
+        apply(); // nothing visible can shift
+        return;
+    }
+    ApolloHLApplyHeaderChangeNow(tableView, appearingView, apply);
+}
+
+static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingView, void (^apply)(void)) {
+    if (!apply) return;
+    if (!tableView || !tableView.window || tableView.indexPathsForVisibleRows.count == 0) {
+        apply();
+        return;
+    }
+    // New generation: any change still waiting on a scroll to settle is now stale.
+    NSUInteger gen = [objc_getAssociatedObject(tableView, kApolloHLHeaderChangeGenKey) unsignedIntegerValue] + 1;
+    objc_setAssociatedObject(tableView, kApolloHLHeaderChangeGenKey, @(gen), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloHLApplyHeaderChangeAttempt(tableView, appearingView, apply, @(gen), 0);
+}
+
 static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView, NSArray<ApolloHLItem *> *items, NSString *subreddit) {
     if (items.count == 0) {
         // Nothing pinned — make sure we aren't leaving a stale carousel up.
@@ -1463,6 +1739,12 @@ static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView
     CGFloat width = tableView.bounds.size.width > 0 ? tableView.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
 
     if (sameContent && wrapper) {
+        // A deferred snap-free change for this same content is still waiting for
+        // the scroll to settle (viewDidLayoutSubviews fires every scroll frame, so
+        // this path re-enters constantly while decelerating). Re-seating here
+        // would install the header mid-scroll — the exact snap the deferral
+        // avoids — so leave it to the pending apply.
+        if ([objc_getAssociatedObject(tableView, kApolloHLHeaderChangePendingKey) boolValue]) return;
         // Carousel exists but isn't the live header (Apollo swapped it). Re-seat.
         objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         tableView.tableHeaderView = wrapper;
@@ -1497,9 +1779,14 @@ static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView
     objc_setAssociatedObject(tableView, kApolloHLManagedTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(tableView, kApolloHLCarouselKey, carousel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    tableView.tableHeaderView = newWrapper;
-    objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Route through the snap-free applier: a cold late install (posts already on
+    // screen) slides in smoothly, and this also animates collapse/expand toggles
+    // (which rebuild through here via their signature change).
+    ApolloHLApplyHeaderChange(tableView, carousel, ^{
+        objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        tableView.tableHeaderView = newWrapper;
+        objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
 
     ApolloLog(@"[Highlights] installed carousel r/%@ items=%lu width=%.0f", subreddit, (unsigned long)items.count, width);
 }
@@ -1550,11 +1837,33 @@ static NSMutableDictionary<NSString *, ApolloHLWebFetch *> *ApolloHLWebFetchers(
     static NSMutableDictionary *d; static dispatch_once_t o; dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; }); return d;
 }
 
+// Challenge-blocked subs are NOT marked web-done: the interstitial is served
+// per-request, so a later attempt often sails through. Bounded so a sub the
+// challenge keeps blocking doesn't re-run an 18s WebView on every layout pass:
+// at most kApolloHLWebChallengeMaxStrikes attempts per session, spaced at least
+// kApolloHLWebChallengeRetrySpacing apart. Any successful extraction clears all
+// strikes (the cookie jar has demonstrably passed Reddit's checks), and a
+// pull-to-refresh resets the blocked sub explicitly.
+static int const kApolloHLWebChallengeMaxStrikes = 3;
+static NSTimeInterval const kApolloHLWebChallengeRetrySpacing = 90.0;
+static NSMutableDictionary<NSString *, NSNumber *> *ApolloHLWebChallengeStrikes(void) {
+    static NSMutableDictionary *d; static dispatch_once_t o; dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; }); return d;
+}
+static NSMutableDictionary<NSString *, NSDate *> *ApolloHLWebChallengeLastTry(void) {
+    static NSMutableDictionary *d; static dispatch_once_t o; dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; }); return d;
+}
+static void ApolloHLWebChallengeReset(NSString *sub) {
+    if (sub.length == 0) return;
+    [ApolloHLWebChallengeStrikes() removeObjectForKey:sub];
+    [ApolloHLWebChallengeLastTry() removeObjectForKey:sub];
+}
+
 // Rebuild the carousel(s) for `sub` with a new (fuller) item set — used when the
 // WebView upgrade lands. Handles both placement modes.
 static void ApolloHLApplyItems(NSString *sub, NSArray<ApolloHLItem *> *items) {
     if (sub.length == 0 || items.count == 0) return;
     ApolloHLCache()[sub] = items;
+    ApolloHLPersistSub(sub); // persist the displayed (possibly web-upgraded) set (#909)
     ApolloHLForEachPostsVC(^(UIViewController *postsVC) {
         if (ApolloHLShouldSkipViewController(postsVC)) return;
         if (![ApolloHLSubredditName(postsVC) isEqualToString:sub]) return;
@@ -1565,13 +1874,18 @@ static void ApolloHLApplyItems(NSString *sub, NSArray<ApolloHLItem *> *items) {
             ApolloHLHeaderContainerView *c = objc_getAssociatedObject(postsVC, kApolloHLContainerKey);
             if (![c isMemberOfClass:[ApolloHLHeaderContainerView class]]) return;
             CGFloat w = c.bounds.size.width > 0 ? c.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
-            [c installCarousel:ApolloHLBuildCarousel(sub, items, w)];
+            UIView *newCarousel = ApolloHLBuildCarousel(sub, items, w);
             UIView *wrapper = c.superview;
             UITableView *tv = ApolloHLFindTableView(postsVC);
-            if (wrapper && tv && tv.tableHeaderView == wrapper) {
-                CGRect wf = wrapper.frame; wf.size.height = CGRectGetMaxY(c.frame); wrapper.frame = wf;
-                [tv setTableHeaderView:wrapper];
-            }
+            // Same snap-free growth as the cold-fetch path: rebuilds that change
+            // height (collapse toggle, first web upgrade) slide instead of snap.
+            ApolloHLApplyHeaderChange(tv, newCarousel, ^{
+                [c installCarousel:newCarousel];
+                if (wrapper && tv && tv.tableHeaderView == wrapper) {
+                    CGRect wf = wrapper.frame; wf.size.height = CGRectGetMaxY(c.frame); wrapper.frame = wf;
+                    [tv setTableHeaderView:wrapper];
+                }
+            });
         }
     });
 }
@@ -1659,6 +1973,9 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
     if (!sCommunityHighlights || !sCommunityHighlightsWeb) return;
     NSString *sub = subreddit.lowercaseString;
     if (sub.length == 0 || [ApolloHLWebDone() containsObject:sub] || ApolloHLWebFetchers()[sub]) return;
+    if ([ApolloHLWebChallengeStrikes()[sub] intValue] >= kApolloHLWebChallengeMaxStrikes) return;
+    NSDate *lastTry = ApolloHLWebChallengeLastTry()[sub];
+    if (lastTry && -lastTry.timeIntervalSinceNow < kApolloHLWebChallengeRetrySpacing) return;
     ApolloHLWebFetch *fetch = [[ApolloHLWebFetch alloc] init];
     ApolloHLWebFetchers()[sub] = fetch;
     [fetch startForSub:sub completion:^(NSArray<ApolloHLItem *> *items) {
@@ -1666,9 +1983,20 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
         // The user may have changed Full to Partial/Off while WebKit was still
         // rendering. Never let that stale completion restore the full set.
         if (!sCommunityHighlights || !sCommunityHighlightsWeb) return;
+        if (items.count == 0 && fetch.sawChallenge) {
+            // Blocked, not empty — leave the sub eligible for a bounded retry.
+            int strikes = [ApolloHLWebChallengeStrikes()[sub] intValue] + 1;
+            ApolloHLWebChallengeStrikes()[sub] = @(strikes);
+            ApolloHLWebChallengeLastTry()[sub] = [NSDate date];
+            return;
+        }
         [ApolloHLWebDone() addObject:sub];
         NSArray<ApolloHLItem *> *apiItems = ApolloHLRestCache()[sub] ?: ApolloHLCache()[sub];
         if (items.count == 0) return; // web found nothing
+        // A successful extraction proves this cookie jar passes Reddit's checks —
+        // let every challenge-blocked sub retry on its next layout pass.
+        [ApolloHLWebChallengeStrikes() removeAllObjects];
+        [ApolloHLWebChallengeLastTry() removeAllObjects];
 
         // The DOM already has the authoritative order, titles, and links. Merge
         // whatever metadata the fast REST result already knows, then show the full
@@ -1737,6 +2065,14 @@ static void ApolloHLRefreshSub(NSString *subreddit, BOOL alwaysWeb) {
                 }
             });
             ApolloHLClearDeDup(subreddit);
+            // Negative-cache the now-empty sub. The force fetch deliberately never
+            // touches the display cache, so without this the stale non-empty entry
+            // survives the teardown and the very next ApolloHLInstall layout pass
+            // resurrects the ghost carousel from it. Persisting afterwards drops
+            // the disk snapshot too, so the next launch doesn't resurrect it either.
+            ApolloHLCache()[key] = @[];
+            ApolloHLRestCache()[key] = @[];
+            ApolloHLPersistSub(key);
             return;
         }
 
@@ -1748,6 +2084,7 @@ static void ApolloHLRefreshSub(NSString *subreddit, BOOL alwaysWeb) {
             // Re-harvest the full web set; it re-applies if it differs from what's shown.
             [ApolloHLWebDone() removeObject:key];
             [ApolloHLWebFetchers() removeObjectForKey:key];
+            ApolloHLWebChallengeReset(key); // explicit refresh overrides the challenge backoff
             ApolloHLMaybeWebUpgrade(subreddit);
         }
     });
@@ -1787,10 +2124,18 @@ static void ApolloHLApplyStickyCountToTable(UIViewController *vc, NSString *subr
     // only for the common 2-sticky feed. When N differs (a single sticky that lost its
     // breaker, or 3+ that kept an orphan), the already-measured separators are wrong and
     // Texture won't re-measure them via relayoutItems alone (it reuses the cached size),
-    // so reload to re-run the exact rule. N==2 needs nothing — the fallback already matched,
-    // so the common case never reloads (no flash).
-    if (stickyN.integerValue != 2 && [tableNode respondsToSelector:@selector(reloadData)]) {
-        ApolloLog(@"[Highlights] r/%@ sticky count N=%@ → reload to fix breaker", subreddit, stickyN);
+    // so reload to re-run the exact rule. On the FIRST publish (prev nil) N==2 needs
+    // nothing — the fallback already matched, so the common case never reloads (no
+    // flash). But when a previously-published N CHANGES (a stale disk-seeded count, or
+    // a mod pinning/unpinning while the feed is up), the separators measured under the
+    // OLD rule and must re-measure even when the new N is 2 — otherwise a doubled (or
+    // missing) breaker sticks until the reactive fallback pass happens to catch it.
+    // Equality already early-returned above, so a non-nil prev means N genuinely
+    // changed → always reload. First publish: only when N differs from the
+    // fallback's assumed 2.
+    BOOL needsReload = (prev != nil) || stickyN.integerValue != 2;
+    if (needsReload && [tableNode respondsToSelector:@selector(reloadData)]) {
+        ApolloLog(@"[Highlights] r/%@ sticky count N=%@ (was %@) → reload to fix breaker", subreddit, stickyN, prev ?: @"unknown");
         ((void (*)(id, SEL))objc_msgSend)(tableNode, @selector(reloadData));
     }
 }
@@ -1813,6 +2158,12 @@ static void ApolloHLInstall(UIViewController *vc) {
 
     UITableView *tableView = ApolloHLFindTableView(vc);
     if (!tableView) return;
+
+    // First consult of this sub this session: seed the caches from the persisted
+    // snapshot so the carousel below installs synchronously, before Apollo's posts
+    // have rendered — no layout snap (#909). The seeded fetch date is old, so the
+    // freshness check right after immediately revalidates in the background.
+    ApolloHLSeedFromDisk(subreddit);
 
     // Tell this feed's separators how many leading stickies will collapse, so the
     // breaker (the LAST orphan separator) is kept race-free. The count is known
@@ -1932,9 +2283,7 @@ static BOOL ApolloHLShouldHideCell(id cellNode) {
     RDKLinkLite *link = (RDKLinkLite *)ApolloHLTypedIvar(cellNode, @"link", objc_getClass("RDKLink"));
     if (!link || ![link respondsToSelector:@selector(stickied)] || !link.stickied) return NO;
     NSString *sub = link.subreddit.lowercaseString;
-    if (sub.length == 0 || !ApolloHLHideSubsContains(sub)) return NO;
-    ApolloHLDidCollapseAdd(sub);
-    return YES;
+    return ApolloHLHideAndMarkCollapsed(sub);
 }
 
 // Zero-size layout spec used to collapse a hidden cell.
@@ -2300,6 +2649,11 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
 #pragma mark - Constructor
 
 %ctor {
+    // Compile the scrape ad/media blocker now so the first Full-highlights scrape
+    // of a launch — which can start within a couple of seconds — is already
+    // covered rather than racing the compile.
+    ApolloScrapeWebViewPrewarmBlocker();
+
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloCommunityHighlightsToggleChangedNotification"
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
@@ -2318,10 +2672,12 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
             [ApolloHLWebFetchers() removeAllObjects];
             for (ApolloHLWebFetch *fetch in fetches) [fetch cancel];
             [ApolloHLWebDone() removeAllObjects];
+            [ApolloHLWebChallengeStrikes() removeAllObjects];
+            [ApolloHLWebChallengeLastTry() removeAllObjects];
         } else {
             // Full selected after Partial: allow each visible subreddit to run a
             // fresh web upgrade even if it completed earlier in this app session.
-            for (NSString *sub in visibleSubs) [ApolloHLWebDone() removeObject:sub];
+            for (NSString *sub in visibleSubs) { [ApolloHLWebDone() removeObject:sub]; ApolloHLWebChallengeReset(sub); }
         }
 
         if (sCommunityHighlights && !sCommunityHighlightsWeb) {

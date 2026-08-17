@@ -451,6 +451,7 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
         ? [NSString stringWithFormat:@"#%@", [sLinkPreviewCardColorHex uppercaseString]]
         : @"Default";
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 

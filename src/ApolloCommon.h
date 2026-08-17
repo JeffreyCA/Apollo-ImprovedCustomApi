@@ -63,6 +63,26 @@ NSURLSessionDataTask *ApolloStartBoundedDataRequest(
     ApolloBoundedDataCompletion completion);
 
 BOOL IsLiquidGlass(void);
+
+// --- Liquid Glass trailing-cluster reservation ---
+// Some screens temporarily strip their right bar buttons while staying on the
+// SAME navigation item (the Inbox strips them whenever its in-place Chat hub
+// covers Notifications). The Liquid Glass title recenter in
+// ApolloLiquidGlass.xm would then re-balance the title against an empty
+// trailing side, visibly sliding it — in gap-centering mode because the gap
+// midpoint moves, and in screen-centering mode because the overlap clamp
+// relaxes. While a "hold" is set on the navigation item, the recenter keeps
+// using the trailing content edge it last measured for that item (stored as an
+// inset from the bar's trailing edge, so rotation keeps working), making the
+// title position identical whether the buttons are up or stripped. The
+// recenter itself records the live inset via
+// ApolloNavItemNoteTrailingContentInset on every pass that sees real trailing
+// content; holders only toggle the hold. All four are no-ops off-glass (the
+// recenter never runs there and nothing else reads the values).
+void ApolloNavItemSetTrailingReservationHold(UINavigationItem *item, BOOL hold);
+BOOL ApolloNavItemTrailingReservationHold(UINavigationItem *item);
+void ApolloNavItemNoteTrailingContentInset(UINavigationItem *item, CGFloat inset);
+CGFloat ApolloNavItemTrailingContentInset(UINavigationItem *item);   // 0 = never captured
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url);
 BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL);
 void ApolloFlushReadPostIDsToDefaults(void);
@@ -127,6 +147,9 @@ NSArray<UIWindow *> *ApolloAllWindows(void);
 // Re-centers every live nav bar title after the LG title-centering mode toggle
 // changes (defined in ApolloLiquidGlass.xm; no-op off Liquid Glass).
 void ApolloLGTitleCenteringModeChanged(void);
+// Keeps the Liquid Glass title capsule in sync with a custom title view's
+// independently-faded content (defined in ApolloLiquidGlass.xm; no-op off LG).
+void ApolloNavigationTitleGlassSetContentAlpha(UIView *contentView, CGFloat alpha);
 
 // Apollo's main ApolloTabBarController, found via the scene/app delegate's
 // tabBarController ivar or by walking window root VCs. Returns nil while the
@@ -177,20 +200,6 @@ uint32_t ApolloPackedColorFromHexString(NSString *hex);
 // main-thread NSString used by UI/persistence) and the render-safe packed
 // snapshot for the renderer. Call on the main thread.
 void ApolloSetLinkPreviewCardColorHex(NSString *hex);
-
-// Issue #515 (ApolloPublicStickyAsSubreddit): when `menuTitle` is the removal
-// "Notify user via…" menu, append a "Public Sticky from Subreddit" UIAction to
-// `children` (an NSMutableArray<UIMenuElement *>). No-op for any other menu.
-// Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
-void ApolloInjectPublicStickyAsSubredditIfNeeded(NSMutableArray *children, NSString *menuTitle);
-
-// ApolloDeletedCommentsMenu: when the comments view's "..." menu is being
-// built, append a "Show/Hide Deleted Comments" UIAction to `children`
-// (an NSMutableArray<UIMenuElement *>). No-op for any other menu. Called from
-// ApolloNativeActionMenuBuildMenu as it converts the action sheet; the
-// ActionController is tagged on first build so re-builds re-inject and other
-// menus can't claim the item.
-void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
 
 // Whether the experimental native Polls feature (voting + creation) is enabled.
 // Off by default; toggled from Settings → Polls (UDKeyPollsEnabled). All poll
@@ -248,13 +257,6 @@ BOOL ApolloTabBarVisualProviderBoolIvar(UITabBar *tabBar, const char *name, BOOL
 // also write to the diag log.
 NSString *ApolloDebugAccountKeychainReport(void);
 NSString *ApolloDebugPoisonAccountAccessibility(void);
-
-// ApolloGalleryMenu: when the subreddit "..." menu is being built, insert an
-// inline "Gallery View" section into `children` (an NSMutableArray<UIMenuElement *>),
-// just below the leading "submit a post" affordance.
-// No-op for any other menu, and for feeds that aren't a single subreddit.
-// Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
-void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
 
 // Marks a tweak-created text node/label as our own UI chrome (AI summary pill,
 // injected affordances, ...). Content pipelines that scan the view/node tree

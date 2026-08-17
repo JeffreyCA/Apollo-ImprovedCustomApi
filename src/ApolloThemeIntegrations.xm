@@ -77,7 +77,13 @@ static NSString *ListCellOwner(UITableViewCell *cell) {
     NSString *owner = NSStringFromClass(cls);
     BOOL inScope = [owner containsString:@"ViewController"]
         && ([owner containsString:@"Settings"] || [owner containsString:@"Search"]
-            || [owner containsString:@"Friends"] || [owner containsString:@"Inbox"]);
+            || [owner containsString:@"Friends"] || [owner containsString:@"Inbox"])
+        // The rebuilt icon picker presents Apollo Originals, Community,
+        // Ultra, and Sekrit as one visual family. Its three wrapper screens
+        // retain Apollo's native cell press treatment, so do the same for the
+        // remaining native Community controller instead of repainting only
+        // that pack with the custom theme's full-row Selection token.
+        && ![owner containsString:@"SettingsCommunityIconPackViewController"];
     objc_setAssociatedObject(cls, &kListCellOwnerVerdictKey, inScope ? owner : @"", OBJC_ASSOCIATION_RETAIN);
     return inScope ? owner : nil;
 }

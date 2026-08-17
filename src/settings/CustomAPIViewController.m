@@ -14,6 +14,7 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
+#import "ApolloTagFilters.h"
 #import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
@@ -669,6 +670,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         cell.textLabel.text = title;
         cell.textLabel.numberOfLines = 0;
         cell.detailTextLabel.text = subtitle ? subtitle() : nil;
+        [weakSelf apollo_applyPrimaryTextColorToCell:cell];
         return cell;
     }
                                      onSelect:^{
@@ -1010,6 +1012,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 [check sizeToFit];
                 cell.accessoryView = check;
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                [weakSelf apollo_applyPrimaryTextColorToCell:cell];
                 return cell;
             }
             cell.textLabel.text = @"Set Up reddit.com Web Sign-In";
@@ -1031,6 +1034,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             }
             cell.textLabel.text = @"Can't sign in?";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushTroubleshootingViewController]; }];
@@ -1045,6 +1049,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.textLabel.numberOfLines = 0;
             }
             cell.textLabel.text = @"Giphy & Image Chest API Key Setup";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushInstructionsViewController]; }];
@@ -1146,6 +1151,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
                 cell.detailTextLabel.text = @"Not signed in — tap to add a web-session account";
             }
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -1239,6 +1245,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             }
             cell.textLabel.text = @"Deleted Comments";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openDeletedCommentsSettings]; }];
@@ -1343,15 +1350,37 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf blockAnnouncementsSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *devvitPosts =
+        [ApolloSettingsRow switchRowWithID:@"gen.devvitPosts"
+                                     title:@"Live Match Threads & Games"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf devvitPostsSwitchToggled:sender]; }];
+
+    // Feed cards are the surface where the widget's cost multiplies — its own
+    // escape hatch, without losing the widget in comments. Sits directly
+    // under the master row, so the short title reads in context.
+    ApolloSettingsRow *devvitFeedPosts =
+        [ApolloSettingsRow switchRowWithID:@"gen.devvitFeedPosts"
+                                     title:@"Show in Feed"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf devvitFeedPostsSwitchToggled:sender]; }];
+    devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
+
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list."
-                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements ]];
+                                            footer:@"Small tweaks for the post list. Live Match Threads & Games shows the real live widget for Reddit's interactive posts — match scores, predictions, brackets, and community games — instead of a placeholder. Always shown in comments; Show in Feed also puts it on large-mode feed cards."
+                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
 // Liquid Glass chrome behaviors.
 - (ApolloSettingsSection *)buildInterfaceSection {
     __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *iconOnlyTabBar =
+        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
+                                     title:@"Icon-Only Tab Bar"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
 
     ApolloSettingsRow *tabBarIdle =
         [ApolloSettingsRow customRowWithID:@"gen.tabBarIdle"
@@ -1427,8 +1456,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
+                                            footer:@"Customize tab-bar labels and Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
+                                              rows:@[ iconOnlyTabBar, tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -1511,6 +1540,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openApolloAISettings]; }];
@@ -1552,6 +1582,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openInlineMediaSettings]; }];
@@ -1594,6 +1625,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openLinkPreviewSettings]; }];
@@ -1618,6 +1650,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openPollSettings]; }];
@@ -1648,6 +1681,13 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                       isOn:^BOOL { return sFeedGalleryCarousel; }
                                   onToggle:^(UISwitch *sender) { [weakSelf feedGalleryCarouselSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *edgeSwipeNav =
+        [ApolloSettingsRow switchRowWithID:@"media.feedGalleryEdgeSwipeNav"
+                                     title:@"Swipe Past Gallery to Navigate"
+                                      isOn:^BOOL { return sFeedGalleryEdgeSwipeNav; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedGalleryEdgeSwipeNavSwitchToggled:sender]; }];
+    edgeSwipeNav.visible = ^BOOL { return sFeedGalleryCarousel; };
+
     ApolloSettingsRow *swipeComments =
         [ApolloSettingsRow switchRowWithID:@"media.swipeUpComments"
                                      title:@"Swipe Up for Comments"
@@ -1655,8 +1695,39 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                   onToggle:^(UISwitch *sender) { [weakSelf swipeUpCommentsSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Browsing"
-                                            footer:@"Swipe through Reddit image galleries without leaving the feed. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
-                                              rows:@[ feedGalleries, swipeComments ]];
+                                            footer:@"Swipe through Reddit image galleries without leaving the feed. With Swipe Past Gallery to Navigate, continuing to swipe at a gallery's first or last image goes back or forward to the previous page instead of bouncing. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
+                                              rows:@[ feedGalleries, edgeSwipeNav, swipeComments ]];
+}
+
+// NSFW Media. Lives here rather than in Apollo's native Filters & Blocks screen:
+// these are tweak settings, and tweak settings belong on the tweak's own screens
+// (Apollo's tables are only ever modified through the ApolloSettingsGeneralTable
+// registry).
+- (ApolloSettingsSection *)buildMediaNSFWSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *blur =
+        [ApolloSettingsRow valueRowWithID:@"media.nsfwBlurOverride"
+                                    title:@"Blur NSFW Media"
+                                   detail:^NSString * { return ApolloNSFWBlurOverrideTitle(sNSFWBlurOverride); }
+                                 onSelect:^{ [weakSelf nsfwBlurOverrideRowSelected]; }];
+
+    return [ApolloSettingsSection sectionWithTitle:@"NSFW Media"
+                                            footer:@"\"Reddit Setting\" follows your account's \"Blur mature (18+) images and media\" preference; Always and Never override it on this device only."
+                                              rows:@[ blur ]];
+}
+
+- (void)nsfwBlurOverrideRowSelected {
+    ApolloSettingsPresentPicker(self, nil, @"Blur NSFW Media",
+                                @[ ApolloNSFWBlurOverrideTitle(0),
+                                   ApolloNSFWBlurOverrideTitle(1),
+                                   ApolloNSFWBlurOverrideTitle(2) ],
+                                sNSFWBlurOverride,
+                                ^(NSInteger picked) {
+        sNSFWBlurOverride = picked;
+        [[NSUserDefaults standardUserDefaults] setInteger:picked forKey:UDKeyNSFWBlurOverride];
+        ApolloTagFiltersNSFWBlurOverrideChanged();
+    });
 }
 
 - (ApolloSettingsSection *)buildMediaPlaybackSection {
@@ -1820,12 +1891,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
-    ApolloSettingsRow *iconOnlyTabBar =
-        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
-                                     title:@"Icon-Only Tab Bar"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
-
     // Mirror of Apollo's native "Hide Username on Tab Bar" switch (relocated
     // here from General → Other, which now hides it — see
     // ApolloSettingsNativeInjections.xm). Same key, and the native change
@@ -1844,8 +1909,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name."
-                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, profileLayout ]];
+                                            footer:@"Customize profile pictures and profile pages. Hide Username on Tab Bar hides only your profile-tab label; Interface → Icon-Only Tab Bar hides every tab label."
+                                              rows:@[ userAvatars, profileTabAvatar, hideUsernameTab, profileLayout ]];
 }
 
 - (NSString *)profileLayoutSummaryText {
@@ -2201,6 +2266,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"🙏", [UIColor systemIndigoColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushThanksToViewController]; }];
@@ -2222,6 +2288,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F4A1", [UIColor systemYellowColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2242,6 +2309,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F41B", [UIColor systemRedColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2260,6 +2328,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F512", [UIColor systemGreenColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2326,6 +2395,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     textField.text = text;
     textField.accessibilityLabel = label;   // VoiceOver: tie the field to its caption
     cell.textLabel.text = label;
+    [self apollo_applyPrimaryTextColorToCell:cell];
 
     return cell;
 }
@@ -2594,6 +2664,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    [self apollo_applyPrimaryTextColorToCell:cell];
     if (b64Image.length > 0) {
         cell.imageView.image = [self roundedImage:[self decodeBase64ToImage:b64Image] size:29 cornerRadius:6.5];
     } else if (!cell.imageView.image) {
@@ -3451,11 +3522,29 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sFeedGalleryCarousel = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sFeedGalleryCarousel forKey:UDKeyFeedGalleryCarousel];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedGalleryCarouselChangedNotification object:nil];
+    // The edge-swipe navigation row is only shown while the carousel is on.
+    [self visibilityDidChange];
+}
+
+- (void)feedGalleryEdgeSwipeNavSwitchToggled:(UISwitch *)sender {
+    sFeedGalleryEdgeSwipeNav = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFeedGalleryEdgeSwipeNav forKey:UDKeyFeedGalleryEdgeSwipeNav];
 }
 
 - (void)swipeUpCommentsSwitchToggled:(UISwitch *)sender {
     sSwipeUpForComments = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sSwipeUpForComments forKey:UDKeySwipeUpForComments];
+}
+
+- (void)devvitPostsSwitchToggled:(UISwitch *)sender {
+    sDevvitInteractivePosts = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sDevvitInteractivePosts forKey:UDKeyDevvitInteractivePosts];
+    [self visibilityDidChange];  // drives the "Interactive Posts in Feed" sub-row
+}
+
+- (void)devvitFeedPostsSwitchToggled:(UISwitch *)sender {
+    sDevvitFeedWidgets = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sDevvitFeedWidgets forKey:UDKeyDevvitFeedWidgets];
 }
 
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
@@ -3488,10 +3577,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 - (void)iconOnlyTabBarSwitchToggled:(UISwitch *)sender {
     // Enabling also clears the native Hide Username key (see
-    // ApolloSetHideTabBarTitlesEnabled), so the sibling row below must re-read
-    // its switch state and enablement either way.
+    // ApolloSetHideTabBarTitlesEnabled). The profile-specific row re-reads
+    // that state whenever its screen appears.
     ApolloSetHideTabBarTitlesEnabled(sender.isOn);
-    [self reloadRowWithID:@"profiles.hideUsernameTab"];
 }
 
 - (void)hideUsernameTabSwitchToggled:(UISwitch *)sender {
@@ -3729,14 +3817,13 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 @implementation ApolloMediaSettingsViewController
 - (NSString *)apollo_screenTitle { return @"Media"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
-    return @[
-        [self buildMediaBrowsingSection],
-        [self buildMediaPlaybackSection],
-        [self buildMediaInlineSection],
-        [self buildMediaSharingSection],
-        [self buildMediaUploadsSection],
-        [self buildMediaNetworkSection],
-    ];
+    return @[ [self buildMediaBrowsingSection],
+              [self buildMediaNSFWSection],
+              [self buildMediaPlaybackSection],
+              [self buildMediaInlineSection],
+              [self buildMediaSharingSection],
+              [self buildMediaUploadsSection],
+              [self buildMediaNetworkSection] ];
 }
 @end
 

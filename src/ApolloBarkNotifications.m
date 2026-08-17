@@ -1,4 +1,5 @@
 #import "ApolloBarkNotifications.h"
+#import "ApolloLiquidGlassIconIDs.h"
 #import "ApolloCommon.h"
 #import "ApolloNotificationBackend.h"
 #import "ApolloPushNotifications.h"
@@ -139,6 +140,19 @@ NSString *ApolloBarkNotificationIconURLString(void) {
 }
 
 BOOL ApolloBarkNoteSelectedIconName(NSString *name) {
+    // Static Liquid Glass appearance choices are separate alternate-icon
+    // assets, but Bark hosts one notification PNG per underlying design.
+    // Normalize those internal asset suffixes before persisting the URL key.
+    for (NSString *suffix in @[@"__apollo_light", @"__apollo_dark"]) {
+        if ([name hasSuffix:suffix]) {
+            name = [name substringToIndex:name.length - suffix.length];
+            break;
+        }
+    }
+    // Classics use an LG- prefix in the app catalog, while Bark's hosted PNGs
+    // keep their established filenames. Translate only those renamed IDs.
+    NSString *legacyName = ApolloLGLegacyClassicsIconID(name);
+    if (legacyName) name = legacyName;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *stored = [defaults stringForKey:UDKeyBarkSelectedIconName];
     if (name.length == 0) {

@@ -429,6 +429,7 @@ static UIView *ApolloAIModelAccessory(NSString *badge, BOOL selected, UIColor *f
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.accessoryView = ApolloAIModelAccessory(badge,
         [modelID isEqualToString:self.currentModel], tableView.tintColor);
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 

@@ -3,6 +3,17 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
+// Private cross-module classification ABI shared with ApolloDeletedCommentsUI.
+// Keep it implementation-local so the synchronization optimization does not
+// expand the public deleted-comments header surface.
+typedef NS_OPTIONS(NSUInteger, ApolloDeletedCommentClassification) {
+    ApolloDeletedCommentClassificationNone = 0,
+    ApolloDeletedCommentClassificationRecovered = 1 << 0,
+    ApolloDeletedCommentClassificationPlaceholder = 1 << 1,
+    ApolloDeletedCommentClassificationUnrecoverable = 1 << 2,
+    ApolloDeletedCommentClassificationRevealed = 1 << 3,
+};
+
 #ifdef APOLLO_DELETED_COMMENTS_TESTING
 #define ApolloLog(fmt, ...) NSLog((fmt), ##__VA_ARGS__)
 BOOL sShowDeletedComments = YES;
@@ -26,6 +37,7 @@ static NSMutableSet<NSString *> *sApolloDeletedCommentsRecoveredBodyKeys = nil;
 static NSMutableDictionary<NSString *, NSString *> *sApolloDeletedCommentsRecoveredReasonsByBodyKey = nil;
 static NSMutableSet<NSString *> *sApolloDeletedCommentsRevealedFullNames = nil;
 static NSMutableSet<NSString *> *sApolloDeletedCommentsRevealedBodyKeys = nil;
+static NSMutableSet<NSString *> *sApolloDeletedCommentsUnrecoverableFullNames = nil;
 static NSObject *sApolloDeletedCommentsRegistryLock = nil;
 static NSObject *sApolloDeletedCommentsArcticLock = nil;
 static NSMutableDictionary<NSString *, NSDictionary *> *sApolloDeletedCommentsArcticCache = nil;
@@ -128,6 +140,34 @@ BOOL ApolloDeletedCommentsActiveForLink(NSString *linkFullName) {
     return ApolloDeletedCommentsHasThreadOverride(linkFullName);
 }
 
+ApolloDeletedCommentClassification ApolloDeletedCommentsClassificationForFullName(
+    NSString *fullName,
+    NSString **recoveredReason,
+    NSString **placeholderReason) {
+    if (recoveredReason) *recoveredReason = nil;
+    if (placeholderReason) *placeholderReason = nil;
+    if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) {
+        return ApolloDeletedCommentClassificationNone;
+    }
+
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        NSString *recovered = sApolloDeletedCommentsRecoveredReasonsByFullName[fullName];
+        NSString *placeholder = sApolloDeletedCommentsPlaceholderReasonsByFullName[fullName];
+        ApolloDeletedCommentClassification classification = ApolloDeletedCommentClassificationNone;
+        if (recovered) classification |= ApolloDeletedCommentClassificationRecovered;
+        if (placeholder) classification |= ApolloDeletedCommentClassificationPlaceholder;
+        if ([sApolloDeletedCommentsUnrecoverableFullNames containsObject:fullName]) {
+            classification |= ApolloDeletedCommentClassificationUnrecoverable;
+        }
+        if ([sApolloDeletedCommentsRevealedFullNames containsObject:fullName]) {
+            classification |= ApolloDeletedCommentClassificationRevealed;
+        }
+        if (recoveredReason) *recoveredReason = recovered;
+        if (placeholderReason) *placeholderReason = placeholder;
+        return classification;
+    }
+}
+
 void ApolloDeletedCommentsRegisterRecoveredComment(NSString *fullName, NSString *reason) {
     if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return;
     @synchronized(ApolloDeletedCommentsRegistryLock()) {
@@ -174,7 +214,6 @@ NSString *ApolloDeletedCommentsDeletedPlaceholderReason(NSString *fullName) {
 // ApolloDeletedCommentsFetchArcticComments). Marks are session-lifetime and
 // self-heal: a later genuine fetch that DOES find the comment clears the mark
 // in ApolloDeletedCommentsStoreArchivedCommentsByFullName.
-static NSMutableSet<NSString *> *sApolloDeletedCommentsUnrecoverableFullNames = nil;
 // linkFullName -> { commentFullName: @(created_utc) } for every placeholder the
 // mark walk saw in that link's responses — lets a LATE genuine answer diff
 // "placeholders we showed" against "comments the archive has".
@@ -1730,13 +1769,20 @@ ApolloDeletedCommentsURLSessionCompletion ApolloDeletedCommentsMaybeWrapCompleti
 
 #pragma mark - DelegateResponseTransformer
 
+static NSObject *ApolloDeletedCommentsDelegateTransformerLock(void) {
+    static NSObject *lock = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
 static void ApolloDeletedCommentsInstallResponseTransformerForDelegate(id delegate) {
     if (!delegate) return;
     Class cls = object_getClass(delegate);
     if (!cls) return;
     NSString *classKey = NSStringFromClass(cls);
 
-    @synchronized ([NSURLSession class]) {
+    @synchronized (ApolloDeletedCommentsDelegateTransformerLock()) {
         if (!sApolloDeletedCommentsDelegateTransformerInstalledClasses) sApolloDeletedCommentsDelegateTransformerInstalledClasses = [NSMutableSet set];
         if ([sApolloDeletedCommentsDelegateTransformerInstalledClasses containsObject:classKey]) return;
         [sApolloDeletedCommentsDelegateTransformerInstalledClasses addObject:classKey];

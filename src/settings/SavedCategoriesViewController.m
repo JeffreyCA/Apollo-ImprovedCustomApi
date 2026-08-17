@@ -59,7 +59,7 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
     cell.textLabel.text = _categoryNames[indexPath.row];
-    cell.textLabel.textColor = [UIColor labelColor];
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 

@@ -818,10 +818,37 @@ static UIView *ApolloFindJumpBar(UIView *root) {
     return nil;
 }
 
+// JumpBar is a Swift class (_TtC6Apollo7JumpBar), so its ivars are NOT all plain
+// strong ObjC object pointers: a `weak var` stores a side-table pointer and a
+// non-class-typed property stores inline value bits. `object_getIvar` is declared
+// to return `id`, so ARC retains whatever it finds — retaining those bits is an
+// immediate EXC_BAD_ACCESS at a nonsense address (issue #893: iPad launch,
+// fault address 0x103ba258720, straight out of objc_retain).
+//
+// Read the slot as raw memory instead, and only hand it back as an object once
+// it looks like one: strong-object type encoding, pointer-aligned, and a class
+// pointer the runtime actually recognizes. Anything else reads as "absent",
+// which is exactly how the callers already treat a nil ivar.
 static id ApolloJumpBarObjectIvar(UIView *jumpBar, const char *name) {
     if (!jumpBar || !name) return nil;
     Ivar ivar = class_getInstanceVariable(jumpBar.class, name);
-    return ivar ? object_getIvar(jumpBar, ivar) : nil;
+    if (!ivar) return nil;
+
+    // Swift weak/unowned and value-typed ivars do not carry a plain '@' encoding.
+    const char *encoding = ivar_getTypeEncoding(ivar);
+    if (!encoding || encoding[0] != '@' || encoding[1] == '?') return nil;
+
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    if (offset <= 0) return nil;
+    void *slot = (__bridge void *)jumpBar;
+    uintptr_t raw = *(uintptr_t *)((uint8_t *)slot + offset);
+    if (raw == 0 || (raw & (sizeof(void *) - 1)) != 0) return nil;
+
+    // Past the encoding gate the slot is a plain strong object pointer, so it is
+    // either nil (handled above) or a live object — no further probing needed.
+    // Deliberately no isa validation here: dereferencing a candidate to check it
+    // is the very thing that would fault if we were wrong.
+    return (__bridge __unsafe_unretained id)(void *)raw;
 }
 
 // Whether the JumpBar is in "type a subreddit name" mode. Apollo swaps the name
@@ -835,19 +862,40 @@ static BOOL ApolloJumpBarIsSearching(UIView *jumpBar) {
     return !field.hidden && field.alpha > 0.01;
 }
 
+static BOOL ApolloViewIsProfileNavTitleView(UIView *view) {
+    return [NSStringFromClass(view.class) isEqualToString:@"ApolloProfileNavTitleView"];
+}
+
 static void ApolloCollectNavigationTitleContent(UIView *root,
                                                 UIView *excluded,
-                                                NSMutableArray<UIView *> *content) {
+                                                NSMutableArray<UIView *> *content,
+                                                BOOL includeTransparent) {
     for (UIView *subview in root.subviews) {
-        if (subview == excluded || subview.hidden || subview.alpha < 0.01) continue;
+        BOOL childIncludesTransparent = includeTransparent || ApolloViewIsProfileNavTitleView(subview);
+        if (subview == excluded || subview.hidden ||
+            (!childIncludesTransparent && subview.alpha < 0.01)) continue;
 
         if ([subview isKindOfClass:UILabel.class] ||
             [subview isKindOfClass:UIImageView.class] ||
             [subview isKindOfClass:UITextField.class]) {
             [content addObject:subview];
         }
-        ApolloCollectNavigationTitleContent(subview, excluded, content);
+        ApolloCollectNavigationTitleContent(subview, excluded, content,
+                                            childIncludesTransparent);
     }
+}
+
+static UILabel *ApolloProfileNavigationTitleLabel(UIView *root) {
+    if (ApolloViewIsProfileNavTitleView(root)) {
+        for (UIView *subview in root.subviews) {
+            if ([subview isKindOfClass:UILabel.class]) return (UILabel *)subview;
+        }
+    }
+    for (UIView *subview in root.subviews) {
+        UILabel *label = ApolloProfileNavigationTitleLabel(subview);
+        if (label) return label;
+    }
+    return nil;
 }
 
 static BOOL ApolloRecenterTitleControl(UIView *titleControl);
@@ -952,8 +1000,10 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
         if (CGRectIsEmpty(frame)) return CGRectNull;
     } else {
         CGRect contentFrame = CGRectNull;
+        UILabel *profileTitleLabel = ApolloProfileNavigationTitleLabel(self.titleControl);
         for (UIView *view in candidateViews) {
-            if (![view isKindOfClass:UIView.class] || view.hidden || view.alpha < 0.01 ||
+            if (![view isKindOfClass:UIView.class] || view.hidden ||
+                (view != profileTitleLabel && view.alpha < 0.01) ||
                 CGRectIsEmpty(view.bounds)) continue;
             CGRect viewFrame = [view convertRect:view.bounds toView:hostView];
             contentFrame = CGRectIsNull(contentFrame) ? viewFrame : CGRectUnion(contentFrame, viewFrame);
@@ -1005,6 +1055,8 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
         self.glassView = [self newRegularGlassView];
         if (!self.glassView) return;
         self.glassView.frame = targetFrame;
+        UILabel *profileTitleLabel = ApolloProfileNavigationTitleLabel(self.titleControl);
+        self.glassView.alpha = profileTitleLabel ? profileTitleLabel.alpha : 1.0;
         [hostView insertSubview:self.glassView atIndex:0];
         ApolloLog(@"[NavigationTitleGlass] installed %@ capsule frame=%@",
                   NSStringFromClass(hostView.class), NSStringFromCGRect(self.glassView.frame));
@@ -1014,6 +1066,8 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
     if (hostView.subviews.firstObject != self.glassView) {
         [hostView sendSubviewToBack:self.glassView];
     }
+    UILabel *profileTitleLabel = ApolloProfileNavigationTitleLabel(self.titleControl);
+    self.glassView.alpha = profileTitleLabel ? profileTitleLabel.alpha : 1.0;
     if (CGRectEqualToRect(self.glassView.frame, targetFrame)) return;
     // UIKit already animates the containing navigation transition. A second,
     // independently timed frame animation made the capsule visibly trail the
@@ -1095,7 +1149,8 @@ static NSUInteger ApolloJumpBarContentMetric(UIView *jumpBar) {
     } else {
         // Plain titles, profile titles, and Apollo's dual-label title buttons
         // all ultimately expose their visible label/image content here.
-        ApolloCollectNavigationTitleContent(self.titleControl, self.glassView, glassCandidates);
+        ApolloCollectNavigationTitleContent(self.titleControl, self.glassView,
+                                            glassCandidates, NO);
     }
 
     [self updateGlassForHostView:hostView candidateViews:glassCandidates];
@@ -1155,6 +1210,27 @@ static void ApolloUpdateNavigationTitleGlass(UIView *titleControl) {
                                  controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [controller scheduleTargetRefresh];
+}
+
+void ApolloNavigationTitleGlassSetContentAlpha(UIView *contentView, CGFloat alpha) {
+    if (!IsLiquidGlass() || !contentView) return;
+    UIView *titleControl = contentView;
+    while (titleControl &&
+           ![NSStringFromClass(titleControl.class) isEqualToString:@"_UINavigationBarTitleControl"]) {
+        titleControl = titleControl.superview;
+    }
+    if (!titleControl) return;
+
+    ApolloNavigationTitleGlassController *controller =
+        objc_getAssociatedObject(titleControl, &kApolloNavigationTitleGlassControllerKey);
+    if (!controller) {
+        ApolloUpdateNavigationTitleGlass(titleControl);
+    } else if (!controller.glassView) {
+        [controller scheduleTargetRefresh];
+    } else {
+        controller.glassView.alpha = alpha;
+        [controller scheduleTargetRefreshIfNeeded];
+    }
 }
 
 // Returns whether the recenter actually ran to a decision. NO means it bailed
@@ -1258,6 +1334,32 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
 
     const CGFloat kEdgePadding = 8.0;
 
+    UIViewController *topVC = ApolloOwningTopViewController(titleControl);
+
+    // Trailing-cluster reservation (ApolloCommon.h): screens that strip their
+    // right bar buttons in place (Inbox while its Chat hub is up) hold a
+    // reservation on their navigation item so the title doesn't re-balance
+    // against the suddenly-empty trailing side and slide. Record the trailing
+    // content edge whenever one is really there (as an inset from the bar's
+    // trailing edge, so a rotation mid-hold still resolves correctly), and
+    // while the hold is set with no real trailing content, treat the recorded
+    // edge as still present. Both centering arms below then compute the exact
+    // geometry they computed with the buttons up — gap midpoint and overlap
+    // clamp alike — which is what keeps the title still in either
+    // Balance-Title mode.
+    UINavigationItem *navItem = topVC.navigationItem;
+    if (navItem) {
+        if (foundRight) {
+            ApolloNavItemNoteTrailingContentInset(navItem, CGRectGetWidth(bar.bounds) - rightLimit);
+        } else if (ApolloNavItemTrailingReservationHold(navItem)) {
+            CGFloat reservedInset = ApolloNavItemTrailingContentInset(navItem);
+            if (reservedInset > 0) {
+                rightLimit = CGRectGetWidth(bar.bounds) - reservedInset;
+                foundRight = YES;
+            }
+        }
+    }
+
     // Subreddit headers only (see the MARK above): size the JumpBar to its
     // actual content before centering, instead of leaving it at whatever
     // fixed width Apollo's own layout handed it (measured: exactly 156pt when
@@ -1265,7 +1367,6 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     // never content-dependent on its own). Measured fresh via -sizeThatFits:
     // every pass — never cached, never read from a possibly-mid-transition
     // frame — because that's the one thing here that's immune to timing.
-    UIViewController *topVC = ApolloOwningTopViewController(titleControl);
     if (topVC && ApolloSubredditTitleShouldTruncate(topVC)) {
         UIView *jumpBar = ApolloFindJumpBar(titleControl);
         CGFloat availableWidth = (rightLimit - kEdgePadding) - (leftLimit + kEdgePadding);
@@ -1366,8 +1467,17 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
         objc_setAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
+    // Strong capture, deliberately. This used to capture __weak and reload inside
+    // the block, and issue #893 crashed in objc_retain on the reloaded pointer at
+    // ApolloUpdateNavigationTitleGlass's entry — i.e. the weak slot handed back a
+    // dangling _UINavigationBarTitleControl instead of nil on iOS 27. Owning the
+    // view for the one main-queue turn the block takes removes that path entirely
+    // and costs nothing: a nav-bar title control outliving its removal by a single
+    // runloop hop has no observable effect, and the function already no-ops on a
+    // view with no window.
+    UIView *titleControl = (UIView *)self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloUpdateNavigationTitleGlass(self);
+        ApolloUpdateNavigationTitleGlass(titleControl);
     });
 }
 
@@ -1382,8 +1492,9 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     if (controller) {
         [controller scheduleTargetRefreshIfNeeded];
     } else {
+        UIView *titleControl = (UIView *)self;   // strong — see didMoveToWindow (#893)
         dispatch_async(dispatch_get_main_queue(), ^{
-            ApolloUpdateNavigationTitleGlass(self);
+            ApolloUpdateNavigationTitleGlass(titleControl);
         });
     }
 }

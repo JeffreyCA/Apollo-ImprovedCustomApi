@@ -129,6 +129,7 @@ static BOOL ApolloThanksToContributorIsPinned(NSDictionary *contributor) {
         : [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.imageView.image = nil;
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 

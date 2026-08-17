@@ -103,6 +103,7 @@ static NSString *const kBuyCoffeeCellId = @"Cell_BuyCoffee";
     cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     cell.imageView.image = ApolloBuyMeACoffeeSettingsIcon(32.0);
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 

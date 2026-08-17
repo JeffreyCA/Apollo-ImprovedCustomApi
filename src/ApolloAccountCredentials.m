@@ -137,7 +137,9 @@ static BOOL sApolloActiveUsernameCacheValid = NO;
 static uint64_t sApolloActiveUsernameCacheGeneration = 1;
 
 void ApolloInvalidateActiveAccountUsernameCache(void) {
+    NS_VALID_UNTIL_END_OF_SCOPE NSString *retiredUsername = nil;
     os_unfair_lock_lock(&sApolloActiveUsernameCacheLock);
+    retiredUsername = sApolloActiveUsernameCache;
     sApolloActiveUsernameCache = nil;
     sApolloActiveUsernameCacheValid = NO;
     sApolloActiveUsernameCacheGeneration++;
@@ -156,10 +158,13 @@ static BOOL ApolloReadActiveUsernameCache(NSString **outUsername, uint64_t *outG
 }
 
 static BOOL ApolloPublishActiveUsernameCache(NSString *username, uint64_t generation) {
+    NSString *publishedUsername = [username copy];
+    NS_VALID_UNTIL_END_OF_SCOPE NSString *retiredUsername = nil;
     os_unfair_lock_lock(&sApolloActiveUsernameCacheLock);
     BOOL current = generation == sApolloActiveUsernameCacheGeneration;
     if (current) {
-        sApolloActiveUsernameCache = [username copy];
+        retiredUsername = sApolloActiveUsernameCache;
+        sApolloActiveUsernameCache = publishedUsername;
         sApolloActiveUsernameCacheValid = YES; // nil is a valid cached result
     }
     os_unfair_lock_unlock(&sApolloActiveUsernameCacheLock);
@@ -254,9 +259,14 @@ static id ApolloAccountCredsUnarchive(NSData *data) {
 static BOOL ApolloLogIfUsernameResultChanged(NSString *newResult) {
     static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
     static NSString *last = nil;
+    NSString *newCopy = [newResult copy];
+    NS_VALID_UNTIL_END_OF_SCOPE NSString *retiredLast = nil;
     os_unfair_lock_lock(&lock);
     BOOL changed = ![last isEqualToString:newResult];
-    if (changed) last = [newResult copy];
+    if (changed) {
+        retiredLast = last;
+        last = newCopy;
+    }
     os_unfair_lock_unlock(&lock);
     return changed;
 }
@@ -408,8 +418,11 @@ void ApolloNoteInteractiveOAuthSignIn(void) {
     // itself, and they must observe the flag as still disarmed.
     NSMutableSet<NSString *> *preexisting = [ApolloAllPersistedAccountUsernames() mutableCopy];
     [preexisting unionSet:ApolloWebSessionUsernames()];
+    NSSet<NSString *> *preexistingSnapshot = [preexisting copy];
+    NS_VALID_UNTIL_END_OF_SCOPE NSSet<NSString *> *retiredPreexisting = nil;
     os_unfair_lock_lock(&sOAuthSignInLock);
-    sOAuthSignInPreexisting = [preexisting copy];
+    retiredPreexisting = sOAuthSignInPreexisting;
+    sOAuthSignInPreexisting = preexistingSnapshot;
     sOAuthSignInArmedAt = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_unlock(&sOAuthSignInLock);
     ApolloLog(@"[AccountCredentials] Interactive OAuth sign-in callback received — armed web-session cleanup (%lu pre-existing account(s))",
@@ -417,8 +430,10 @@ void ApolloNoteInteractiveOAuthSignIn(void) {
 }
 
 void ApolloCancelInteractiveOAuthSignIn(void) {
+    NS_VALID_UNTIL_END_OF_SCOPE NSSet<NSString *> *retiredPreexisting = nil;
     os_unfair_lock_lock(&sOAuthSignInLock);
     sOAuthSignInArmedAt = 0;
+    retiredPreexisting = sOAuthSignInPreexisting;
     sOAuthSignInPreexisting = nil;
     os_unfair_lock_unlock(&sOAuthSignInLock);
 }
@@ -427,12 +442,14 @@ BOOL ApolloTakeInteractiveOAuthSignInForNewUsername(NSString *username) {
     NSString *key = ApolloNormalizeUsername(username);
     if (key.length == 0) return NO;
     BOOL consumed = NO;
+    NS_VALID_UNTIL_END_OF_SCOPE NSSet<NSString *> *retiredPreexisting = nil;
     os_unfair_lock_lock(&sOAuthSignInLock);
     if (sOAuthSignInArmedAt > 0) {
         if ((CFAbsoluteTimeGetCurrent() - sOAuthSignInArmedAt) >= 120.0) {
             // Expired (e.g. the code->token exchange failed after the
             // callback) — disarm lazily so nothing later can consume it.
             sOAuthSignInArmedAt = 0;
+            retiredPreexisting = sOAuthSignInPreexisting;
             sOAuthSignInPreexisting = nil;
         } else if (![sOAuthSignInPreexisting containsObject:key]) {
             // A username that wasn't in the blobs at arm time: this IS the
@@ -440,6 +457,7 @@ BOOL ApolloTakeInteractiveOAuthSignInForNewUsername(NSString *username) {
             // WITHOUT disarming (decode/background-refresh traffic).
             consumed = YES;
             sOAuthSignInArmedAt = 0;
+            retiredPreexisting = sOAuthSignInPreexisting;
             sOAuthSignInPreexisting = nil;
         }
     }

@@ -11,6 +11,7 @@
 #import "PictureInPictureViewController.h"
 #import "ApolloSettingsSearch.h"
 #import "ApolloReportViewController.h"
+#import "ApolloThemeRuntime.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
@@ -211,6 +212,8 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
             cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseID];
         }
         cell.textLabel.text = indexPath.row == 0 ? @"Apollo Reborn" : @"Buy Us a Coffee";
+        UIColor *primaryText = ApolloThemeRuntimeColor(ApolloThemeTokenLabel);
+        if (primaryText) cell.textLabel.textColor = primaryText;
         cell.imageView.image = indexPath.row == 0
             ? (ApolloRebornOptionsSettingsIcon(29.0) ?: createSettingsIcon(@"key.fill", [UIColor systemTealColor]))
             : ApolloBuyMeACoffeeSettingsIcon(29.0);

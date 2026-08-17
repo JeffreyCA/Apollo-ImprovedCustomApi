@@ -5,28 +5,32 @@
 // directly, which can be nil for the signed-in user's own profile.
 extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController);
 
-// Nav bar button rather than the native 3-dot menu: that menu doesn't render on
-// your own profile, and this needs to work there too. Hooks the mangled class
-// name -- the bare "ProfileViewController" can resolve to nil at hook-install
-// time under the simulator's internal Logos generator, since it's a lazily-
-// realized Swift class.
-%hook _TtC6Apollo21ProfileViewController
+// Hidden & Deleted used to be its own eye-slash button in the profile's
+// navigation bar; it now lives inside every profile's "..." menu instead
+// ("View Hidden/Deleted Content" — ApolloProfileMoreMenu.xm places it in the
+// signed-in tab's menu, ApolloGalleryMenu.xm injects it into Apollo's menu on
+// other people's profiles). Both call this to run it.
+void ApolloHiddenContentPresentFromProfile(UIViewController *profileViewController) {
+    if (!profileViewController) return;
+    NSString *profileUsername = ApolloUsernameFromProfileViewController(profileViewController);
 
-- (void)viewDidLoad {
-    %orig;
+    if (profileUsername.length == 0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Hidden & Deleted"
+                                                                         message:@"Couldn't confirm this profile's username yet. Try again once the profile has finished loading."
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [profileViewController presentViewController:alert animated:YES completion:nil];
+        return;
+    }
 
-    UIBarButtonItem *hiddenContentItem = [[UIBarButtonItem alloc]
-        initWithImage:[UIImage systemImageNamed:@"eye.slash"]
-        style:UIBarButtonItemStylePlain
-        target:self
-        action:@selector(apollo_showHiddenContent)];
-    hiddenContentItem.accessibilityLabel = @"Hidden & Deleted Posts/Comments";
-
-    UIViewController *vc = (UIViewController *)self;
-    NSMutableArray *items = [NSMutableArray arrayWithArray:vc.navigationItem.rightBarButtonItems ?: @[]];
-    [items addObject:hiddenContentItem];
-    vc.navigationItem.rightBarButtonItems = items;
+    [ApolloHiddenContentViewController presentForUsername:profileUsername
+                                       fromViewController:profileViewController];
 }
+
+// Hooks the mangled class name -- the bare "ProfileViewController" can resolve
+// to nil at hook-install time under the simulator's internal Logos generator,
+// since it's a lazily-realized Swift class.
+%hook _TtC6Apollo21ProfileViewController
 
 // Re-presents the Hidden & Deleted sheet after backing out of a live post
 // opened from it -- see ApolloHiddenContentConsumePendingResume. -viewDidAppear:
@@ -41,23 +45,6 @@ extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewC
             [ApolloHiddenContentViewController presentForUsername:profileUsername fromViewController:vc];
         }
     }
-}
-
-%new
-- (void)apollo_showHiddenContent {
-    UIViewController *vc = (UIViewController *)self;
-    NSString *profileUsername = ApolloUsernameFromProfileViewController(vc);
-
-    if (profileUsername.length == 0) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Hidden & Deleted"
-                                                                         message:@"Couldn't confirm this profile's username yet. Try again once the profile has finished loading."
-                                                                  preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [vc presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-
-    [ApolloHiddenContentViewController presentForUsername:profileUsername fromViewController:vc];
 }
 
 %end

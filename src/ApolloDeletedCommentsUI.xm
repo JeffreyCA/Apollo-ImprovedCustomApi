@@ -12,6 +12,21 @@
 #import "ApolloThemeRuntime.h"
 #import "Tweak.h"
 
+// Private cross-module classification ABI implemented by
+// ApolloDeletedCommentsData.m. It intentionally stays out of the public header.
+typedef NS_OPTIONS(NSUInteger, ApolloDeletedCommentClassification) {
+    ApolloDeletedCommentClassificationNone = 0,
+    ApolloDeletedCommentClassificationRecovered = 1 << 0,
+    ApolloDeletedCommentClassificationPlaceholder = 1 << 1,
+    ApolloDeletedCommentClassificationUnrecoverable = 1 << 2,
+    ApolloDeletedCommentClassificationRevealed = 1 << 3,
+};
+
+extern "C" ApolloDeletedCommentClassification ApolloDeletedCommentsClassificationForFullName(
+    NSString *fullName,
+    NSString **recoveredReason,
+    NSString **placeholderReason);
+
 @class ASDisplayNode;
 @class ASTextNode;
 @class ASInsetLayoutSpec;
@@ -109,9 +124,15 @@ static UIFont *ApolloDeletedCommentsLiveBodyFontGet(void) {
 }
 
 static void ApolloDeletedCommentsLiveBodyFontSet(UIFont *font) {
+    NS_VALID_UNTIL_END_OF_SCOPE UIFont *retiredFont = nil;
     os_unfair_lock_lock(&sApolloDeletedCommentsFontStateLock);
-    sApolloDeletedCommentsLiveCommentBodyFont = font;
+    if (sApolloDeletedCommentsLiveCommentBodyFont != font) {
+        retiredFont = sApolloDeletedCommentsLiveCommentBodyFont;
+        sApolloDeletedCommentsLiveCommentBodyFont = font;
+    }
     os_unfair_lock_unlock(&sApolloDeletedCommentsFontStateLock);
+    // Keep the previous font alive through the protected store so its final
+    // release cannot run while the unfair lock is held.
 }
 
 static NSDictionary<NSAttributedStringKey, id> *ApolloDeletedCommentsBodyTemplateGet(void) {
@@ -122,8 +143,12 @@ static NSDictionary<NSAttributedStringKey, id> *ApolloDeletedCommentsBodyTemplat
 }
 
 static void ApolloDeletedCommentsBodyTemplateSet(NSDictionary<NSAttributedStringKey, id> *tmpl) {
+    NS_VALID_UNTIL_END_OF_SCOPE NSDictionary<NSAttributedStringKey, id> *retiredTemplate = nil;
     os_unfair_lock_lock(&sApolloDeletedCommentsFontStateLock);
-    sApolloDeletedCommentsBodyAttributesTemplate = tmpl;
+    if (sApolloDeletedCommentsBodyAttributesTemplate != tmpl) {
+        retiredTemplate = sApolloDeletedCommentsBodyAttributesTemplate;
+        sApolloDeletedCommentsBodyAttributesTemplate = tmpl;
+    }
     os_unfair_lock_unlock(&sApolloDeletedCommentsFontStateLock);
 }
 static NSString *const ApolloDeletedCommentsRevealURLString = @"apollo-deleted-comments://reveal";
@@ -330,22 +355,10 @@ static RDKComment *ApolloDeletedCommentsCommentFromCellNode(id commentCellNode) 
     return (RDKComment *)comment;
 }
 
-static NSString *ApolloDeletedCommentsRecoveredReasonForCommentObject(RDKComment *comment) {
-    if (!comment) return nil;
-    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    return ApolloDeletedCommentsRecoveredReasonForComment(fullName);
-}
-
-static BOOL ApolloDeletedCommentsCellNodeIsRecovered(id cellNode) {
-    RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
-    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    return ApolloDeletedCommentsRecoveredReasonForComment(fullName).length > 0;
-}
-
-static BOOL ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(id cellNode) {
-    RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
-    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    if (!ApolloDeletedCommentsIsDeletedPlaceholder(fullName)) return NO;
+static BOOL ApolloDeletedCommentsCommentMatchesDeletedPlaceholder(
+    RDKComment *comment,
+    ApolloDeletedCommentClassification classification) {
+    if (!comment || !(classification & ApolloDeletedCommentClassificationPlaceholder)) return NO;
     NSString *body = comment.body;
     if (ApolloDeletedCommentsStringIsReasonLabel(body) ||
         ApolloDeletedCommentsTextLooksLikeDeletedPlaceholderNode(body)) {
@@ -353,6 +366,14 @@ static BOOL ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(id cellNode) {
     }
     NSString *trimmedBody = ApolloDeletedCommentsTrimmedString(body);
     return trimmedBody.length == 0 && ApolloDeletedCommentsAuthorLooksDeleted(comment.author);
+}
+
+static BOOL ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(id cellNode) {
+    RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    return ApolloDeletedCommentsCommentMatchesDeletedPlaceholder(comment, classification);
 }
 
 // Passive-mode scoping: with the global toggle off, only threads whose
@@ -373,11 +394,15 @@ static BOOL ApolloDeletedCommentsTreatmentAllowedForComment(RDKComment *comment)
 }
 
 static BOOL ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(id cellNode) {
-    if (!ApolloDeletedCommentsCellNodeIsRecovered(cellNode) &&
-        !ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(cellNode)) {
+    RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    BOOL recovered = classification & ApolloDeletedCommentClassificationRecovered;
+    if (!recovered && !ApolloDeletedCommentsCommentMatchesDeletedPlaceholder(comment, classification)) {
         return NO;
     }
-    return ApolloDeletedCommentsTreatmentAllowedForComment(ApolloDeletedCommentsCommentFromCellNode(cellNode));
+    return ApolloDeletedCommentsTreatmentAllowedForComment(comment);
 }
 
 // A definitively unrecoverable placeholder has no useful author or body to show.
@@ -388,9 +413,11 @@ static BOOL ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(id cellNode)
 static BOOL ApolloDeletedCommentsCommentUsesAuthorStatusChip(RDKComment *comment) {
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (fullName.length == 0) return NO;
-    return ApolloDeletedCommentsIsUnrecoverableComment(fullName) &&
-           ApolloDeletedCommentsIsDeletedPlaceholder(fullName) &&
-           !ApolloDeletedCommentsIsRecoveredComment(fullName);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    return (classification & ApolloDeletedCommentClassificationUnrecoverable) &&
+           (classification & ApolloDeletedCommentClassificationPlaceholder) &&
+           !(classification & ApolloDeletedCommentClassificationRecovered);
 }
 
 static BOOL ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(id cellNode) {
@@ -423,8 +450,10 @@ static BOOL ApolloDeletedCommentsCommentIsCollapsed(RDKComment *comment) {
 
 static NSString *ApolloDeletedCommentsReasonLabelForComment(RDKComment *comment) {
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    NSString *reason = ApolloDeletedCommentsRecoveredReasonForCommentObject(comment);
-    if (reason.length == 0) reason = ApolloDeletedCommentsDeletedPlaceholderReason(fullName);
+    NSString *recoveredReason = nil;
+    NSString *placeholderReason = nil;
+    ApolloDeletedCommentsClassificationForFullName(fullName, &recoveredReason, &placeholderReason);
+    NSString *reason = recoveredReason.length > 0 ? recoveredReason : placeholderReason;
     NSString *label = ApolloDeletedCommentsDisplayLabelForReason(reason);
     if ([label isEqualToString:@"DELETED BY MOD"]) return @"REMOVED BY MOD";
     return label;
@@ -576,8 +605,10 @@ static BOOL ApolloDeletedCommentsVisibleCommentNeedsRecoveredArchive(RDKComment 
     if (!comment || archivedBody.length == 0) return NO;
 
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    BOOL alreadyClassifiedDeleted = ApolloDeletedCommentsIsDeletedPlaceholder(fullName) ||
-                                    ApolloDeletedCommentsIsRecoveredComment(fullName);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    BOOL alreadyClassifiedDeleted = classification &
+        (ApolloDeletedCommentClassificationPlaceholder | ApolloDeletedCommentClassificationRecovered);
     NSString *savedBody = objc_getAssociatedObject(comment, kApolloDeletedCommentsOriginalBodyKey);
     BOOL savedBodyMatches = [savedBody isKindOfClass:[NSString class]] &&
                             (ApolloDeletedCommentsTextQualifiesAsBodyCandidate(savedBody, archivedBody) ||
@@ -654,8 +685,10 @@ static BOOL __attribute__((unused)) ApolloDeletedCommentsShouldKeepModelBodyHidd
     if (!ApolloDeletedCommentsFeatureActive() || !sTapToRevealDeletedComments || !comment) return NO;
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (fullName.length == 0) return NO;
-    return ApolloDeletedCommentsIsRecoveredComment(fullName) &&
-           !ApolloDeletedCommentsIsCommentRevealed(fullName);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    return (classification & ApolloDeletedCommentClassificationRecovered) &&
+           !(classification & ApolloDeletedCommentClassificationRevealed);
 }
 
 static void ApolloDeletedCommentsSynchronizeCommentModelDisplayState(id cellNode) {
@@ -664,9 +697,10 @@ static void ApolloDeletedCommentsSynchronizeCommentModelDisplayState(id cellNode
     if (!comment || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return;
 
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    BOOL placeholderOnly = ApolloDeletedCommentsIsDeletedPlaceholder(fullName) &&
-                           !ApolloDeletedCommentsIsRecoveredComment(fullName);
-    BOOL recovered = ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(cellNode);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    BOOL recovered = classification & ApolloDeletedCommentClassificationRecovered;
+    BOOL placeholderOnly = ApolloDeletedCommentsCommentMatchesDeletedPlaceholder(comment, classification) && !recovered;
 
     if (placeholderOnly) {
         return;
@@ -690,8 +724,10 @@ static void ApolloDeletedCommentsSynchronizeCommentModelDisplayState(id cellNode
 
 static NSString *ApolloDeletedCommentsReasonLabelForCommentAndBody(RDKComment *comment, NSString *body) {
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    NSString *reason = ApolloDeletedCommentsRecoveredReasonForComment(fullName);
-    if (reason.length == 0) reason = ApolloDeletedCommentsDeletedPlaceholderReason(fullName);
+    NSString *recoveredReason = nil;
+    NSString *placeholderReason = nil;
+    ApolloDeletedCommentsClassificationForFullName(fullName, &recoveredReason, &placeholderReason);
+    NSString *reason = recoveredReason.length > 0 ? recoveredReason : placeholderReason;
     NSString *label = ApolloDeletedCommentsDisplayLabelForReason(reason);
     return ApolloDeletedCommentsNormalizedReasonLabel(label);
 }
@@ -702,10 +738,12 @@ static NSString *__attribute__((unused)) ApolloDeletedCommentsHiddenReasonLabelF
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     NSString *savedBody = objc_getAssociatedObject(comment, kApolloDeletedCommentsOriginalBodyKey);
     NSString *bodyForState = [savedBody isKindOfClass:[NSString class]] && savedBody.length > 0 ? savedBody : body;
-    BOOL placeholder = ApolloDeletedCommentsIsDeletedPlaceholder(fullName);
-    BOOL recovered = ApolloDeletedCommentsIsRecoveredComment(fullName);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    BOOL placeholder = classification & ApolloDeletedCommentClassificationPlaceholder;
+    BOOL recovered = classification & ApolloDeletedCommentClassificationRecovered;
     BOOL placeholderOnly = placeholder && !recovered;
-    BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
+    BOOL revealed = classification & ApolloDeletedCommentClassificationRevealed;
 
     if (placeholderOnly) {
         return ApolloDeletedCommentsReasonLabelForCommentAndBody(comment, bodyForState);
@@ -1293,7 +1331,7 @@ static NSAttributedString *ApolloDeletedCommentsAttributedStringFromMarkdown(NSS
                 NSRegularExpression *numberRe = [NSRegularExpression regularExpressionWithPattern:@"^(\\s*)(\\d{1,3})[.)]\\s+(.*)$" options:0 error:nil];
                 NSTextCheckingResult *number = bullet ? nil : [numberRe firstMatchInString:content options:0 range:NSMakeRange(0, content.length)];
                 if (bullet || number) {
-                    NSString *marker = bullet ? @"•" : [NSString stringWithFormat:@"%@.", [content substringWithRange:[number rangeAtIndex:2]]];
+                    NSString *marker = bullet ? @"•" : [[content substringWithRange:[number rangeAtIndex:2]] stringByAppendingString:@"."];
                     NSString *item = [content substringWithRange:[(bullet ?: number) rangeAtIndex:bullet ? 2 : 3]];
                     content = [NSString stringWithFormat:@"%@ %@", marker, item];
                     paragraph = [(baseParagraph ?: [NSParagraphStyle defaultParagraphStyle]) mutableCopy];
@@ -2087,12 +2125,15 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsAttribut
 
     id cellNode = ApolloDeletedCommentsCommentCellNodeForTextNode(textNode);
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
-    if (!comment || !ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(cellNode)) return attributedText;
+    if (!comment) return attributedText;
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    if (!(classification & ApolloDeletedCommentClassificationRecovered)) return attributedText;
     NSString *resolvedBody = ApolloDeletedCommentsResolvedRecoveredBodyForComment(comment);
     if (!ApolloDeletedCommentsBodyIsDisplayableRecoveredText(resolvedBody)) return attributedText;
 
-    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
+    BOOL revealed = classification & ApolloDeletedCommentClassificationRevealed;
     if (revealed) return attributedText;
 
     BOOL bodyCandidate = ApolloDeletedCommentsTextLooksLikeRecoveredBodyDisplay(attributedText.string, resolvedBody);
@@ -2402,8 +2443,10 @@ static BOOL ApolloDeletedCommentsCommentArmedForReveal(RDKComment *comment) {
     if (!ApolloDeletedCommentsFeatureActive() || !sTapToRevealDeletedComments || !comment) return NO;
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (fullName.length == 0) return NO;
-    return ApolloDeletedCommentsIsRecoveredComment(fullName) &&
-           !ApolloDeletedCommentsIsCommentRevealed(fullName);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    return (classification & ApolloDeletedCommentClassificationRecovered) &&
+           !(classification & ApolloDeletedCommentClassificationRevealed);
 }
 
 // Make a reveal-chip node non-interactive so taps fall through to the cell and
@@ -2683,8 +2726,10 @@ static void __attribute__((unused)) ApolloDeletedCommentsApplyTapToRevealIfNeede
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     NSString *body = ApolloDeletedCommentsResolvedRecoveredBodyForComment(comment) ?: comment.body;
 
-    BOOL placeholderOnly = ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(cellNode) &&
-                           !ApolloDeletedCommentsCellNodeIsRecovered(cellNode);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    BOOL recovered = classification & ApolloDeletedCommentClassificationRecovered;
+    BOOL placeholderOnly = ApolloDeletedCommentsCommentMatchesDeletedPlaceholder(comment, classification) && !recovered;
     NSArray *textNodes = ApolloDeletedCommentsBodyTextNodes(cellNode, comment);
     if (textNodes.count == 0) {
         id knownBodyNode = ApolloDeletedCommentsFallbackBodyTextNode(cellNode);
@@ -2697,8 +2742,7 @@ static void __attribute__((unused)) ApolloDeletedCommentsApplyTapToRevealIfNeede
         return;
     }
 
-    BOOL recovered = ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(cellNode);
-    BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
+    BOOL revealed = classification & ApolloDeletedCommentClassificationRevealed;
     BOOL shouldHide = ApolloDeletedCommentsFeatureActive() &&
                       sTapToRevealDeletedComments &&
                       recovered &&
@@ -2880,7 +2924,12 @@ static void __attribute__((unused)) ApolloDeletedCommentsRevealHiddenBodyForCell
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (!comment || fullName.length == 0) return;
 
-    if (ApolloDeletedCommentsIsDeletedPlaceholder(fullName) && !ApolloDeletedCommentsIsRecoveredComment(fullName)) {
+    NSString *recoveredReason = nil;
+    NSString *placeholderReason = nil;
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, &recoveredReason, &placeholderReason);
+    if ((classification & ApolloDeletedCommentClassificationPlaceholder) &&
+        !(classification & ApolloDeletedCommentClassificationRecovered)) {
         return;
     }
 
@@ -2888,7 +2937,7 @@ static void __attribute__((unused)) ApolloDeletedCommentsRevealHiddenBodyForCell
     if (!restored) {
         NSDictionary *archived = ApolloDeletedCommentsCachedArchivedComment(fullName);
         if (archived.count > 0) {
-            NSString *reason = ApolloDeletedCommentsDeletedPlaceholderReason(fullName) ?: ApolloDeletedCommentsRecoveredReasonForComment(fullName);
+            NSString *reason = placeholderReason ?: recoveredReason;
             NSString *archivedBody = ApolloDeletedCommentsRecoverableArchivedBody(archived);
             if (ApolloDeletedCommentsApplyRecoveredArchivedCommentToObject((id)comment, archived, reason)) {
                 if (archivedBody.length > 0) {
@@ -3539,11 +3588,14 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
     if (ApolloDeletedCommentsCommentIsCollapsed(comment)) return nil;
 
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    BOOL placeholderOnly = ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(cellNode) &&
-                           !ApolloDeletedCommentsCellNodeIsRecovered(cellNode);
-    BOOL statusLivesInAuthorRow = ApolloDeletedCommentsCommentUsesAuthorStatusChip(comment);
-    BOOL recovered = ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(cellNode);
-    BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    BOOL recovered = classification & ApolloDeletedCommentClassificationRecovered;
+    BOOL placeholderOnly = ApolloDeletedCommentsCommentMatchesDeletedPlaceholder(comment, classification) && !recovered;
+    BOOL statusLivesInAuthorRow = (classification & ApolloDeletedCommentClassificationUnrecoverable) &&
+                                  (classification & ApolloDeletedCommentClassificationPlaceholder) &&
+                                  !recovered;
+    BOOL revealed = classification & ApolloDeletedCommentClassificationRevealed;
     BOOL shouldHide = ApolloDeletedCommentsFeatureActive() &&
                       sTapToRevealDeletedComments &&
                       recovered &&
@@ -3703,8 +3755,10 @@ static BOOL ApolloDeletedCommentsApplyRecoveredArchiveToModel(RDKComment *commen
         return NO;
     }
 
-    NSString *reason = ApolloDeletedCommentsDeletedPlaceholderReason(fullName) ?:
-                       ApolloDeletedCommentsRecoveredReasonForComment(fullName);
+    NSString *recoveredReason = nil;
+    NSString *placeholderReason = nil;
+    ApolloDeletedCommentsClassificationForFullName(fullName, &recoveredReason, &placeholderReason);
+    NSString *reason = placeholderReason ?: recoveredReason;
     BOOL wasCollapsed = ApolloDeletedCommentsCommentIsCollapsed(comment);
     if (!ApolloDeletedCommentsApplyRecoveredArchivedCommentToObject((id)comment, archived, reason)) return NO;
 
@@ -3743,18 +3797,21 @@ static void ApolloDeletedCommentsPrepareBuiltObject(id object) {
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (fullName.length == 0) return;
 
-    if (!ApolloDeletedCommentsIsDeletedPlaceholder(fullName) &&
-        !ApolloDeletedCommentsIsRecoveredComment(fullName)) {
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    if (!(classification & (ApolloDeletedCommentClassificationPlaceholder |
+                            ApolloDeletedCommentClassificationRecovered))) {
         NSString *rawReason = nil;
         if (ApolloDeletedCommentsClassifyRawDeletedStub(comment, &rawReason)) {
             ApolloDeletedCommentsRegisterDeletedPlaceholder(fullName, rawReason);
+            classification = ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
             ApolloDeletedCommentsUncollapseModelWithoutAnimation(comment);
             ApolloLog(@"[DeletedComments] Adopted deleted stub at model construction %@ (reason=%@)", fullName, rawReason);
         }
     }
 
-    if (!ApolloDeletedCommentsIsDeletedPlaceholder(fullName) &&
-        !ApolloDeletedCommentsIsRecoveredComment(fullName)) {
+    if (!(classification & (ApolloDeletedCommentClassificationPlaceholder |
+                            ApolloDeletedCommentClassificationRecovered))) {
         return; // Intact comment, including an intact comment by a deleted user.
     }
 
@@ -3779,7 +3836,10 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
     if (!ApolloDeletedCommentsVisibleCommentNeedsRecoveredArchive(comment, archivedBody)) return;
     ApolloDeletedCommentsRestoreAuthorStatusChip(cellNode);
 
-    NSString *reason = ApolloDeletedCommentsDeletedPlaceholderReason(fullName) ?: ApolloDeletedCommentsRecoveredReasonForComment(fullName);
+    NSString *recoveredReason = nil;
+    NSString *placeholderReason = nil;
+    ApolloDeletedCommentsClassificationForFullName(fullName, &recoveredReason, &placeholderReason);
+    NSString *reason = placeholderReason ?: recoveredReason;
     BOOL wasCollapsedBeforeApply = ApolloDeletedCommentsCommentIsCollapsed(comment);
     if (!ApolloDeletedCommentsApplyRecoveredArchivedCommentToObject((id)comment, archived, reason)) return;
 
@@ -4338,13 +4398,15 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsRenameRe
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
     NSDictionary *baseAttributes = ApolloDeletedCommentsReasonChipBaseAttributes(attributedText, cellNode);
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    BOOL placeholderOnly = ApolloDeletedCommentsIsDeletedPlaceholder(fullName) &&
-                           !ApolloDeletedCommentsIsRecoveredComment(fullName);
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    BOOL placeholderOnly = (classification & ApolloDeletedCommentClassificationPlaceholder) &&
+                           !(classification & ApolloDeletedCommentClassificationRecovered);
     if (placeholderOnly) {
         return ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment), baseAttributes, NO, comment);
     }
 
-    BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
+    BOOL revealed = classification & ApolloDeletedCommentClassificationRevealed;
     NSMutableAttributedString *renamed = [ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment), baseAttributes, !revealed, comment) mutableCopy];
     NSRange targetRange = NSMakeRange(0, renamed.length);
     [attributedText enumerateAttributesInRange:NSMakeRange(0, attributedText.length)
@@ -4488,7 +4550,10 @@ static void ApolloDeletedCommentsAdoptRawDeletedStubIfNeeded(id cellNode) {
     // checks the comment's own linkID against the active set (same gate the
     // rest of the module uses via CellNodeShouldShowDeletedTreatment).
     if (!ApolloDeletedCommentsTreatmentAllowedForComment(comment)) return;
-    if (ApolloDeletedCommentsIsDeletedPlaceholder(fullName) || ApolloDeletedCommentsIsRecoveredComment(fullName)) return;
+    ApolloDeletedCommentClassification classification =
+        ApolloDeletedCommentsClassificationForFullName(fullName, nil, nil);
+    if (classification & (ApolloDeletedCommentClassificationPlaceholder |
+                          ApolloDeletedCommentClassificationRecovered)) return;
 
     NSString *reason = nil;
     if (!ApolloDeletedCommentsClassifyRawDeletedStub(comment, &reason)) return;
@@ -4628,12 +4693,15 @@ static void ApolloDeletedCommentsAdoptRawDeletedStubIfNeeded(id cellNode) {
 static void ApolloDeletedCommentsRevealCommentInsteadOfCollapsing(RDKComment *comment) {
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (fullName.length == 0) return;
+    NSString *recoveredReason = nil;
+    NSString *placeholderReason = nil;
+    ApolloDeletedCommentsClassificationForFullName(fullName, &recoveredReason, &placeholderReason);
 
     // 1. Make the recovered body available on the model.
     if (!ApolloDeletedCommentsRestoreOriginalModelBodyIfNeeded(comment)) {
         NSDictionary *archived = ApolloDeletedCommentsCachedArchivedComment(fullName);
         if (archived.count > 0) {
-            NSString *reason = ApolloDeletedCommentsDeletedPlaceholderReason(fullName) ?: ApolloDeletedCommentsRecoveredReasonForComment(fullName);
+            NSString *reason = placeholderReason ?: recoveredReason;
             NSString *archivedBody = ApolloDeletedCommentsRecoverableArchivedBody(archived);
             if (ApolloDeletedCommentsApplyRecoveredArchivedCommentToObject((id)comment, archived, reason) && archivedBody.length > 0) {
                 objc_setAssociatedObject((id)comment, kApolloDeletedCommentsOriginalBodyKey, [archivedBody copy], OBJC_ASSOCIATION_COPY_NONATOMIC);

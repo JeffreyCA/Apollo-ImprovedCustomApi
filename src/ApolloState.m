@@ -18,7 +18,10 @@ BOOL sPassiveDeletedComments = NO;
 BOOL sShowRecentlyReadThumbnails = YES;
 BOOL sFeedTextPostThumbnails = YES;
 BOOL sFeedGalleryCarousel = YES;
+BOOL sFeedGalleryEdgeSwipeNav = YES;
 BOOL sSwipeUpForComments = YES;
+BOOL sDevvitInteractivePosts = NO;
+BOOL sDevvitFeedWidgets = YES;
 NSInteger sPreferredGIFFallbackFormat = 1; // 0=GIF, 1=MP4
 
 NSInteger sReadPostMaxCount = 0;
@@ -94,7 +97,7 @@ NSInteger sLinkPreviewBodyMode = ApolloLinkPreviewModeOff;
 NSInteger sLinkPreviewCommentsMode = ApolloLinkPreviewModeOff;
 NSInteger sLinkPreviewCardColor = ApolloLinkPreviewCardColorNeutral;
 NSString *sLinkPreviewCardColorHex = nil;
-volatile uint32_t sLinkPreviewCardColorPacked = 0;
+uint32_t sLinkPreviewCardColorPacked = 0;
 NSInteger sImageUploadProvider = ImageUploadProviderImgur;
 NSInteger sCommentLinkHost = CommentLinkHostOff;
 NSInteger sShareLinkHost = ShareLinkHostDefault;
@@ -151,6 +154,7 @@ BOOL sPiPSkipButtons = NO;
 NSInteger sPiPSkipSeconds = 10;
 BOOL sPiPProgressBar = NO;
 
+NSInteger sNSFWBlurOverride = 0;
 BOOL sTagFilterEnabled = NO;
 NSString *sTagFilterMode = @"blur";
 BOOL sTagFilterNSFW = YES;

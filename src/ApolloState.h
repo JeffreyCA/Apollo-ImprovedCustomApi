@@ -23,8 +23,16 @@ extern BOOL sShowRecentlyReadThumbnails;
 extern BOOL sFeedTextPostThumbnails;
 // Default-on large-feed carousel for Reddit-native multi-image galleries.
 extern BOOL sFeedGalleryCarousel;
+// Default-on: at the carousel's first/last image, swiping past the edge hands
+// the drag to Apollo's swipe-back/forward navigation instead of rubber-banding.
+extern BOOL sFeedGalleryEdgeSwipeNav;
 // Default-on fullscreen-media comments pane, opened by upward flick or button.
 extern BOOL sSwipeUpForComments;
+// Opt-in (default OFF) live interactive Devvit posts (embedded web widget).
+extern BOOL sDevvitInteractivePosts;
+// Sub-toggle: Devvit widgets in large-mode feed cards too (vs comments only).
+// Default on, but only consulted while the master toggle is on.
+extern BOOL sDevvitFeedWidgets;
 extern NSInteger sPreferredGIFFallbackFormat;
 
 extern NSInteger sReadPostMaxCount;
@@ -355,10 +363,10 @@ extern NSInteger sLinkPreviewCardColor;
 // the packed snapshot below instead. Both are updated together via
 // ApolloSetLinkPreviewCardColorHex().
 extern NSString *sLinkPreviewCardColorHex;
-// Render-safe snapshot of the card color, readable from any thread (an aligned
-// 32-bit volatile load is atomic on arm64). 0 = Default; otherwise
+// Render-safe snapshot of the card color, readable from any thread through the
+// __atomic load/store helpers. 0 = Default; otherwise
 // (1<<24) | (R<<16) | (G<<8) | B.
-extern volatile uint32_t sLinkPreviewCardColorPacked;
+extern uint32_t sLinkPreviewCardColorPacked;
 
 // Media upload host selection. Imgur is the default; Reddit uses Apollo's signed-in
 // session to upload directly to Reddit's media storage; ImgChest uploads to
@@ -497,6 +505,8 @@ extern BOOL sPiPSkipButtons;
 extern NSInteger sPiPSkipSeconds;
 extern BOOL sPiPProgressBar;
 
+// Native NSFW media blur override: 0 follow Reddit setting, 1 always, 2 never.
+extern NSInteger sNSFWBlurOverride;
 // Tag filter feature (NSFW / Spoiler).
 extern BOOL sTagFilterEnabled;
 extern NSString *sTagFilterMode;          // @"hide" or @"blur"

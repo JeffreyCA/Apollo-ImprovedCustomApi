@@ -567,6 +567,7 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     cell.imageView.image = entry.iconImage;
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 

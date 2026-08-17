@@ -25,6 +25,7 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import "ApolloCommon.h"
+#import "ApolloScrapeWebView.h"
 #import "ApolloState.h"
 
 // Section builders / keys here are wired up incrementally; tolerate not-yet-used
@@ -53,23 +54,27 @@ static NSCache<NSString *, NSArray<NSNumber *> *> *ApolloSBWebStatsCache(void) {
 @property (nonatomic) int polls;
 @end
 @implementation ApolloSBStatsWebFetch
+// Last-resort insurance: Create attaches the web view, so the window (not this
+// object) holds the strong reference — dropping the fetch without Destroy would
+// orphan an attached web view behind the app. Every normal path already goes
+// through Destroy; this makes "no orphaned attached web view" structural.
+- (void)dealloc {
+    ApolloScrapeWebViewDestroy(_web);
+}
 - (void)startForSub:(NSString *)sub completion:(void (^)(NSNumber *, NSNumber *))done {
     self.sub = sub; self.done = done; self.polls = 0;
-    UIWindow *win = nil;
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-        if (![s isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene *)s).windows) { if (w.isKeyWindow) win = w; }
-    }
-    if (!win) win = UIApplication.sharedApplication.windows.firstObject;
-    if (!win) { [self finishV:nil c:nil]; return; }
-    self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:[[WKWebViewConfiguration alloc] init]];
-    self.web.navigationDelegate = self;
-    self.web.alpha = 0.011; self.web.userInteractionEnabled = NO;
-    self.web.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
-    [win insertSubview:self.web atIndex:0];
-    [self.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://www.reddit.com/r/%@/", sub]]]];
-    ApolloLog(@"[Sidebar][webstats] loading r/%@", sub);
-    [self pollAfter:3.0];
+    __weak typeof(self) ws = self;
+    ApolloScrapeWebViewCreate([[WKWebViewConfiguration alloc] init], ^(WKWebView *web) {
+        ApolloSBStatsWebFetch *ss = ws;
+        // Blocker resolution is async — this fetch may already have finished.
+        if (!ss || !ss.done) return;
+        ss.web = web;
+        web.navigationDelegate = ss;
+        web.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+        [web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://www.reddit.com/r/%@/", sub]]]];
+        ApolloLog(@"[Sidebar][webstats] loading r/%@", sub);
+        [ss pollAfter:3.0];
+    });
 }
 - (void)pollAfter:(double)d {
     __weak typeof(self) ws = self;
@@ -92,7 +97,7 @@ static NSCache<NSString *, NSArray<NSNumber *> *> *ApolloSBWebStatsCache(void) {
     }];
 }
 - (void)finishV:(NSNumber *)v c:(NSNumber *)c {
-    if (self.web) { self.web.navigationDelegate = nil; [self.web removeFromSuperview]; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     void (^d)(NSNumber *, NSNumber *) = self.done; self.done = nil;
     if (d) d(v, c);
 }
