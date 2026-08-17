@@ -92,6 +92,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloGalleryViewController.m \
     $(SRC_DIR)/ApolloGalleryVideoExport.xm \
     $(SRC_DIR)/ApolloGalleryMenu.xm \
+    $(SRC_DIR)/ApolloGalleryOrientation.xm \
     $(SRC_DIR)/ApolloBannedProfile.xm \
     $(SRC_DIR)/ApolloImageUploadHost.xm \
     $(SRC_DIR)/ApolloPhotoPostComposerScrollFix.xm \
@@ -133,6 +134,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloProgressiveBlur.xm \
     $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
+    $(SRC_DIR)/ApolloProfileMoreMenu.xm \
     $(SRC_DIR)/ApolloHiddenContentData.m \
     $(SRC_DIR)/ApolloHiddenContentViewController.m \
     $(SRC_DIR)/ApolloHiddenContentMenu.xm \

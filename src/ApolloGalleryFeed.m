@@ -191,10 +191,15 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 @interface ApolloGalleryFeed ()
 @property (nonatomic, copy) NSString *subreddit;
 // Root listing path without the sort component: `/r/apolloapp` for a
-// subreddit, `/user/name/m/favourites` for a multireddit.
+// subreddit, `/user/name/m/favourites` for a multireddit,
+// `/user/name/submitted` for a profile.
 @property (nonatomic, copy) NSString *listingPath;
-// Privacy-friendly label used only in diagnostics (r/foo or m/foo).
+// Privacy-friendly label used only in diagnostics (r/foo, m/foo, or u/foo).
 @property (nonatomic, copy) NSString *sourceDescription;
+// User listings take their sort as `?sort=` on the fixed `submitted` path
+// (subreddits and multireddits put it in the path instead), and rising isn't a
+// sort Reddit accepts there.
+@property (nonatomic) BOOL sortsViaQueryParameter;
 // The account this gallery is bound to, captured at presentation time. We pin
 // the account IDENTITY, never a credential: Reddit rotates access tokens, so a
 // copied bearer would go stale under a long-lived gallery and every later page
@@ -251,6 +256,16 @@ static NSString *ApolloGalleryBearerForClient(id client) {
         : nil;
 }
 
+- (instancetype)initWithHomeFeed {
+    self = [super init];
+    if (self) {
+        // Empty listing path: the home front page's listings live at the API
+        // root (/best, /hot, ...), served from the account's subscriptions.
+        [self configureWithListingPath:@"" subreddit:@"" sourceDescription:@"Home"];
+    }
+    return self;
+}
+
 - (instancetype)initWithSubreddit:(NSString *)subreddit {
     NSString *slug = [subreddit copy] ?: @"";
     self = [super init];
@@ -273,6 +288,29 @@ static NSString *ApolloGalleryBearerForClient(id client) {
                       sourceDescription:[@"m/" stringByAppendingString:name]];
     }
     return self;
+}
+
+- (instancetype)initWithUsername:(NSString *)username {
+    NSString *name = [username copy] ?: @"";
+    self = [super init];
+    if (self) {
+        [self configureWithListingPath:[NSString stringWithFormat:@"/user/%@/submitted", name]
+                             subreddit:@""
+                      sourceDescription:[@"u/" stringByAppendingString:name]];
+        _sortsViaQueryParameter = YES;
+        // Direct ivar writes: the setters reset the feed, which is pointless
+        // noise before the first load.
+        _sort = ApolloGallerySortNew;
+    }
+    return self;
+}
+
+- (BOOL)supportsRisingSort {
+    return !self.sortsViaQueryParameter;
+}
+
+- (BOOL)supportsBestSort {
+    return !self.sortsViaQueryParameter;
 }
 
 - (void)configureWithListingPath:(NSString *)listingPath
@@ -366,9 +404,10 @@ static NSString *ApolloGalleryBearerForClient(id client) {
 - (void)setTopWindow:(ApolloGalleryTopWindow)topWindow {
     if (_topWindow == topWindow) return;
     _topWindow = topWindow;
-    // The window only affects the "top" listing, so changing it under any other
-    // sort costs nothing and shouldn't throw the loaded pictures away.
-    if (_sort == ApolloGallerySortTop) [self reset];
+    // The window only affects listings that send `&t=` (top and controversial),
+    // so changing it under any other sort costs nothing and shouldn't throw the
+    // loaded pictures away.
+    if (ApolloGallerySortUsesWindow(_sort)) [self reset];
 }
 
 - (void)setSort:(ApolloGallerySort)sort topWindow:(ApolloGalleryTopWindow)topWindow {
@@ -376,10 +415,11 @@ static NSString *ApolloGalleryBearerForClient(id client) {
     BOOL windowChanged = (_topWindow != topWindow);
     if (!sortChanged && !windowChanged) return;
     // Assign the ivars directly, then reset once — going through the property
-    // setters would reset twice when both change.
+    // setters would reset twice when both change. When only the window changed,
+    // the loaded page is stale exactly when the sort sends `&t=`.
     _sort = sort;
     _topWindow = topWindow;
-    if (sortChanged || sort == ApolloGallerySortTop) [self reset];
+    if (sortChanged || ApolloGallerySortUsesWindow(sort)) [self reset];
 }
 
 - (void)reset {
@@ -398,11 +438,28 @@ static NSString *ApolloGalleryBearerForClient(id client) {
 
 - (NSString *)sortPathComponent {
     switch (self.sort) {
-        case ApolloGallerySortNew:    return @"new";
-        case ApolloGallerySortTop:    return @"top";
-        case ApolloGallerySortRising: return @"rising";
+        case ApolloGallerySortNew:           return @"new";
+        case ApolloGallerySortTop:           return @"top";
+        case ApolloGallerySortRising:        return @"rising";
+        case ApolloGallerySortBest:          return @"best";
+        case ApolloGallerySortControversial: return @"controversial";
         case ApolloGallerySortHot:
-        default:                      return @"hot";
+        default:                             return @"hot";
+    }
+}
+
+// The `?sort=` value for feeds that carry their sort in the query. Rising and
+// best map to hot because Reddit's user listing endpoint doesn't accept them
+// (the sort menu never offers those for these feeds; this is only a backstop).
+- (NSString *)sortQueryValue {
+    ApolloGallerySort sort = self.sort;
+    if (sort == ApolloGallerySortRising || sort == ApolloGallerySortBest) sort = ApolloGallerySortHot;
+    switch (sort) {
+        case ApolloGallerySortNew:           return @"new";
+        case ApolloGallerySortTop:           return @"top";
+        case ApolloGallerySortControversial: return @"controversial";
+        case ApolloGallerySortHot:
+        default:                             return @"hot";
     }
 }
 
@@ -429,6 +486,17 @@ static NSString *ApolloGalleryBearerForClient(id client) {
                 case ApolloGalleryTopWindowAll:   return @"Top: All Time";
                 case ApolloGalleryTopWindowWeek:
                 default:                          return @"Top: This Week";
+            }
+        }
+        case ApolloGallerySortBest:   return @"Best";
+        case ApolloGallerySortControversial: {
+            switch (self.topWindow) {
+                case ApolloGalleryTopWindowDay:   return @"Controversial: Today";
+                case ApolloGalleryTopWindowMonth: return @"Controversial: This Month";
+                case ApolloGalleryTopWindowYear:  return @"Controversial: This Year";
+                case ApolloGalleryTopWindowAll:   return @"Controversial: All Time";
+                case ApolloGalleryTopWindowWeek:
+                default:                          return @"Controversial: This Week";
             }
         }
         case ApolloGallerySortHot:
@@ -484,16 +552,33 @@ static NSString *ApolloGalleryBearerForClient(id client) {
     NSString *escapedPath = [self escapedListingPath];
     NSMutableString *query = [NSMutableString stringWithFormat:@"limit=%ld&raw_json=1",
                               (long)kApolloGalleryListingLimit];
-    if (self.sort == ApolloGallerySortTop) {
+    if (self.sortsViaQueryParameter) {
+        [query appendFormat:@"&sort=%@", [self sortQueryValue]];
+    }
+    if (ApolloGallerySortUsesWindow(self.sort)) {
         [query appendFormat:@"&t=%@", [self topWindowParameter]];
     }
     if (after.length > 0) {
         [query appendFormat:@"&after=%@", after];
     }
 
-    NSString *urlString = useOAuthHost
-        ? [NSString stringWithFormat:@"https://oauth.reddit.com%@/%@?%@", escapedPath, [self sortPathComponent], query]
-        : [NSString stringWithFormat:@"https://www.reddit.com%@/%@.json?%@", escapedPath, [self sortPathComponent], query];
+    NSString *urlString;
+    if (self.listingPath.length == 0) {
+        // Home: the sort IS the path, at the root of the host.
+        urlString = useOAuthHost
+            ? [NSString stringWithFormat:@"https://oauth.reddit.com/%@?%@", [self sortPathComponent], query]
+            : [NSString stringWithFormat:@"https://www.reddit.com/%@.json?%@", [self sortPathComponent], query];
+    } else if (self.sortsViaQueryParameter) {
+        // The listing path is already complete (`/user/<name>/submitted`);
+        // the sort rides in the query string instead of the path.
+        urlString = useOAuthHost
+            ? [NSString stringWithFormat:@"https://oauth.reddit.com%@?%@", escapedPath, query]
+            : [NSString stringWithFormat:@"https://www.reddit.com%@.json?%@", escapedPath, query];
+    } else {
+        urlString = useOAuthHost
+            ? [NSString stringWithFormat:@"https://oauth.reddit.com%@/%@?%@", escapedPath, [self sortPathComponent], query]
+            : [NSString stringWithFormat:@"https://www.reddit.com%@/%@.json?%@", escapedPath, [self sortPathComponent], query];
+    }
 
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) return nil;

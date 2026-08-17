@@ -17,8 +17,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 // `subreddit` is the bare slug, no "r/" prefix.
 - (instancetype)initWithSubreddit:(NSString *)subreddit NS_DESIGNATED_INITIALIZER;
+// The signed-in Home front page.
+- (instancetype)initWithHomeFeed NS_DESIGNATED_INITIALIZER;
 // `multiredditPath` is the canonical `/user/<owner>/m/<name>` path.
 - (instancetype)initWithMultiredditPath:(NSString *)multiredditPath NS_DESIGNATED_INITIALIZER;
+// `username` is the bare name, no "u/" prefix. Shows the media that user has
+// posted anywhere on Reddit (their submitted listing).
+- (instancetype)initWithUsername:(NSString *)username NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithNibName:(nullable NSString *)nibName bundle:(nullable NSBundle *)bundle NS_UNAVAILABLE;
 - (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
@@ -32,11 +37,29 @@ NS_ASSUME_NONNULL_BEGIN
 // when there's no navigation controller to push onto or the slug is empty.
 + (BOOL)presentGalleryForSubreddit:(NSString *)subreddit fromViewController:(UIViewController *)sourceViewController;
 
+// Same, but seeds the gallery with the sort the SOURCE feed was showing, so
+// the grid opens organized the way the subreddit was (issue: gallery always
+// opened on its own default regardless of the feed's sort). `sortValue` boxes
+// an ApolloGallerySort and `topWindowValue` an ApolloGalleryTopWindow; nil
+// means "nothing to inherit" and keeps the gallery's defaults. Values the
+// feed can't honor (rising on a user feed, out-of-range raws) are ignored
+// rather than clamped to something the user didn't pick.
++ (BOOL)presentGalleryForSubreddit:(NSString *)subreddit
+                fromViewController:(UIViewController *)sourceViewController
+                inheritedSortValue:(nullable NSNumber *)sortValue
+           inheritedTopWindowValue:(nullable NSNumber *)topWindowValue;
+
 // `multiredditPath` is Reddit's canonical `/user/<owner>/m/<name>` path. It is
 // kept intact so public multireddits load from their actual owner rather than
 // being incorrectly rebuilt under the active account.
 + (BOOL)presentGalleryForMultiredditPath:(NSString *)multiredditPath
                       fromViewController:(UIViewController *)sourceViewController;
+
+// `username` may carry a "u/" prefix or surrounding whitespace; both are
+// stripped. Returns NO (and does nothing) when no usable name remains or
+// there's no navigation controller to push onto.
++ (BOOL)presentGalleryForUsername:(NSString *)username
+               fromViewController:(UIViewController *)sourceViewController;
 
 @end
 
