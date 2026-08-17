@@ -75,10 +75,10 @@ static NSString *const UDKeyUnmuteFeedVideos = @"UnmuteFeedVideos";
 // with the mute button, NO once they mute one again. Written ONLY by a genuine
 // mute-button tap on a feed video, never by an automatic unmute. Default NO.
 static NSString *const UDKeyFeedVideosUnmutedMemory = @"FeedVideosUnmutedMemory";
-// "Feed Video Scrubber": tap a playing feed video to reveal an inline progress
-// bar with elapsed/total time that can be dragged (or tapped) to seek, instead
-// of opening the fullscreen viewer on that first tap. A second tap outside the
-// bar opens the viewer as usual. Default NO. See ApolloFeedVideoScrubber.xm.
+// "Feed Video Scrubber": press and hold the thin progress bar at the bottom of
+// a feed video, then slide to scrub it, for every inline player type. Tapping
+// the video (bar included) still opens it fullscreen as stock. Default NO.
+// See ApolloFeedVideoScrubber.xm.
 static NSString *const UDKeyFeedVideoScrubber = @"FeedVideoScrubber";
 // "Hold for Video Speed": press-and-hold the right side of a fullscreen video to
 // play at a chosen speed while held. Master toggle (default YES via

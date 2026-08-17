@@ -1375,6 +1375,12 @@ typedef NS_ENUM(NSInteger, Tag) {
             return [[InfoRowSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
+    ApolloSettingsRow *feedScrubber =
+        [ApolloSettingsRow switchRowWithID:@"media.feedScrubber"
+                                     title:@"Feed Video Scrubber"
+                                      isOn:^BOOL { return sFeedVideoScrubber; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedVideoScrubberSwitchToggled:sender]; }];
+
     ApolloSettingsRow *blockAnnouncements =
         [ApolloSettingsRow switchRowWithID:@"gen.blockAnnouncements"
                                      title:@"Block Announcements"
@@ -1403,8 +1409,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
-                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
+                                            footer:@"Small tweaks for the post list. Feed Video Scrubber: press and hold the progress bar at the bottom of a feed video, then slide to scrub it without opening the video. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
+                                              rows:@[ textPostThumbnails, infoRow, feedScrubber, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -1822,15 +1828,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     // Only shown while Hold for Video Speed is on (see -videoHoldSpeedSwitchToggled:).
     holdSpeedValue.visible = ^BOOL { return sVideoHoldSpeedEnabled; };
 
-    ApolloSettingsRow *feedScrubber =
-        [ApolloSettingsRow switchRowWithID:@"media.feedScrubber"
-                                     title:@"Feed Video Scrubber"
-                                      isOn:^BOOL { return sFeedVideoScrubber; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf feedVideoScrubberSwitchToggled:sender]; }];
-
     return [ApolloSettingsSection sectionWithTitle:@"Playback"
-                                            footer:@"Unmute Videos in Feed: Never keeps feed videos silent, Always plays every one with sound, and Remember follows the last video you muted or unmuted yourself. Only one feed video plays sound at a time. Feed Video Scrubber: tap a playing feed video to show a progress bar you can drag to seek; tap it again to open it fullscreen. Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
-                                              rows:@[ gifFallback, unmuteFeed, unmuteComments, feedScrubber, holdSpeed, holdSpeedValue ]];
+                                            footer:@"Unmute Videos in Feed: Never keeps feed videos silent, Always plays every one with sound, and Remember follows the last video you muted or unmuted yourself. Only one feed video plays sound at a time. Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
+                                              rows:@[ gifFallback, unmuteFeed, unmuteComments, holdSpeed, holdSpeedValue ]];
 }
 
 - (ApolloSettingsSection *)buildMediaInlineSection {

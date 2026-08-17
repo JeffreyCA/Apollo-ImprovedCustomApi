@@ -46,10 +46,9 @@ extern NSInteger sUnmuteCommentsVideos;
 // UDKeyFeedVideosUnmutedMemory), 2 = Always. See ApolloVideoUnmute.xm.
 extern NSInteger sUnmuteFeedVideos;
 
-// "Feed Video Scrubber" — when ON, the first tap on a playing feed video shows
-// an inline scrub bar instead of opening the fullscreen viewer; a second tap
-// (outside the bar) opens the viewer as usual. Default OFF.
-// See ApolloFeedVideoScrubber.xm.
+// "Feed Video Scrubber" — when ON, press-and-hold the progress bar at the
+// bottom of a feed video and slide to scrub it in place; taps keep opening the
+// fullscreen viewer as stock. Default OFF. See ApolloFeedVideoScrubber.xm.
 extern BOOL sFeedVideoScrubber;
 
 // "Hold for Video Speed": when ON (default), press-and-hold the right side of a

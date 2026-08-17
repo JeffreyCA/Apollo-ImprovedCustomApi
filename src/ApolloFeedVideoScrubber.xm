@@ -1,51 +1,58 @@
 // ApolloFeedVideoScrubber.xm
 //
-// "Feed Video Scrubber" — tap a playing feed video to reveal an inline scrub
-// bar instead of opening the fullscreen viewer, so you can jump around a video
-// without leaving the feed. Off by default (sFeedVideoScrubber).
+// "Feed Video Scrubber" — press and hold the thin progress bar at the bottom
+// of a feed video, then slide left or right to scrub it, without leaving the
+// feed. Off by default (sFeedVideoScrubber, toggle under Posts & Feeds).
 //
 //     ┌────────────────────────────────────┐
 //     │                                    │
 //     │            feed video              │
 //     │                                    │
-//     │   0:07 ──────●───────────── 0:42   │  ← our overlay (first tap)
-//     └────────────────────────────────────┘
+//     │ ▬▬▬▬▬▬▬▬▬▬▬●━━━━━━━━━━━━━━━━━━━━━━ │  ← Apollo's own progress strip;
+//     └────────────────────────────────────┘    hold it and slide to scrub
 //
-// Interaction model, chosen with the user to stay out of every existing
-// gesture's way:
-//   • FIRST tap on the video   → show the bar, swallow the tap.
-//   • Tap or drag ON the bar   → seek; the auto-hide timer restarts.
-//   • Tap anywhere ELSE on the video while the bar is up → hide it and open
-//     the fullscreen viewer, exactly as an untouched Apollo would have on the
-//     first tap. The viewer is therefore never more than two taps away.
-//   • No interaction for kAutoHideDelay → the bar fades out by itself.
-// A press-and-hold gesture was deliberately NOT used: long-press already owns
-// the feed's context menu, and hold-on-the-right already means "play faster"
-// in the fullscreen player (ApolloVideoHoldSpeed.xm).
+// Interaction model (v2 — reworked with the user after a tap-summoned overlay
+// bar turned out to be the wrong shape; there is deliberately NO new chrome):
 //
-// Why -[RichMediaNode didTapVideoNode:] is the interception point (recovered
-// from the binary, not guessed):
-//   TouchHintVideoNode is an ASVideoNode, i.e. an ASControlNode. Its tap is a
-//   target/action, not a gesture recognizer. Texture's own
-//   -[ASVideoNode tapped] forwards to `[self.delegate didTapVideoNode:self]`
-//   when the delegate implements it, and RichMediaNode sets itself as that
-//   delegate. RichMediaNode ALSO registers thumbnailTappedWithSender: on the
-//   same node, but that one opens with `guard !(sender is ASVideoNode)` and
-//   returns immediately for video senders, and intermediaryNodeTappedWithSender:
-//   only runs while an error node is present. So didTapVideoNode: is the single
-//   route from a video tap to the fullscreen viewer: its first act is to hand
-//   the video node to the weak `actionDelegate` (PostCellActionTaker), which
-//   presents the viewer. Skipping %orig suppresses exactly that, and nothing
-//   else the user can see.
+//   • The EXISTING bottom progress strip (RichMediaNode.videoGIFProgressView,
+//     a 5pt UIVisualEffectView pinned across the video's bottom) IS the
+//     scrubber. An invisible touch strip covers the bottom kStripHeight points
+//     of the video picture and drives the player; Apollo's own progress
+//     updates move the visible strip, so what you grab is what moves.
+//   • Press and hold the strip, then slide: playback position follows the
+//     finger's absolute position on the bar (finger at 1/3 of the width ≈ 1/3
+//     of the video), exactly like tapping into a scrubber anywhere else.
+//   • The feed's own touch delay does the flick/scrub disambiguation for
+//     free: UIScrollView holds content touches for ~150ms deciding whether
+//     they start a scroll, so a scrolling flick over the strip never reaches
+//     it, while a press-and-hold outlasts the window and is delivered here.
+//     (This is the same delaysContentTouches behavior the v1 overlay had to
+//     fight — for hold-to-scrub it is the correct gate, so it stays stock.)
+//   • While the finger is down: the interactive pop, Apollo's
+//     swipe-anywhere-back pan, and every ancestor long-press (the feed
+//     context menu's driver) are suspended, so a scrub can't pop the screen
+//     and a hold can't pop the menu. All restored the moment the touch ends,
+//     with a dealloc backstop.
+//   • A quick tap on the strip is forwarded to the stock open-fullscreen
+//     route (didTapVideoNode:), so the bottom of a video never becomes a
+//     dead zone for the tap everyone already knows.
+//   • Player type doesn't matter — v.redd.it keeps its player on the
+//     AVPlayerLayer, RedGifs / Streamable / sports clips / GIF-mp4s keep it
+//     on the video node — because the player is resolved AT TOUCH TIME via
+//     the unmute module's shared helper, which tries both in that order.
+//     Badge-"GIF" posts whose animation is a Texture animated image have no
+//     playing AVPlayer and no native progress strip; the strip refuses the
+//     hit outright (pointInside), so their touches pass through untouched.
 //
-// Everything here is UIKit on top of a Texture node's view. RichMediaNode's own
-// `videoGIFProgressView` (a plain UIVisualEffectView pinned 5pt tall to the
-// bottom of the video) is hidden while our bar is up so a long video doesn't
-// show two progress indicators, and restored on teardown.
+// The touch strip is installed lazily from LargePostCellNode's visibility
+// event — the same callback the feed-unmute feature rides in
+// ApolloVideoUnmute.xm (separate %hook in a separate file; they chain).
+// It lives as a subview of the RichMediaNode's view, so it dies with the
+// cell, and it is retained by the node through an associated object.
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"          // sFeedVideoScrubber
-#import "ApolloThemeRuntime.h"   // ApolloThemeAccentColor
+#import "UserDefaultConstants.h"
 
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -56,22 +63,26 @@
 // v.redd.it path keeps its player on the playerLayer, not on the video node.
 extern AVPlayer *ApolloVideoUnmute_GetPlayerFromVideoNode(id videoNode);
 
-// Videos shorter than this aren't worth a scrub bar (and are usually silent
-// GIF-style clips where the tap should just open the viewer).
+// Videos shorter than this aren't worth scrubbing.
 static const NSTimeInterval kMinimumScrubbableDuration = 1.0;
 
-// How long the bar stays up with no interaction.
-static const NSTimeInterval kAutoHideDelay = 4.0;
+// Height of the invisible touch strip, anchored to the bottom of the video
+// picture. Tall enough to grab with a thumb, short enough that the video's
+// tap-to-open area stays essentially intact.
+static const CGFloat kStripHeight = 32.0;
 
-// Progress refresh rate. Matches the PiP card's observer: fast enough that the
-// knob tracks smoothly, slow enough to be free.
-static const int32_t kProgressTimescale = 4;   // 4 Hz
+// The bottom-right corner of the video belongs to the mute button (and the
+// GIF badge). Touches there fall through to it.
+static const CGFloat kCornerExclusion = 56.0;
 
-static const CGFloat kOverlayHeight = 34.0;
-static const CGFloat kOverlaySideInset = 8.0;
-static const CGFloat kOverlayBottomInset = 6.0;
-static const CGFloat kTrackHeight = 4.0;
-static const CGFloat kKnobDiameter = 12.0;
+// A finger has to move this far horizontally before the hold becomes a scrub;
+// below it a release is treated as a tap.
+static const CGFloat kScrubSlop = 6.0;
+
+// A press shorter than this with no slide is a tap, forwarded to the stock
+// open-fullscreen route. Longer means the user grabbed the bar deliberately —
+// releasing without sliding then does nothing.
+static const NSTimeInterval kForwardTapMaxDuration = 0.3;
 
 #pragma mark - Helpers
 
@@ -107,15 +118,6 @@ static UIView *ViewForNode(id node) {
     return ((UIView *(*)(id, SEL))objc_msgSend)(node, @selector(view));
 }
 
-// The feed's scroll view, for clamping the bar into the region the user can
-// actually see (Apollo insets the feed for the tab bar).
-static UIScrollView *EnclosingScrollView(UIView *view) {
-    for (UIView *v = view.superview; v; v = v.superview) {
-        if ([v isKindOfClass:[UIScrollView class]]) return (UIScrollView *)v;
-    }
-    return nil;
-}
-
 // The view controller a view currently lives in, for reaching its navigation
 // controller's interactive-pop recognizer.
 static UIViewController *ViewControllerForView(UIView *view) {
@@ -125,14 +127,16 @@ static UIViewController *ViewControllerForView(UIView *view) {
     return nil;
 }
 
-// A horizontal drag on the bar is also a perfectly good "swipe back" as far as
-// Apollo's swipe-anywhere-to-go-back gesture is concerned, and that gesture
-// wins: it cancels the bar's touch tracking and pops the screen mid-scrub.
-// Disable the pop recognizer and any pan-like ancestor for the duration of the
-// drag only (mirrors ApolloStatsRowTouch.xm's loupe handling). The feed's own
-// scroll pan is deliberately left alone — cancelling it is the scroll view's
-// business and it never fires for a horizontal drag.
-static NSArray<UIGestureRecognizer *> *SuspendCompetingPans(UIView *view) {
+// A horizontal drag on the strip is also a perfectly good "swipe back" as far
+// as Apollo's swipe-anywhere-to-go-back gesture is concerned, and that gesture
+// wins: it cancels UIControl tracking and pops the screen mid-scrub. A
+// stationary hold is likewise a perfectly good context-menu press. Disable the
+// pop recognizer, every pan-like ancestor, and every ancestor long-press for
+// the duration of the touch only (mirrors ApolloStatsRowTouch.xm's loupe
+// handling). The feed's own scroll pan is deliberately left alone — cancelling
+// it is the scroll view's business, and UIScrollView already exempts tracking
+// UIControls from touch cancellation.
+static NSArray<UIGestureRecognizer *> *SuspendCompetingGestures(UIView *view) {
     NSMutableArray<UIGestureRecognizer *> *disabled = [NSMutableArray array];
 
     UIGestureRecognizer *pop =
@@ -144,20 +148,24 @@ static NSArray<UIGestureRecognizer *> *SuspendCompetingPans(UIView *view) {
             [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
         for (UIGestureRecognizer *g in v.gestureRecognizers) {
             if (g == scrollPan || !g.isEnabled) continue;
-            NSString *name = NSStringFromClass([g class]);
-            BOOL panLike = [g isKindOfClass:[UIPanGestureRecognizer class]]
-                || [name containsString:@"ParallaxTransition"];
-            if (panLike) { g.enabled = NO; [disabled addObject:g]; }
+            // Deny-by-default: iOS 26's context-menu driver is NOT a
+            // UILongPressGestureRecognizer subclass (a class-list allowlist
+            // missed it, and it cancelled the hold ~400ms in), so suspend
+            // every ancestor recognizer except plain taps — those only fire
+            // on touch-up, when the scrub is over anyway.
+            if ([g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+            g.enabled = NO;
+            [disabled addObject:g];
         }
     }
     return disabled;
 }
 
-static void RestoreCompetingPans(NSArray<UIGestureRecognizer *> *disabled) {
+static void RestoreCompetingGestures(NSArray<UIGestureRecognizer *> *disabled) {
     for (UIGestureRecognizer *g in disabled) g.enabled = YES;
 }
 
-// The AVPlayerLayer showing this video, so the overlay can be sized to the
+// The AVPlayerLayer showing this video, so the strip can be sized to the
 // picture itself rather than to the node that hosts it.
 static AVPlayerLayer *PlayerLayerInLayer(CALayer *layer) {
     if (!layer) return nil;
@@ -169,12 +177,12 @@ static AVPlayerLayer *PlayerLayerInLayer(CALayer *layer) {
     return nil;
 }
 
-// The rect the video actually occupies, in `host` coordinates. A 16:9 clip in a
-// taller node is letterboxed, so the node's frame is wider (or taller) than the
-// picture — laying the bar out against the frame leaves it overhanging the
-// video, which reads as misaligned. AVPlayerLayer.videoRect is the picture's
-// real rect once the layer is ready; fall back to the node's own bounds before
-// then (and for anything without a player layer).
+// The rect the video actually occupies, in `host` coordinates. A 16:9 clip in
+// a taller node is letterboxed, so the node's frame is wider (or taller) than
+// the picture — the native progress strip hugs the picture, and the touch
+// strip must hug the same edge. AVPlayerLayer.videoRect is the picture's real
+// rect once the layer is ready; fall back to the node's own bounds before then
+// (and for non-shareable players, whose layer fills the node anyway).
 static CGRect VideoContentRectInHost(UIView *videoView, UIView *host) {
     CGRect fallback = [videoView convertRect:videoView.bounds toView:host];
     AVPlayerLayer *playerLayer = PlayerLayerInLayer(videoView.layer);
@@ -191,20 +199,8 @@ static CGRect VideoContentRectInHost(UIView *videoView, UIView *host) {
     return CGRectIsEmpty(inHost) ? fallback : CGRectIntersection(inHost, fallback);
 }
 
-static NSString *FormatPlaybackTime(NSTimeInterval seconds) {
-    if (!isfinite(seconds) || seconds < 0) seconds = 0;
-    NSInteger total = (NSInteger)llround(seconds);
-    NSInteger hours = total / 3600;
-    NSInteger minutes = (total % 3600) / 60;
-    NSInteger secs = total % 60;
-    if (hours > 0) {
-        return [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)hours, (long)minutes, (long)secs];
-    }
-    return [NSString stringWithFormat:@"%ld:%02ld", (long)minutes, (long)secs];
-}
-
 // Total duration in seconds, or 0 when the item is missing, still loading, or
-// live/indefinite (a scrub bar over an unknown length would be a lie).
+// live/indefinite (scrubbing an unknown length would be a lie).
 static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
     AVPlayerItem *item = player.currentItem;
     if (!item) return 0;
@@ -215,110 +211,108 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
     return seconds;
 }
 
-#pragma mark - Scrub bar control
+#pragma mark - Touch strip
 
-// A plain UIControl rather than a UISlider on purpose: on iOS 26 UIKit attaches
-// a private _UIFluidSliderInteraction to every UISlider, whose continuous
-// "fluid" scrub haptic buzzes the whole way through a drag (the bug chased down
-// at length for the Inline Media size slider). Owning the tracking outright
-// avoids that entirely and lets the touch target be taller than the track.
-@interface ApolloFeedScrubBar : UIControl
-@property (nonatomic, assign) CGFloat progress;        // 0…1, drives the fill
-@property (nonatomic, assign) BOOL scrubbing;
-@property (nonatomic, strong) UIView *trackView;
-@property (nonatomic, strong) UIView *fillView;
-@property (nonatomic, strong) UIView *knobView;
-@property (nonatomic, copy) void (^onScrub)(CGFloat fraction, BOOL finished);
-@property (nonatomic, strong) NSArray<UIGestureRecognizer *> *suspendedPans;
-- (void)restoreSuspendedPans;
+// One invisible UIControl per feed RichMediaNode, covering the bottom strip of
+// the video picture. Everything it needs (player, duration, the native strip's
+// presence) is resolved per-touch, never cached across touches — feed players
+// are created and torn down constantly as cells scroll.
+@interface ApolloFeedScrubStrip : UIControl
+@property (nonatomic, weak) id richMediaNode;
+@property (nonatomic, weak) id videoNode;
+@property (nonatomic, strong) AVPlayer *player;              // touch-scoped
+@property (nonatomic, assign) NSTimeInterval duration;       // touch-scoped
+@property (nonatomic, assign) CGFloat startX;
+@property (nonatomic, assign) CFTimeInterval touchStartedAt;
+@property (nonatomic, assign) BOOL didScrub;
+@property (nonatomic, strong) NSArray<UIGestureRecognizer *> *suspendedGestures;
+@property (nonatomic, assign) BOOL seekInFlight;
+@property (nonatomic, assign) BOOL hasPendingSeek;
+@property (nonatomic, assign) CMTime pendingSeekTime;
 @end
 
-@implementation ApolloFeedScrubBar
+static char kFeedScrubStripKey;
+
+@implementation ApolloFeedScrubStrip
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (!self) return nil;
-
-    _trackView = [[UIView alloc] init];
-    _trackView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.32];
-    _trackView.layer.cornerRadius = kTrackHeight / 2.0;
-    _trackView.userInteractionEnabled = NO;
-    [self addSubview:_trackView];
-
-    _fillView = [[UIView alloc] init];
-    _fillView.layer.cornerRadius = kTrackHeight / 2.0;
-    _fillView.userInteractionEnabled = NO;
-    [self addSubview:_fillView];
-
-    _knobView = [[UIView alloc] init];
-    _knobView.layer.cornerRadius = kKnobDiameter / 2.0;
-    _knobView.userInteractionEnabled = NO;
-    _knobView.layer.shadowColor = [UIColor blackColor].CGColor;
-    _knobView.layer.shadowOpacity = 0.35;
-    _knobView.layer.shadowRadius = 2.0;
-    _knobView.layer.shadowOffset = CGSizeMake(0, 1);
-    [self addSubview:_knobView];
-
+    self.backgroundColor = [UIColor clearColor];
     self.isAccessibilityElement = YES;
     self.accessibilityLabel = @"Video progress";
     self.accessibilityTraits = UIAccessibilityTraitAdjustable;
-
-    [self applyAccentColor];
     return self;
+}
+
+- (void)dealloc {
+    // Suspended recognizers must never outlive a touch, whatever tore us down.
+    RestoreCompetingGestures(_suspendedGestures);
+}
+
+#pragma mark Hit testing
+
+// The strip only exists for touches it can actually serve. Everything else —
+// feature off, no playable video yet, no native progress strip to mirror the
+// scrub, the mute-button corner — falls straight through to whatever is
+// underneath, so stock behavior is untouched in every state but "scrubbable".
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    if (!sFeedVideoScrubber) return NO;
+    if (![super pointInside:point withEvent:event]) return NO;
+    if (point.x > self.bounds.size.width - kCornerExclusion) return NO;
+
+    // From here down the touch is genuinely on the strip, so a refusal is
+    // worth naming — it is the difference between "scrub" and "dead zone".
+    UIView *nativeStrip = NodeIvar(self.richMediaNode, "videoGIFProgressView");
+    if (![nativeStrip isKindOfClass:[UIView class]] || nativeStrip.hidden) {
+        ApolloLog(@"[FeedScrubber] refusing touch: native strip %@",
+                  nativeStrip ? @"hidden" : @"missing");
+        return NO;
+    }
+
+    AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
+    NSTimeInterval duration = player ? ScrubbableDuration(player) : 0;
+    if (!player || duration <= 0) {
+        ApolloLog(@"[FeedScrubber] refusing touch: player=%p duration=%.1f", player, duration);
+        return NO;
+    }
+    return YES;
 }
 
 #pragma mark Accessibility
 
-// VoiceOver scrubs in 5% steps; the same entry point also makes the bar
-// addressable from the accessibility tree, which is how it gets driven in
-// automated simulator runs.
+// VoiceOver scrubs in 5% steps without needing the hold-and-slide gesture.
 - (NSString *)accessibilityValue {
-    return [NSString stringWithFormat:@"%ld%%", (long)llround(MAX(0.0, MIN(1.0, self.progress)) * 100.0)];
+    AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
+    NSTimeInterval duration = player ? ScrubbableDuration(player) : 0;
+    if (duration <= 0) return nil;
+    NSTimeInterval current = CMTimeGetSeconds([player currentTime]);
+    if (!isfinite(current) || current < 0) current = 0;
+    return [NSString stringWithFormat:@"%ld%%", (long)llround(current / duration * 100.0)];
+}
+
+- (void)accessibilityNudgeBy:(NSTimeInterval)delta {
+    AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
+    NSTimeInterval duration = player ? ScrubbableDuration(player) : 0;
+    if (duration <= 0) return;
+    NSTimeInterval current = CMTimeGetSeconds([player currentTime]);
+    if (!isfinite(current) || current < 0) current = 0;
+    NSTimeInterval target = MAX(0.0, MIN(duration, current + delta));
+    [player seekToTime:CMTimeMakeWithSeconds(target, NSEC_PER_SEC)
+       toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
 }
 
 - (void)accessibilityIncrement {
-    CGFloat next = MIN(1.0, self.progress + 0.05);
-    self.progress = next;
-    if (self.onScrub) self.onScrub(next, YES);
+    AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
+    [self accessibilityNudgeBy:ScrubbableDuration(player) * 0.05];
 }
 
 - (void)accessibilityDecrement {
-    CGFloat next = MAX(0.0, self.progress - 0.05);
-    self.progress = next;
-    if (self.onScrub) self.onScrub(next, YES);
+    AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
+    [self accessibilityNudgeBy:-ScrubbableDuration(player) * 0.05];
 }
 
-// The theme accent, with the documented fallback chain. Used as a plain
-// backgroundColor (never .CGColor), so UIKit resolves the dynamic provider for
-// the right light/dark variant on its own.
-- (void)applyAccentColor {
-    UIColor *accent = ApolloThemeAccentColor() ?: self.tintColor ?: [UIColor systemBlueColor];
-    self.fillView.backgroundColor = accent;
-    self.knobView.backgroundColor = [UIColor whiteColor];
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGFloat width = self.bounds.size.width;
-    CGFloat midY = self.bounds.size.height / 2.0;
-    self.trackView.frame = CGRectMake(0, midY - kTrackHeight / 2.0, width, kTrackHeight);
-    [self applyProgressGeometry];
-}
-
-- (void)applyProgressGeometry {
-    CGFloat width = self.bounds.size.width;
-    CGFloat midY = self.bounds.size.height / 2.0;
-    CGFloat clamped = MAX(0.0, MIN(1.0, self.progress));
-    self.fillView.frame = CGRectMake(0, midY - kTrackHeight / 2.0, width * clamped, kTrackHeight);
-    self.knobView.frame = CGRectMake(width * clamped - kKnobDiameter / 2.0,
-                                     midY - kKnobDiameter / 2.0,
-                                     kKnobDiameter, kKnobDiameter);
-}
-
-- (void)setProgress:(CGFloat)progress {
-    _progress = progress;
-    [self applyProgressGeometry];
-}
+#pragma mark Tracking
 
 - (CGFloat)fractionForTouch:(UITouch *)touch {
     CGFloat width = self.bounds.size.width;
@@ -328,350 +322,68 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 }
 
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    self.scrubbing = YES;
-    CGFloat fraction = [self fractionForTouch:touch];
-    // Confirms the touch reached the bar rather than being claimed by the feed's
-    // scroll view or the swipe-back gesture, which is the failure mode to watch
-    // for when this is dropped into a new chrome (glass vs legacy).
-    ApolloLog(@"[FeedScrubber] scrub began at %.0f%%", fraction * 100.0);
-    self.suspendedPans = SuspendCompetingPans(self);
-    self.progress = fraction;
-    if (self.onScrub) self.onScrub(fraction, NO);
-    [UIView animateWithDuration:0.12 animations:^{
-        self.knobView.transform = CGAffineTransformMakeScale(1.35, 1.35);
-    }];
+    // Re-resolve everything: pointInside vetted the touch, but the player can
+    // change between then and now (and between any two touches).
+    self.player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
+    self.duration = self.player ? ScrubbableDuration(self.player) : 0;
+    if (!self.player || self.duration <= 0) { self.player = nil; return NO; }
+
+    self.startX = [touch locationInView:self].x;
+    self.touchStartedAt = CACurrentMediaTime();
+    self.didScrub = NO;
+    self.hasPendingSeek = NO;
+
+    // The touch only reaches us after outlasting the scroll view's touch
+    // delay, so this never fires for a scrolling flick.
+    self.suspendedGestures = SuspendCompetingGestures(self);
     return YES;
 }
 
 - (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    CGFloat fraction = [self fractionForTouch:touch];
-    self.progress = fraction;
-    if (self.onScrub) self.onScrub(fraction, NO);
+    CGFloat x = [touch locationInView:self].x;
+    if (!self.didScrub) {
+        if (fabs(x - self.startX) < kScrubSlop) return YES;
+        self.didScrub = YES;
+        // Confirms the drag reached the strip rather than being claimed by the
+        // scroll view or the swipe-back pan — the failure mode to watch for.
+        ApolloLog(@"[FeedScrubber] scrub engaged at %.0f%% (duration=%.1fs)",
+                  [self fractionForTouch:touch] * 100.0, self.duration);
+    }
+    [self scrubToFraction:[self fractionForTouch:touch] finished:NO];
     return YES;
 }
 
-- (void)restoreSuspendedPans {
-    RestoreCompetingPans(self.suspendedPans);
-    self.suspendedPans = nil;
-}
-
 - (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    self.scrubbing = NO;
-    [self restoreSuspendedPans];
-    CGFloat fraction = touch ? [self fractionForTouch:touch] : self.progress;
-    self.progress = fraction;
-    if (self.onScrub) self.onScrub(fraction, YES);
-    [UIView animateWithDuration:0.12 animations:^{
-        self.knobView.transform = CGAffineTransformIdentity;
-    }];
-}
+    [self restoreSuspendedGestures];
 
-- (void)cancelTrackingWithEvent:(UIEvent *)event {
-    self.scrubbing = NO;
-    [self restoreSuspendedPans];
-    if (self.onScrub) self.onScrub(self.progress, YES);
-    [UIView animateWithDuration:0.12 animations:^{
-        self.knobView.transform = CGAffineTransformIdentity;
-    }];
-}
-
-@end
-
-#pragma mark - Overlay controller
-
-// One of these per RichMediaNode that currently shows a bar. Held by the node
-// through an associated object, so it dies with the cell; -dealloc drops the
-// time observer, which must never outlive the player it was added to.
-@interface ApolloFeedScrubOverlay : NSObject
-@property (nonatomic, weak) id richMediaNode;
-@property (nonatomic, weak) id videoNode;
-@property (nonatomic, strong) AVPlayer *player;          // strong: must match for removeTimeObserver:
-@property (nonatomic, strong) id timeObserver;
-@property (nonatomic, strong) UIView *container;
-@property (nonatomic, strong) ApolloFeedScrubBar *scrubBar;
-@property (nonatomic, strong) UILabel *elapsedLabel;
-@property (nonatomic, strong) UILabel *durationLabel;
-@property (nonatomic, weak) UIView *nativeProgressView;  // hidden while we're up
-@property (nonatomic, assign) BOOL nativeProgressWasHidden;
-@property (nonatomic, weak) UIScrollView *feedScrollView;   // touch-delay owner
-@property (nonatomic, assign) BOOL feedDelayedContentTouches;
-@property (nonatomic, assign) BOOL didSuspendTouchDelay;
-@property (nonatomic, assign) NSTimeInterval duration;
-@property (nonatomic, assign) NSUInteger hideGeneration;
-@property (nonatomic, assign) BOOL seekInFlight;
-@property (nonatomic, assign) BOOL hasPendingSeek;
-@property (nonatomic, assign) CMTime pendingSeekTime;
-@end
-
-static char kFeedScrubOverlayKey;
-
-@implementation ApolloFeedScrubOverlay
-
-- (void)dealloc {
-    // The observer holds the player; dropping it here covers every teardown
-    // path that never got to -teardown (cell deallocated mid-scroll, etc).
-    if (_timeObserver && _player) {
-        [_player removeTimeObserver:_timeObserver];
-        _timeObserver = nil;
-    }
-    // The feed's own touch handling must never stay altered past our lifetime.
-    if (_didSuspendTouchDelay) {
-        _didSuspendTouchDelay = NO;
-        _feedScrollView.delaysContentTouches = _feedDelayedContentTouches;
-    }
-}
-
-#pragma mark Build
-
-- (void)buildInHost:(UIView *)host {
-    UIView *container = [[UIView alloc] init];
-    container.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.42];
-    container.layer.cornerRadius = 10.0;
-    container.layer.cornerCurve = kCACornerCurveContinuous;
-    container.userInteractionEnabled = YES;
-    container.alpha = 0.0;
-
-    UIFont *font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightSemibold];
-
-    UILabel *elapsed = [[UILabel alloc] init];
-    elapsed.font = font;
-    elapsed.textColor = [UIColor whiteColor];
-    elapsed.textAlignment = NSTextAlignmentLeft;
-    [container addSubview:elapsed];
-
-    UILabel *durationLabel = [[UILabel alloc] init];
-    durationLabel.font = font;
-    durationLabel.textColor = [UIColor whiteColor];
-    durationLabel.textAlignment = NSTextAlignmentRight;
-    [container addSubview:durationLabel];
-
-    ApolloFeedScrubBar *bar = [[ApolloFeedScrubBar alloc] initWithFrame:CGRectZero];
-    __weak typeof(self) weakSelf = self;
-    bar.onScrub = ^(CGFloat fraction, BOOL finished) {
-        [weakSelf scrubToFraction:fraction finished:finished];
-    };
-    [container addSubview:bar];
-
-    self.container = container;
-    self.scrubBar = bar;
-    self.elapsedLabel = elapsed;
-    self.durationLabel = durationLabel;
-
-    [host addSubview:container];
-}
-
-// Lay the overlay along the bottom of the video, lifted clear of the mute
-// button when that would otherwise sit on top of it. Frame-based on purpose:
-// the host is a Texture node view laid out by frames, and this runs from show
-// and from the progress tick, never from a layout callback.
-- (void)positionInHost:(UIView *)host videoView:(UIView *)videoView {
-    if (!host || !videoView) return;
-
-    // Track the picture, not the node: a letterboxed clip must not have the bar
-    // hanging off its edges.
-    CGRect videoFrame = VideoContentRectInHost(videoView, host);
-    if (CGRectIsEmpty(videoFrame)) return;
-
-    CGFloat width = MAX(0.0, videoFrame.size.width - kOverlaySideInset * 2.0);
-    CGFloat originX = videoFrame.origin.x + kOverlaySideInset;
-    CGFloat originY = CGRectGetMaxY(videoFrame) - kOverlayHeight - kOverlayBottomInset;
-
-    // Apollo puts the mute button in the video's bottom-right corner. Raising
-    // the strip above it keeps the full track width for scrubbing AND leaves
-    // the button tappable, which trimming the track's right edge would not.
-    UIView *muteView = ViewForNode(NodeIvar(self.richMediaNode, "muteUnmuteButtonNode"));
-    if (muteView && !muteView.hidden && muteView.alpha > 0.01) {
-        CGRect muteFrame = [muteView convertRect:muteView.bounds toView:host];
-        CGRect candidate = CGRectMake(originX, originY, width, kOverlayHeight);
-        if (!CGRectIsEmpty(muteFrame) && CGRectIntersectsRect(candidate, muteFrame)) {
-            originY = CGRectGetMinY(muteFrame) - kOverlayHeight - 4.0;
+    if (self.didScrub) {
+        CGFloat fraction = touch ? [self fractionForTouch:touch] : 0;
+        [self scrubToFraction:fraction finished:YES];
+    } else if (CACurrentMediaTime() - self.touchStartedAt < kForwardTapMaxDuration) {
+        // A plain tap: hand it to the stock route so tapping the bottom of a
+        // video still opens it fullscreen, scrubber or no scrubber.
+        id richMediaNode = self.richMediaNode;
+        id videoNode = self.videoNode;
+        if (richMediaNode && videoNode
+            && [richMediaNode respondsToSelector:@selector(didTapVideoNode:)]) {
+            ApolloLog(@"[FeedScrubber] quick tap on the strip - forwarding to fullscreen");
+            ((void (*)(id, SEL, id))objc_msgSend)(richMediaNode, @selector(didTapVideoNode:), videoNode);
         }
     }
 
-    // A tall video's bottom edge often sits under the floating tab bar, which
-    // would hide the bar entirely. Keep it inside the part of the feed the user
-    // can actually see — Apollo insets the scroll view for the tab bar, so that
-    // inset is the honest boundary in both the glass and legacy chrome.
-    UIScrollView *scrollView = EnclosingScrollView(host);
-    if (scrollView) {
-        CGRect candidate = CGRectMake(originX, originY, width, kOverlayHeight);
-        CGRect inScroll = [host convertRect:candidate toView:scrollView];
-        CGFloat visibleMaxY = CGRectGetMaxY(scrollView.bounds)
-                            - scrollView.adjustedContentInset.bottom - 8.0;
-        CGFloat overshoot = CGRectGetMaxY(inScroll) - visibleMaxY;
-        if (overshoot > 0) originY -= overshoot;
-    }
-
-    // Never let it ride above the top of the video on a very short cell.
-    originY = MAX(originY, videoFrame.origin.y + 2.0);
-
-    self.container.frame = CGRectMake(originX, originY, width, kOverlayHeight);
-
-    CGFloat labelWidth = 44.0;
-    CGFloat inset = 8.0;
-    self.elapsedLabel.frame = CGRectMake(inset, 0, labelWidth, kOverlayHeight);
-    self.durationLabel.frame = CGRectMake(width - labelWidth - inset, 0, labelWidth, kOverlayHeight);
-    CGFloat barX = inset + labelWidth + 6.0;
-    CGFloat barWidth = MAX(0.0, width - barX - labelWidth - inset - 6.0);
-    self.scrubBar.frame = CGRectMake(barX, 0, barWidth, kOverlayHeight);
+    self.player = nil;
+    self.didScrub = NO;
 }
 
-#pragma mark Show / hide
-
-- (void)showForRichMediaNode:(id)richMediaNode videoNode:(id)videoNode player:(AVPlayer *)player {
-    self.richMediaNode = richMediaNode;
-    self.videoNode = videoNode;
-    self.player = player;
-    self.duration = ScrubbableDuration(player);
-
-    UIView *host = ViewForNode(richMediaNode);
-    UIView *videoView = ViewForNode(videoNode);
-    if (!host || !videoView) return;
-
-    if (!self.container) [self buildInHost:host];
-    if (self.container.superview != host) {
-        [self.container removeFromSuperview];
-        [host addSubview:self.container];
-    }
-    [host bringSubviewToFront:self.container];
-
-    // Apollo's own 5pt progress strip would sit right under ours on long
-    // videos. Park it while we're up and put it back exactly as we found it.
-    UIView *nativeProgress = NodeIvar(richMediaNode, "videoGIFProgressView");
-    if ([nativeProgress isKindOfClass:[UIView class]]) {
-        self.nativeProgressView = nativeProgress;
-        self.nativeProgressWasHidden = nativeProgress.hidden;
-        nativeProgress.hidden = YES;
-    }
-
-    // The feed's scroll view holds every content touch for ~150ms to decide
-    // whether it is the start of a scroll. A finger that starts moving inside
-    // that window never reaches the bar at all — the scroll view keeps it — so
-    // a drag scrolls the feed instead of scrubbing. Hand touches straight
-    // through while the bar is up; the scroll view still takes over for touches
-    // that land anywhere else, and this is restored on every teardown path.
-    UIScrollView *scrollView = EnclosingScrollView(host);
-    if (scrollView && !self.didSuspendTouchDelay) {
-        self.feedScrollView = scrollView;
-        self.feedDelayedContentTouches = scrollView.delaysContentTouches;
-        self.didSuspendTouchDelay = YES;
-        scrollView.delaysContentTouches = NO;
-    }
-
-    self.durationLabel.text = FormatPlaybackTime(self.duration);
-    [self positionInHost:host videoView:videoView];
-    [self refreshProgress];
-    [self installTimeObserver];
-
-    [UIView animateWithDuration:0.18 animations:^{ self.container.alpha = 1.0; }];
-    [self restartAutoHide];
-
-    ApolloLog(@"[FeedScrubber] bar shown (duration=%.1fs)", self.duration);
+- (void)cancelTrackingWithEvent:(UIEvent *)event {
+    [self restoreSuspendedGestures];
+    self.player = nil;
+    self.didScrub = NO;
 }
 
-- (void)restartAutoHide {
-    NSUInteger generation = ++self.hideGeneration;
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kAutoHideDelay * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf || strongSelf.hideGeneration != generation) return;
-        if (strongSelf.scrubBar.scrubbing) { [strongSelf restartAutoHide]; return; }
-        [strongSelf teardownWithReason:@"auto-hide"];
-    });
-}
-
-- (void)restoreFeedTouchDelay {
-    if (!self.didSuspendTouchDelay) return;
-    self.didSuspendTouchDelay = NO;
-    self.feedScrollView.delaysContentTouches = self.feedDelayedContentTouches;
-    self.feedScrollView = nil;
-}
-
-- (void)teardownWithReason:(NSString *)reason {
-    self.hideGeneration++;   // cancel any pending auto-hide
-    [self restoreFeedTouchDelay];
-    // Backstop: if a drag was somehow still live (its touch cancelled without
-    // the control hearing about it), swipe-back must not stay disabled.
-    [self.scrubBar restoreSuspendedPans];
-
-    if (self.timeObserver && self.player) {
-        [self.player removeTimeObserver:self.timeObserver];
-    }
-    self.timeObserver = nil;
-
-    if (self.nativeProgressView) {
-        self.nativeProgressView.hidden = self.nativeProgressWasHidden;
-        self.nativeProgressView = nil;
-    }
-
-    UIView *container = self.container;
-    self.container = nil;
-    self.scrubBar = nil;
-    self.elapsedLabel = nil;
-    self.durationLabel = nil;
-
-    id owner = self.richMediaNode;
-    if (owner) objc_setAssociatedObject(owner, &kFeedScrubOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    [UIView animateWithDuration:0.18
-                     animations:^{ container.alpha = 0.0; }
-                     completion:^(__unused BOOL finished) { [container removeFromSuperview]; }];
-
-    ApolloLog(@"[FeedScrubber] bar hidden (%@)", reason);
-}
-
-#pragma mark Progress
-
-- (void)installTimeObserver {
-    if (self.timeObserver || !self.player) return;
-    __weak typeof(self) weakSelf = self;
-    self.timeObserver =
-        [self.player addPeriodicTimeObserverForInterval:CMTimeMake(1, kProgressTimescale)
-                                                  queue:dispatch_get_main_queue()
-                                             usingBlock:^(__unused CMTime time) {
-        [weakSelf tick];
-    }];
-}
-
-- (void)tick {
-    // Scrolled out of sight (or the cell went away): the bar has no business
-    // outliving the video it belongs to, and this catches every such path
-    // without a second visibility hook fighting PiP's.
-    UIView *container = self.container;
-    UIWindow *window = container.window;
-    if (!container || !window) { [self teardownWithReason:@"off-screen"]; return; }
-    CGRect inWindow = [container convertRect:container.bounds toView:nil];
-    if (!CGRectIntersectsRect(inWindow, window.bounds)) {
-        [self teardownWithReason:@"scrolled away"];
-        return;
-    }
-
-    // Cheap re-assert: Texture can re-lay its subviews out from above, and the
-    // video can resize (rotation, cell re-measure) while the bar is up.
-    UIView *host = ViewForNode(self.richMediaNode);
-    UIView *videoView = ViewForNode(self.videoNode);
-    if (host && videoView) {
-        if (container.superview != host) [host addSubview:container];
-        [host bringSubviewToFront:container];
-        [self positionInHost:host videoView:videoView];
-    }
-
-    if (!self.scrubBar.scrubbing) [self refreshProgress];
-}
-
-- (void)refreshProgress {
-    AVPlayer *player = self.player;
-    if (!player) return;
-    if (self.duration <= 0) {
-        // Duration can arrive after the item finishes loading.
-        self.duration = ScrubbableDuration(player);
-        if (self.duration > 0) self.durationLabel.text = FormatPlaybackTime(self.duration);
-    }
-    NSTimeInterval current = CMTimeGetSeconds([player currentTime]);
-    if (!isfinite(current) || current < 0) current = 0;
-    self.elapsedLabel.text = FormatPlaybackTime(current);
-    if (self.duration > 0) self.scrubBar.progress = current / self.duration;
+- (void)restoreSuspendedGestures {
+    RestoreCompetingGestures(self.suspendedGestures);
+    self.suspendedGestures = nil;
 }
 
 #pragma mark Seeking
@@ -680,16 +392,14 @@ static char kFeedScrubOverlayKey;
 // The player is deliberately NOT paused for the drag — Apollo has several
 // "snapshot the rate now, restore it later" paths (the fullscreen scrub, the
 // mute dance's unpause) and a temporary rate change is exactly what made the
-// hold-speed feature stick at 2x. Seeking a playing player sidesteps all of it.
+// hold-speed feature stick at 2x. Seeking a playing player sidesteps all of
+// it, and Apollo's own progress observer moves the native strip as each seek
+// lands, which is the only visual feedback this feature needs.
 - (void)scrubToFraction:(CGFloat)fraction finished:(BOOL)finished {
-    [self restartAutoHide];
-
     AVPlayer *player = self.player;
     if (!player || self.duration <= 0) return;
 
     NSTimeInterval target = MAX(0.0, MIN(self.duration, self.duration * fraction));
-    self.elapsedLabel.text = FormatPlaybackTime(target);
-
     CMTime targetTime = CMTimeMakeWithSeconds(target, NSEC_PER_SEC);
     if (finished) {
         self.hasPendingSeek = NO;
@@ -721,68 +431,82 @@ static char kFeedScrubOverlayKey;
 
 @end
 
-#pragma mark - Tap interception
+#pragma mark - Installation
 
-// Does this video support a meaningful scrub right now?
-static BOOL VideoIsScrubbable(AVPlayer *player) {
-    if (!player) return NO;
-    if (!player.currentItem) return NO;
-    if (ScrubbableDuration(player) <= 0) return NO;
-    // Only a video the user is actually watching play. A tap on a
-    // paused/not-yet-started video keeps its stock meaning: open it fullscreen.
-    if (player.rate > 0.0f) return YES;
-    return CMTimeGetSeconds([player currentTime]) > 0.1;
+// Give a feed RichMediaNode its touch strip and keep the strip glued to the
+// bottom of the video picture. Called from the cell's visibility events, so
+// it re-asserts geometry as cells scroll, resize, and re-lay out.
+static void EnsureScrubStrip(id richMediaNode) {
+    if (!richMediaNode) return;
+    // The comments header is a different context with its own expectations
+    // (and its own unmute setting); the feed strip stays out of it.
+    if (NodeBoolIvar(richMediaNode, "isShownInCommentsHeader")) return;
+
+    UIView *host = ViewForNode(richMediaNode);
+    if (!host) return;
+    id videoNode = NodeIvar(richMediaNode, "videoNode");
+    UIView *videoView = ViewForNode(videoNode);
+    if (!videoView) return;   // image/text posts have no video to scrub
+
+    ApolloFeedScrubStrip *strip = objc_getAssociatedObject(richMediaNode, &kFeedScrubStripKey);
+    if (!strip) {
+        strip = [[ApolloFeedScrubStrip alloc] initWithFrame:CGRectZero];
+        objc_setAssociatedObject(richMediaNode, &kFeedScrubStripKey, strip,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[FeedScrubber] strip installed on %p", (void *)richMediaNode);
+    }
+    strip.richMediaNode = richMediaNode;
+    strip.videoNode = videoNode;
+
+    if (strip.superview != host) [strip removeFromSuperview];
+    if (!strip.superview) [host addSubview:strip];
+
+    // Never move the strip under the user's finger mid-scrub.
+    if (strip.tracking) return;
+
+    CGRect videoFrame = VideoContentRectInHost(videoView, host);
+    if (CGRectIsEmpty(videoFrame)) return;
+    CGRect stripFrame = CGRectMake(videoFrame.origin.x,
+                                   CGRectGetMaxY(videoFrame) - kStripHeight,
+                                   videoFrame.size.width,
+                                   kStripHeight);
+    strip.frame = stripFrame;
+    [host bringSubviewToFront:strip];
 }
 
-%hook RichMediaNode
+// ---------------------------------------------------------------------------
+// LargePostCellNode: the feed's video cell. Same visibility callback the
+// feed-unmute feature hooks in ApolloVideoUnmute.xm — separate %hooks in
+// separate files chain normally. Events 0 (visible) and 1 (visible rect
+// changed) both position the strip; 2 (invisible) needs nothing, the strip
+// just goes off-screen with its cell.
+// ---------------------------------------------------------------------------
+%group FeedScrubStrip
 
-// The one route from "user tapped the feed video" to the fullscreen viewer.
-// Skipping %orig suppresses the viewer for that tap and nothing else.
-- (void)didTapVideoNode:(id)videoNode {
-    if (!sFeedVideoScrubber) { %orig; return; }
+%hook LargePostCellNode
 
-    ApolloFeedScrubOverlay *existing = objc_getAssociatedObject(self, &kFeedScrubOverlayKey);
-    if (existing) {
-        // Second tap, outside the bar: put the viewer back in charge.
-        [existing teardownWithReason:@"opening fullscreen"];
-        %orig;
-        return;
-    }
+- (void)cellNodeVisibilityEvent:(unsigned long long)event
+                   inScrollView:(id)scrollView
+                  withCellFrame:(CGRect)frame {
+    %orig;
+    if (!sFeedVideoScrubber) return;   // feature off: no per-tick work at all
+    if (event != 0 && event != 1) return;
 
-    // RichMediaNode backs both the feed card and the comments header. This is
-    // the "Feed Video Scrubber", and the header is a different context where a
-    // tap is expected to go fullscreen, so leave that one stock.
-    if (NodeBoolIvar(self, "isShownInCommentsHeader")) { %orig; return; }
-
-    AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode);
-    if (!VideoIsScrubbable(player)) {
-        // Names which gate sent the tap to the viewer: no player yet, a
-        // not-started video, or an item whose duration is unusable (GIF loopers
-        // report kCMTimeIndefinite, for example).
-        ApolloLog(@"[FeedScrubber] tap fell through to fullscreen (player=%p rate=%.2f time=%.1f duration=%.1f)",
-                  player, player ? [player rate] : 0.0f,
-                  player ? CMTimeGetSeconds([player currentTime]) : 0.0,
-                  player ? ScrubbableDuration(player) : 0.0);
-        %orig; return;
-    }
-
-    UIView *host = ViewForNode(self);
-    if (!host) { %orig; return; }
-
-    ApolloFeedScrubOverlay *overlay = [[ApolloFeedScrubOverlay alloc] init];
-    objc_setAssociatedObject(self, &kFeedScrubOverlayKey, overlay, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [overlay showForRichMediaNode:self videoNode:videoNode player:player];
-    // %orig deliberately skipped: this tap showed the bar instead.
+    EnsureScrubStrip(NodeIvar(self, "richMediaNode"));
+    id crosspostNode = NodeIvar(self, "crosspostNode");
+    if (crosspostNode) EnsureScrubStrip(NodeIvar(crosspostNode, "richMediaNode"));
 }
 
 %end
 
+%end
+
 %ctor {
-    Class richMediaNodeClass = objc_getClass("_TtC6Apollo13RichMediaNode");
-    if (!richMediaNodeClass) {
-        ApolloLog(@"[FeedScrubber] ctor: RichMediaNode missing - feed scrubber unavailable");
+    Class largePostCellClass = objc_getClass("_TtC6Apollo17LargePostCellNode");
+    if (!largePostCellClass) {
+        ApolloLog(@"[FeedScrubber] ctor: LargePostCellNode missing - feed scrubber unavailable");
         return;
     }
-    %init(RichMediaNode = richMediaNodeClass);
-    ApolloLog(@"[FeedScrubber] module loaded (tap a playing feed video for a scrub bar)");
+    %init(FeedScrubStrip, LargePostCellNode = largePostCellClass);
+    ApolloLog(@"[FeedScrubber] module loaded (hold the progress bar of a feed video to scrub)");
 }
