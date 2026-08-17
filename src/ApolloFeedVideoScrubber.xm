@@ -755,7 +755,16 @@ static BOOL VideoIsScrubbable(AVPlayer *player) {
     if (NodeBoolIvar(self, "isShownInCommentsHeader")) { %orig; return; }
 
     AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode);
-    if (!VideoIsScrubbable(player)) { %orig; return; }
+    if (!VideoIsScrubbable(player)) {
+        // Names which gate sent the tap to the viewer: no player yet, a
+        // not-started video, or an item whose duration is unusable (GIF loopers
+        // report kCMTimeIndefinite, for example).
+        ApolloLog(@"[FeedScrubber] tap fell through to fullscreen (player=%p rate=%.2f time=%.1f duration=%.1f)",
+                  player, player ? [player rate] : 0.0f,
+                  player ? CMTimeGetSeconds([player currentTime]) : 0.0,
+                  player ? ScrubbableDuration(player) : 0.0);
+        %orig; return;
+    }
 
     UIView *host = ViewForNode(self);
     if (!host) { %orig; return; }
