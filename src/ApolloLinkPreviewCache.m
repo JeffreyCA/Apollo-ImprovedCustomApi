@@ -12,6 +12,16 @@ static const NSTimeInterval ApolloLinkPreviewRedditTTL = 24.0 * 60.0 * 60.0;
 static const NSTimeInterval ApolloLinkPreviewYouTubeTTL = 30.0 * 24.0 * 60.0 * 60.0;
 static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
 
+// Entry schema stamp. Entries written by an older schema are dropped on load
+// rather than aged out, so a fix to how previews are *produced* reaches users
+// immediately instead of hiding behind the 7-day TTL. Bumped to 2 for the
+// charset-aware HTML decode (issue #945): every preview harvested from a
+// non-UTF-8 page before that fix holds mojibake text that would otherwise
+// keep rendering for a week after updating. Bump this whenever a change
+// invalidates already-stored previews.
+static NSString *const ApolloLinkPreviewCacheSchemaKey = @"schema";
+static const NSInteger ApolloLinkPreviewCacheSchemaVersion = 2;
+
 @interface ApolloLinkPreviewCache ()
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *entries;
 // Immutable point-in-time view used by layout callers after NSCache eviction.
@@ -109,7 +119,21 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
     NSData *data = [NSData dataWithContentsOfFile:self.cachePath];
     if (!data) return nil;
     id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    return [object isKindOfClass:[NSDictionary class]] ? object : nil;
+    if (![object isKindOfClass:[NSDictionary class]]) return nil;
+
+    NSMutableDictionary *current = [NSMutableDictionary dictionaryWithCapacity:[object count]];
+    [object enumerateKeysAndObjectsUsingBlock:^(NSString *key, id entry, __unused BOOL *stop) {
+        if (![key isKindOfClass:[NSString class]] || ![entry isKindOfClass:[NSDictionary class]]) return;
+        NSNumber *schema = entry[ApolloLinkPreviewCacheSchemaKey];
+        if (![schema isKindOfClass:[NSNumber class]] || schema.integerValue != ApolloLinkPreviewCacheSchemaVersion) return;
+        current[key] = entry;
+    }];
+
+    NSUInteger dropped = [object count] - current.count;
+    if (dropped > 0) {
+        ApolloLog(@"[LinkPreviews] cache dropped %lu entr%@ from an older schema", (unsigned long)dropped, dropped == 1 ? @"y" : @"ies");
+    }
+    return current;
 }
 
 - (NSString *)cacheKeyForURL:(NSURL *)url {
@@ -223,6 +247,7 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
     NSMutableDictionary *entry = [[preview dictionaryRepresentation] mutableCopy];
     entry[@"url"] = url.absoluteString ?: @"";
     entry[@"lastAccess"] = @([[NSDate date] timeIntervalSince1970]);
+    entry[ApolloLinkPreviewCacheSchemaKey] = @(ApolloLinkPreviewCacheSchemaVersion);
 
     [self.memoryCache setObject:preview forKey:key];
     dispatch_async(self.queue, ^{

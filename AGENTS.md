@@ -101,6 +101,7 @@ xcrun simctl spawn "$(cat .sim/device.txt)" log show --last 2m --predicate 'subs
 | `src/Tweak.xm` / `src/Tweak.h` | Main tweak entry point and core runtime hooks |
 | `src/Apollo*.xm` | Feature-focused Logos modules; see `Makefile` for the current build list |
 | `src/ApolloCommon.{h,m}` | Shared utilities, including `ApolloLog` and helper functions |
+| `src/ApolloWebTextDecoding.{h,m}` | Charset-aware decode of bytes fetched from arbitrary third-party pages (BOM → `Content-Type` → `<meta charset>`, plus the WHATWG label upgrades). Use this instead of `initWithData:encoding:NSUTF8StringEncoding` for any *foreign* page — a UTF-8 guess mojibakes EUC-KR/Shift_JIS/GB18030/Big5 sites. Foundation-only, so the `.m` compiles straight into a host-side harness |
 | `src/ApolloState.{h,m}` | Global state, captured singletons, and feature flags |
 
 ### Settings & UI (`src/settings/`)

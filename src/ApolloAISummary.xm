@@ -26,6 +26,7 @@
 #import "ApolloCommon.h"
 #import "ApolloAISummary.h"
 #import "ApolloAICloudBridge.h"
+#import "ApolloWebTextDecoding.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloState.h"
 #import "ApolloTextureDecls.h"
@@ -1568,8 +1569,10 @@ static void ApolloAIFetchAndExtract(NSURL *url, NSString *userAgent, void (^done
             NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
             if (!error && http && http.statusCode >= 200 && http.statusCode < 300 &&
                 data.length > 0 && data.length <= kApolloAIArticleFetchMaxBytes) {
-                html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                if (!html) html = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+                // Charset-aware: a Korean/Japanese/Chinese article read as
+                // Latin-1 handed the model a page of mojibake to summarise
+                // (issue #945).
+                html = ApolloWebTextFromData(data, response, NULL);
                 if (html) text = ApolloAIExtractArticleText(html);
             } else if (!error && http && (http.statusCode < 200 || http.statusCode >= 300)) {
                 outErr = [NSError errorWithDomain:@"ApolloAIArticle" code:http.statusCode userInfo:nil];

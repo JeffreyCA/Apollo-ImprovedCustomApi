@@ -8,6 +8,7 @@
 #import "ApolloState.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloUserProfileCache.h"
+#import "ApolloWebTextDecoding.h"
 
 static const NSUInteger ApolloLinkPreviewMaxHTMLBytes = 2 * 1024 * 1024;
 
@@ -1678,9 +1679,15 @@ static NSData *ApolloLinkPreviewHeadSliceOfData(NSData *data) {
         }
 
         NSData *headSlice = ApolloLinkPreviewHeadSliceOfData(data);
-        NSString *html = [[NSString alloc] initWithData:headSlice encoding:NSUTF8StringEncoding];
-        if (html.length == 0) {
-            html = [[NSString alloc] initWithData:headSlice encoding:NSISOLatin1StringEncoding];
+        // Decode with the charset the page declares, not a UTF-8 guess: Korean
+        // (EUC-KR/CP949), Japanese (Shift_JIS) and Chinese (GB18030/Big5) news
+        // sites are not valid UTF-8, so a UTF-8-first read failed and the
+        // Latin-1 rescue turned every og: tag into mojibake (issue #945).
+        NSStringEncoding htmlEncoding = 0;
+        NSString *html = ApolloWebTextFromData(headSlice, httpResponse, &htmlEncoding);
+        if (htmlEncoding != 0 && htmlEncoding != NSUTF8StringEncoding) {
+            ApolloLog(@"[LinkPreviews] HTML decoded as %@ host=%@",
+                      ApolloWebTextNameForEncoding(htmlEncoding), ApolloLinkPreviewHost(url));
         }
 
         NSDictionary<NSString *, NSString *> *meta = [self metaValuesFromHTML:html];

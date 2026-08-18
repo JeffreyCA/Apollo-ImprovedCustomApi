@@ -18,6 +18,8 @@
 #import "ApolloAccountCredentials.h"
 #import "ApolloCommentVoteInsights.h"
 #import "ApolloCommon.h"
+#import "ApolloLinkPreviewFetcher.h"
+#import "ApolloWebTextDecoding.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "UIWindow+Apollo.h"
@@ -431,6 +433,23 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
                 });
             return;
         }
+        // "linkpreview <url>" command: run the real link-preview fetch against
+        // an arbitrary page and log what came back. Exercising the fetcher
+        // needs no Reddit account, so metadata extraction — charset handling
+        // above all (issue #945) — can be verified against live foreign-language
+        // pages on a signed-out simulator.
+        if ([contents hasPrefix:@"linkpreview "]) {
+            NSString *urlString = [[contents substringFromIndex:12] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSURL *previewURL = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
+            if (!previewURL) { ApolloLog(@"[SimDebugTap] malformed linkpreview url: %@", urlString); return; }
+            [ApolloLinkPreviewFetcher requestPreviewForURL:previewURL completion:^(ApolloLinkPreview *preview) {
+                ApolloLog(@"[SimDebugTap] linkpreview %@\n  site=%@\n  title=%@\n  desc=%@\n  image=%@",
+                          urlString, preview.siteName ?: @"(nil)", preview.title ?: @"(nil)",
+                          preview.desc ?: @"(nil)", preview.imageURL.absoluteString ?: @"(nil)");
+            }];
+            return;
+        }
         if ([contents hasPrefix:@"text "]) {
             NSString *payload = [[contents substringFromIndex:5] stringByTrimmingCharactersInSet:
                 NSCharacterSet.newlineCharacterSet];
@@ -481,6 +500,10 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
     ApolloLog(@"[SimDebugTap] listening for apollofix.debugtap");
     ApolloLog(@"[CommentInsights][parser] self-tests %@",
               ApolloCommentVoteInsightsRunParserSelfTests() ? @"passed" : @"FAILED");
+    NSString *charsetFailure = nil;
+    BOOL charsetOK = ApolloWebTextDecodingRunSelfTests(&charsetFailure);
+    ApolloLog(@"[WebTextDecoding] self-tests %@", charsetOK ? @"passed"
+              : [NSString stringWithFormat:@"FAILED at \"%@\"", charsetFailure]);
 }
 
 #endif
