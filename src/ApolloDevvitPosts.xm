@@ -64,25 +64,74 @@
 #import "ApolloTextureDecls.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloDirectChatWeb.h"
+#import "ApolloDevvitPosts.h"
 
 static void ApolloDevvitHeightDidChangeForFullName(NSString *fullName);
+
+NSString *const ApolloDevvitFeedOwnershipChangedNotification = @"ApolloDevvitFeedOwnershipChangedNotification";
 
 #pragma mark - Detection
 
 // A devvit custom post is detectable ONLY by its old-Reddit fallback body
-// (there is no dedicated field anywhere in the classic JSON). Both markers
-// must be present so an ordinary post QUOTING the fallback text is unlikely
-// to false-positive.
+// (there is no dedicated field anywhere in the classic JSON):
+//
+//   This post contains content not supported on old Reddit.
+//   [Click here to view the full post](https://sh.reddit.com/r/<sub>/comments/<id>)
+//
+// Both markers must be present AND ADJACENT. Proximity (not a length cap) is
+// what keeps a post that merely QUOTES the fallback from matching, and unlike a
+// cap it survives a rich fallback body: an app may put a full markdown post
+// ABOVE the fallback block, and r/soccer's daily discussion does exactly that —
+// 5.2KB of rules with the fallback appended at the end (markers 72 chars apart).
+// The old 4096-char cap silently failed there in COMMENTS while the shorter
+// listing copy still matched in the feed, so the widget appeared in the feed and
+// not in the thread. The bound that remains is Reddit's own selftext ceiling.
+// Exported (via ApolloDevvitPosts.h) so Community Highlights applies the exact
+// same test to its raw JSON.
+static const NSUInteger kApolloDevvitMarkerWindow = 300;
+
+BOOL ApolloDevvitSelfTextIsInteractive(NSString *body) {
+    if (body.length < 40 || body.length > 40000) return NO;
+    NSRange fallback = [body rangeOfString:@"not supported on old Reddit"
+                                   options:NSCaseInsensitiveSearch];
+    if (fallback.location == NSNotFound) return NO;
+    NSUInteger from = fallback.location > kApolloDevvitMarkerWindow
+                    ? fallback.location - kApolloDevvitMarkerWindow : 0;
+    NSUInteger to = MIN(body.length, NSMaxRange(fallback) + kApolloDevvitMarkerWindow);
+    return [body rangeOfString:@"sh.reddit.com/r/"
+                       options:0
+                         range:NSMakeRange(from, to - from)].location != NSNotFound;
+}
+
+BOOL ApolloDevvitPostDataIsInteractive(NSDictionary *postData) {
+    if (![postData isKindOfClass:[NSDictionary class]]) return NO;
+    id isSelf = postData[@"is_self"];
+    if (![isSelf respondsToSelector:@selector(boolValue)] || ![isSelf boolValue]) return NO;
+    id body = postData[@"selftext"];
+    return [body isKindOfClass:[NSString class]] && ApolloDevvitSelfTextIsInteractive(body);
+}
+
 static BOOL ApolloDevvitLinkIsInteractive(RDKLink *link) {
     if (!sDevvitInteractivePosts || !link) return NO;
     @try {
         if (![link isSelfPost]) return NO;
-        NSString *body = link.selfText;
-        if (body.length < 40 || body.length > 4096) return NO;
-        if (![body containsString:@"sh.reddit.com/r/"]) return NO;
-        return [body rangeOfString:@"not supported on old Reddit"
-                           options:NSCaseInsensitiveSearch].location != NSNotFound;
+        return ApolloDevvitSelfTextIsInteractive(link.selfText);
     } @catch (__unused id e) { return NO; }
+}
+
+// A pinned interactive post can live in EITHER the feed (as its live widget)
+// or the Community Highlights carousel (as a static card) — never usefully in
+// both. The feed wins whenever the widget is actually rendered there, which is
+// exactly the "Show in Feed" sub-toggle: the widget is the richer surface, and
+// duplicating the post as a card right above itself just wastes a row. With
+// feed widgets off, the inline post would be nothing but Reddit's fallback
+// text, so the carousel keeps owning it (unchanged pre-existing behavior).
+BOOL ApolloDevvitFeedOwnsInteractivePosts(void) {
+    return sDevvitInteractivePosts && sDevvitFeedWidgets;
+}
+
+BOOL ApolloDevvitFeedOwnsLink(id link) {
+    return ApolloDevvitFeedOwnsInteractivePosts() && ApolloDevvitLinkIsInteractive((RDKLink *)link);
 }
 
 // RDKLink.permalink is NSString on some paths and a relative NSURL on others
@@ -109,20 +158,60 @@ static NSString *ApolloDevvitFullName(RDKLink *link) {
 
 #pragma mark - Measured height registry
 
-// fullName -> measured widget height. 512 (devvit "tall", what match threads
-// use) until the page reports otherwise, so the common case never re-measures.
+// fullName -> measured widget height. 512 (devvit "tall") until the page
+// reports otherwise, so the tall case measures final on the first pass.
 static const CGFloat kApolloDevvitDefaultHeight = 512.0;
+// Smallest height we accept as a real measurement. This must not sit ABOVE what
+// the probe itself treats as real (it reveals on h >= 40 held stable): devvit
+// apps size themselves, and a compact card is a legitimate layout — a finished
+// match thread renders a single ~96pt score row with an "open the full match
+// thread" footer. A 120pt floor silently REJECTED those, so the measurement was
+// discarded, the node kept the 512pt placeholder, and the card sat above ~400pt
+// of dead space in the feed and in the post alike.
+static const CGFloat kApolloDevvitMinHeight = 40.0;
+static const CGFloat kApolloDevvitMaxHeight = 900.0;
+// Post-reveal watchdog cadence: brisk while the widget is still moving (a user
+// expanding a compact card must not wait out a long tick with clipped content),
+// idle once it has held still, and a budget that stops an oscillating widget
+// from re-measuring a table forever.
+static const NSTimeInterval kApolloDevvitActivePollInterval = 1.0;
+// Tap-to-commit latency budget: first look right after the tap, and a quick
+// re-look to confirm stability. Devvit's expand lays out its final height
+// immediately (the animation is visual, not a height tween), so the pair
+// usually commits ~0.25s after the finger — and if a page IS mid-change, the
+// confirm just repeats until two reads agree, so speed never costs safety.
+static const NSTimeInterval kApolloDevvitTapProbeDelay = 0.12;
+static const NSTimeInterval kApolloDevvitConfirmProbeDelay = 0.15;
+static const NSTimeInterval kApolloDevvitIdlePollInterval = 6.0;
+static const NSInteger kApolloDevvitActivePollCount = 8;
+static const NSInteger kApolloDevvitMaxHeightCorrections = 12;
 static NSMutableDictionary<NSString *, NSNumber *> *sDevvitHeights;
+// fullNames whose widget gave up; their rows fall back to Apollo's own rendering.
+static NSMutableSet<NSString *> *sDevvitFailedPosts;
+
+static BOOL ApolloDevvitPostFailed(NSString *fullName) {
+    if (!fullName) return NO;
+    @synchronized (sDevvitHeights) { return [sDevvitFailedPosts containsObject:fullName]; }
+}
+
+static void ApolloDevvitMarkFailed(NSString *fullName) {
+    if (!fullName) return;
+    @synchronized (sDevvitHeights) {
+        if (!sDevvitFailedPosts) sDevvitFailedPosts = [NSMutableSet set];
+        [sDevvitFailedPosts addObject:fullName];
+    }
+}
 
 static CGFloat ApolloDevvitHeightForFullName(NSString *fullName) {
     if (!fullName) return kApolloDevvitDefaultHeight;
     NSNumber *n = nil;
     @synchronized (sDevvitHeights) { n = sDevvitHeights[fullName]; }
-    return n ? MAX(120.0, MIN(900.0, n.doubleValue)) : kApolloDevvitDefaultHeight;
+    return n ? MAX(kApolloDevvitMinHeight, MIN(kApolloDevvitMaxHeight, n.doubleValue))
+             : kApolloDevvitDefaultHeight;
 }
 
 static BOOL ApolloDevvitStoreHeight(NSString *fullName, CGFloat height) {
-    if (!fullName || height < 120.0 || height > 900.0) return NO;
+    if (!fullName || height < kApolloDevvitMinHeight || height > kApolloDevvitMaxHeight) return NO;
     @synchronized (sDevvitHeights) {
         NSNumber *old = sDevvitHeights[fullName];
         if (old && fabs(old.doubleValue - height) <= 4.0) return NO;
@@ -189,7 +278,38 @@ static NSString *const kApolloDevvitProbeScript = @""
 "        || document.querySelector('devvit-blocks-renderer');"
 "  if (!el) { return JSON.stringify({ found: 0, state: document.readyState, title: (document.title || '').slice(0, 40) }); }"
 "  var r = el.getBoundingClientRect();"
-"  return JSON.stringify({ found: 1, h: Math.round(r.height), w: Math.round(r.width) });"
+    /* The host element's own box is NOT the whole story. A compact match card
+       is 96pt, but tapping its "open the full match thread" control overlays
+       the expanded view on top — absolutely positioned, so it extends past the
+       host while the host's rect stays 96 and the cell clips everything below.
+       Measure the deepest painted descendant instead (shadow roots included,
+       which is where devvit renders), and take whichever is taller. The crop
+       pins the widget to top:0, so a descendant's viewport `bottom` IS its
+       height from the widget's top edge. */
+"  var deep = 0, seen = 0;"
+"  try {"
+"    (function walk(root, depth) {"
+"      if (!root || depth > 6 || seen > 2000) { return; }"
+"      var kids = root.querySelectorAll ? root.querySelectorAll('*') : [];"
+"      for (var i = 0; i < kids.length && seen < 2000; i++) {"
+"        seen++;"
+"        var k = kids[i];"
+"        var kr = k.getBoundingClientRect ? k.getBoundingClientRect() : null;"
+"        if (kr && kr.height > 0 && kr.bottom > deep && kr.bottom < 4000) { deep = kr.bottom; }"
+"        if (k.shadowRoot) { walk(k.shadowRoot, depth + 1); }"
+"      }"
+"    })(el, 0);"
+"    if (el.shadowRoot) { (function (r2) {"
+"      var kids = r2.querySelectorAll('*');"
+"      for (var i = 0; i < kids.length && seen < 2000; i++) {"
+"        seen++;"
+"        var kr = kids[i].getBoundingClientRect();"
+"        if (kr && kr.height > 0 && kr.bottom > deep && kr.bottom < 4000) { deep = kr.bottom; }"
+"      }"
+"    })(el.shadowRoot); }"
+"  } catch (e) {}"
+"  var h = Math.max(Math.round(r.height), Math.round(deep));"
+"  return JSON.stringify({ found: 1, h: h, w: Math.round(r.width) });"
 "})();";
 
 #pragma mark - Content blocker
@@ -348,7 +468,7 @@ static WKWebsiteDataStore *ApolloDevvitDataStoreForIdentity(NSString *identity, 
 // stable. One instance per on-screen devvit post; feed instances are torn
 // down when their cell leaves the preload range.
 
-@interface ApolloDevvitWidgetView : UIView <WKNavigationDelegate, WKUIDelegate>
+@interface ApolloDevvitWidgetView : UIView <WKNavigationDelegate, WKUIDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) UIView *coverView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
@@ -365,6 +485,14 @@ static WKWebsiteDataStore *ApolloDevvitDataStoreForIdentity(NSString *identity, 
 @property (nonatomic) BOOL feedContext;
 // Post-reveal row-height corrections already spent (hard-capped).
 @property (nonatomic) NSInteger heightCorrections;
+// Candidate post-reveal height awaiting a quick confirm probe; a correction
+// only commits once the same value is seen twice, so a mid-animation or
+// mid-load reading can never become the cell height (or burn budget).
+@property (nonatomic) CGFloat pendingProbeHeight;
+// Budget exhausted: stop measuring until the next explicit tap re-arms it —
+// without the flag, a frozen-but-moved widget would re-confirm its unappliable
+// height on every probe forever at the confirm cadence.
+@property (nonatomic) BOOL heightFrozen;
 // Bumps every time a measured height lands; consumer re-queries the registry.
 @property (nonatomic, copy) void (^onMeasuredHeight)(NSString *fullName, CGFloat height);
 @end
@@ -387,6 +515,21 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
         self.clipsToBounds = YES;
         self.backgroundColor = [UIColor clearColor];
         [self buildCover];
+        // A tap inside the widget is the moment its height is about to change —
+        // "open the full match thread" grows it several hundred points, the ✕
+        // shrinks it back — and the idle watchdog's next look can be seconds
+        // away, which reads as content clipped under the old cell height until
+        // the poll happens to land (user-reported jank). Watch the taps
+        // ourselves and probe right after each one. Passive: recognizes
+        // alongside WebKit's own gestures and never cancels the touch, so the
+        // page sees every tap exactly as before.
+        UITapGestureRecognizer *poke =
+            [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apolloDevvitTapPoke:)];
+        poke.cancelsTouchesInView = NO;
+        poke.delaysTouchesBegan = NO;
+        poke.delaysTouchesEnded = NO;
+        poke.delegate = self;
+        [self addGestureRecognizer:poke];
         // Cap total live WEB VIEWS (not widget shells): a torn-down widget
         // stays in the weak table with webView == nil and costs nothing, so
         // both the count and the eviction must look at webView, or the cap
@@ -457,6 +600,51 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     [cover addGestureRecognizer:retry];
 }
 
+// Coexist with WKWebView's internal recognizers — without this the system
+// tap wins and ours never fires.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
+}
+
+// Coming back on screen is the other moment the cell can be out of step with
+// the page: while the user was in another thread the widget kept its DOM (an
+// expanded view stays expanded, a live match keeps growing) but off-window the
+// watchdog deliberately skips the JS probe, and Apollo's swipe-forward
+// navigation restores the SAME widget instance — budget state and all. Treat
+// re-entry like a tap: re-arm and look right away, so a revisited thread heals
+// itself instead of loading clipped until the user happens to touch it
+// (device-reported: "came back and loaded like this").
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (!self.window || !self.revealed || !self.webView) return;
+    self.heightCorrections = 0;
+    self.heightFrozen = NO;
+    self.pendingProbeHeight = 0.0;
+    NSInteger gen = ++self.pollGeneration;
+    [self pollAfter:kApolloDevvitTapProbeDelay attempt:0 generation:gen];
+}
+
+- (void)apolloDevvitTapPoke:(UITapGestureRecognizer *)gesture {
+    if (!self.revealed || !self.webView) return;
+    // An explicit tap re-arms the correction budget. The budget exists to stop
+    // a widget that resizes ITSELF forever from re-measuring the table
+    // indefinitely — but expand/collapse taps are the user asking for resizes,
+    // and configureForPermalink's same-post early return means the budget never
+    // refilled across cycles on one post: a session of playing with the same
+    // match thread drained all 12 and froze the height (device-reported).
+    // Taps are self-limiting, so a fresh budget per tap keeps both properties.
+    self.heightCorrections = 0;
+    self.heightFrozen = NO;
+    self.pendingProbeHeight = 0.0;
+    // Start a fresh brisk poll loop timed for the page's expand/collapse
+    // animation to have finished; bumping the generation orphans whatever idle
+    // tick was pending, so loops never double up. handleProbeResult then keeps
+    // polling briskly while the height is still settling.
+    NSInteger gen = ++self.pollGeneration;
+    [self pollAfter:kApolloDevvitTapProbeDelay attempt:0 generation:gen];
+}
+
 - (void)coverTapped {
     if (!self.failed) return;
     ApolloLog(@"[Devvit] retry tapped for %@", self.fullName);
@@ -476,6 +664,8 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     self.failed = NO;
     self.autoRetried = NO;
     self.heightCorrections = 0;  // fresh correction budget per post
+    self.heightFrozen = NO;
+    self.pendingProbeHeight = 0.0;
     self.coverView.alpha = 1.0;
     [self.spinner startAnimating];
     self.statusLabel.text = @"Loading interactive post…";
@@ -560,6 +750,8 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     NSInteger gen = ++self.pollGeneration;
     self.stableSamples = 0;
     self.lastProbeHeight = 0;
+    self.pendingProbeHeight = 0.0;
+    self.heightFrozen = NO;
     [self pollAfter:0.5 attempt:0 generation:gen];
 }
 
@@ -635,7 +827,10 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
             self.lastProbeHeight = h;
             if (self.stableSamples >= 2) {
                 [self revealWithHeight:h];
-                [self pollAfter:6.0 attempt:0 generation:gen];
+                // Hand over to the watchdog in its brisk state: the moments
+                // right after reveal are exactly when someone taps a compact
+                // card open.
+                [self pollAfter:kApolloDevvitActivePollInterval attempt:0 generation:gen];
                 return;
             }
         }
@@ -643,25 +838,63 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
         return;
     }
 
-    // Post-reveal slow watchdog: track later height changes (some widgets
-    // grow when a match kicks off) and keep the crop asserted. Each report
-    // ends in a beginUpdates/endUpdates row-height re-query on every affected
-    // table, so corrections are strictly bounded: hysteresis widens sharply
-    // after the first one, and after the cap the height is frozen for this
-    // widget's lifetime — an oscillating widget must never re-measure a
-    // comments table indefinitely.
-    CGFloat hysteresis = (self.heightCorrections == 0) ? 8.0 : 32.0;
-    if (found && h >= 40.0 && fabs(h - self.lastProbeHeight) > hysteresis &&
-        self.heightCorrections < 3) {
-        self.heightCorrections += 1;
-        self.lastProbeHeight = h;
-        ApolloLog(@"[Devvit] %@ height corrected to %.0fpt (%ld/3)",
-                  self.fullName, h, (long)self.heightCorrections);
-        if (ApolloDevvitStoreHeight(self.fullName, h) && self.onMeasuredHeight) {
-            self.onMeasuredHeight(self.fullName, h);
+    // Post-reveal watchdog: track later height changes and keep the crop
+    // asserted. These are not only spontaneous (a match kicking off) — they are
+    // also USER-DRIVEN: a compact match card has an "open the full match thread"
+    // control that expands the widget several hundred points, and until the cell
+    // follows, the expanded content is clipped to the old height. So poll
+    // briskly for a while after any change and only back off once the widget has
+    // been still, rather than sitting on a fixed 6s tick where a tap appears to
+    // do nothing for several seconds.
+    //
+    // Each report ends in a beginUpdates/endUpdates row-height re-query on every
+    // affected table, so corrections stay bounded: hysteresis widens after the
+    // first one, they cannot land faster than the active poll interval, and a
+    // budget still freezes the height for a widget that oscillates forever. The
+    // budget is generous enough to absorb a user expanding and collapsing a card
+    // a few times, which the old 3 could not.
+    CGFloat hysteresis = (self.heightCorrections == 0) ? 8.0 : 24.0;
+    BOOL changed = NO;
+    if (!self.heightFrozen && found && h >= kApolloDevvitMinHeight &&
+        fabs(h - self.lastProbeHeight) > hysteresis) {
+        if (self.pendingProbeHeight > 0.0 && fabs(h - self.pendingProbeHeight) <= 2.0) {
+            // Seen twice → this is a settled height, not a frame of the
+            // expand/collapse animation or a half-loaded expanded shell.
+            // (Committing first sightings was how a device ended up frozen at
+            // ~220pt: the mid-load value both became the cell height AND spent
+            // the budget's last correction.)
+            self.pendingProbeHeight = 0.0;
+            if (self.heightCorrections >= kApolloDevvitMaxHeightCorrections) {
+                self.heightFrozen = YES;
+                ApolloLog(@"[Devvit] %@ correction budget exhausted — frozen until the next tap", self.fullName);
+            } else {
+                self.heightCorrections += 1;
+                self.lastProbeHeight = h;
+                changed = YES;
+                ApolloLog(@"[Devvit] %@ height corrected to %.0fpt (%ld/%ld)", self.fullName, h,
+                          (long)self.heightCorrections, (long)kApolloDevvitMaxHeightCorrections);
+                if (ApolloDevvitStoreHeight(self.fullName, h) && self.onMeasuredHeight) {
+                    self.onMeasuredHeight(self.fullName, h);
+                }
+            }
+        } else {
+            // First sighting of a new height — confirm on a quick follow-up
+            // instead of the normal cadence, so a real change still commits
+            // well under a second after the tap.
+            self.pendingProbeHeight = h;
+            [self pollAfter:kApolloDevvitConfirmProbeDelay attempt:0 generation:gen];
+            return;
         }
+    } else {
+        self.pendingProbeHeight = 0.0;
     }
-    [self pollAfter:6.0 attempt:0 generation:gen];
+    // `attempt` counts consecutive still polls here; a change restarts the
+    // brisk window so an expand → settle → collapse sequence stays responsive.
+    NSInteger stillPolls = changed ? 0 : attempt + 1;
+    BOOL brisk = stillPolls < kApolloDevvitActivePollCount;
+    [self pollAfter:(brisk ? kApolloDevvitActivePollInterval : kApolloDevvitIdlePollInterval)
+             attempt:stillPolls
+          generation:gen];
 }
 
 - (void)revealWithHeight:(CGFloat)height {
@@ -676,10 +909,22 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 
 - (void)showFailure {
     self.failed = YES;
-    [self.spinner stopAnimating];
-    self.statusLabel.text = @"Interactive post failed to load.\nTap to retry.";
-    self.coverView.alpha = 1.0;
+    // Reddit intermittently serves a shell that never hydrates (readyState
+    // complete, empty body). Holding the tall reservation for that left a
+    // screen-high dead box mid-feed, and a custom "failed" banner is its own
+    // problem: it has to lay out correctly at every collapsed height, and it
+    // tells the user nothing they can act on. Hand the row back instead — Apollo
+    // then renders the post exactly as it would without this feature, fallback
+    // text and its "view the full post" link included, which is both honest and
+    // useful. The mark is per-process, so a relaunch retries.
+    ApolloDevvitMarkFailed(self.fullName);
+    ApolloLog(@"[Devvit] %@ gave up — handing the row back to Apollo", self.fullName);
+    NSString *fullName = self.fullName;
+    [self teardown];
+    [self removeFromSuperview];
+    ApolloDevvitHeightDidChangeForFullName(fullName);
 }
+
 
 - (void)teardown {
     self.pollGeneration += 1;  // cancels any queued poll blocks
@@ -698,6 +943,30 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 }
 
 #pragma mark Navigation confinement
+
+// A devvit app navigates its host page by post FULLNAME, not by the bare id
+// reddit's own permalinks use: finishing a Pixelary drawing sends the page to
+//   /r/Pixelary/comments/t3_1vp57ul
+// where a real permalink reads /r/Pixelary/comments/1vp57ul[/slug]. Apollo
+// resolves that literally, opens a post id that cannot exist, and the user is
+// left on "Error loading comments" over an endless spinner with the game gone —
+// right after posting, the worst possible moment. Strip the `t3_` so the post
+// they just made actually opens. Returns nil when there is nothing to change.
+static NSURL *ApolloDevvitNormalizedPermalink(NSURL *url) {
+    NSURLComponents *comps = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if (!comps) return nil;
+    NSMutableArray<NSString *> *parts = [(url.pathComponents ?: @[]) mutableCopy];
+    NSUInteger commentsIdx = [parts indexOfObject:@"comments"];
+    if (commentsIdx == NSNotFound || commentsIdx + 1 >= parts.count) return nil;
+    NSString *postID = parts[commentsIdx + 1];
+    if (![postID hasPrefix:@"t3_"] || postID.length <= 3) return nil;
+    parts[commentsIdx + 1] = [postID substringFromIndex:3];
+    // pathComponents keeps a leading "/" element; joining would double it.
+    if (parts.count && [parts.firstObject isEqualToString:@"/"]) [parts removeObjectAtIndex:0];
+    comps.path = [@"/" stringByAppendingString:[parts componentsJoinedByString:@"/"]];
+    ApolloLog(@"[Devvit] rewrote fullname permalink → %@", comps.path);
+    return comps.URL;
+}
 
 // The embed shows exactly one post. Any main-frame link activation gets
 // routed to Apollo's own browser/scheme handling instead — both to keep the
@@ -737,7 +1006,18 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 
 - (void)routeExternally:(NSURL *)url {
     if (!url) return;
-    ApolloLog(@"[Devvit] routing external URL out of widget: %@://%@", url.scheme, url.host);
+    NSString *host = url.host.lowercaseString;
+    BOOL redditHost = host && ([host isEqualToString:@"reddit.com"] || [host hasSuffix:@".reddit.com"]);
+    NSString *path = url.path ?: @"";
+    // Log the PATH for reddit (it is the same class of identifier as the t3
+    // fullnames this module already logs, and without it a misrouted navigation
+    // is undiagnosable); host only for anywhere else.
+    if (redditHost) {
+        ApolloLog(@"[Devvit] routing reddit URL out of widget: %@", path.length ? path : @"(no path)");
+    } else {
+        ApolloLog(@"[Devvit] routing external URL out of widget: %@://%@", url.scheme, host);
+    }
+    if (redditHost) url = ApolloDevvitNormalizedPermalink(url) ?: url;
     NSURL *apolloURL = ApolloURLByConvertingResolvedURLToApolloScheme(url);
     if (apolloURL && ApolloRouteResolvedURLViaApolloScheme(apolloURL)) return;
     UIResponder *responder = self;
@@ -954,9 +1234,60 @@ static void ApolloDevvitRefreshTableHeights(UITableView *table, NSInteger attemp
     } @catch (__unused id e) {}
 }
 
+// Invalidate the registered parent AND every node up to the enclosing cell.
+// Which node is registered differs by surface: in comments it is the cell node
+// itself (CommentsHeaderCellNode), but in the FEED it is RichMediaNode — a
+// child of the post cell. Texture serves a row's height from the CELL node's
+// cached layout, and invalidating only a descendant leaves that cache intact,
+// so begin/endUpdates below re-queried the same stale height and a compact card
+// stayed in its 512pt hole. Comments worked precisely because parent == cell,
+// which is what hid this. Stop at the cell (ASCellNode answers `owningNode`)
+// rather than walking to the root: invalidating the whole feed is needless work.
+static ASDisplayNode *ApolloDevvitInvalidateUpToCell(ASDisplayNode *node) {
+    ASDisplayNode *n = node;
+    for (NSInteger hops = 0; n && hops < 12; hops++) {
+        @try {
+            [n invalidateCalculatedLayout];
+            [n setNeedsLayout];
+            if ([n respondsToSelector:@selector(owningNode)] &&
+                ((id (*)(id, SEL))objc_msgSend)(n, @selector(owningNode))) return n; // the cell
+            n = [n supernode];
+        } @catch (__unused id e) { return nil; }
+    }
+    return nil;
+}
+
+// Invalidating a cell marks its layout dirty but nothing asks Texture to
+// re-measure it: a feed cell only re-measures when something drives it, and
+// beginUpdates/endUpdates on an ASTableView does not (it is the UITableView
+// path; Texture owns node-driven row heights). Comments got away with it
+// because that header re-measures anyway as comments stream in — the feed never
+// does, so a compact card kept the 512pt row it was first measured at.
+// transitionLayout… IS the "re-run this node's layout and publish the new size"
+// API, and it is scoped to the one cell rather than relayoutItems' whole-feed
+// pass (multi-second on a long feed — the #630 watchdog class).
+static void ApolloDevvitRemeasureCells(NSArray<ASDisplayNode *> *cells, NSInteger attempt) {
+    if (cells.count == 0 || attempt > 40) return;
+    // Never re-enter Texture's measurement while it is already measuring (#844)
+    // or mid-scroll, where a row-height change fights the scroll.
+    if (ApolloRowMeasureInProgress()) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ ApolloDevvitRemeasureCells(cells, attempt + 1); });
+        return;
+    }
+    SEL transition = @selector(transitionLayoutWithAnimation:shouldMeasureAsync:measurementCompletion:);
+    for (ASDisplayNode *cell in cells) {
+        @try {
+            if (![cell respondsToSelector:transition]) continue;
+            ((void (*)(id, SEL, BOOL, BOOL, id))objc_msgSend)(cell, transition, NO, NO, nil);
+        } @catch (__unused id e) {}
+    }
+}
+
 static void ApolloDevvitHeightDidChangeForFullName(NSString *fullName) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSMutableSet<UITableView *> *tables = [NSMutableSet set];
+        NSMutableArray<ASDisplayNode *> *cells = [NSMutableArray array];
         for (id parent in sDevvitHostParents.allObjects) {
             RDKLink *link = nil;
             @try {
@@ -966,11 +1297,12 @@ static void ApolloDevvitHeightDidChangeForFullName(NSString *fullName) {
             if (fullName && link && ![ApolloDevvitFullName(link) isEqualToString:fullName]) continue;
             ASDisplayNode *host = objc_getAssociatedObject(parent, kApolloDevvitHostNodeKey);
             if (host) ApolloDevvitSetNodeHeight(host, ApolloDevvitHeightForFullName(fullName));
-            [(ASDisplayNode *)parent invalidateCalculatedLayout];
-            [(ASDisplayNode *)parent setNeedsLayout];
+            ASDisplayNode *cell = ApolloDevvitInvalidateUpToCell((ASDisplayNode *)parent);
+            if (cell) [cells addObject:cell];
             UITableView *table = ApolloDevvitTableViewForNode(parent);
             if (table) [tables addObject:table];
         }
+        ApolloDevvitRemeasureCells(cells, 0);
         for (UITableView *table in tables) ApolloDevvitRefreshTableHeights(table, 0);
     });
 }
@@ -1059,6 +1391,8 @@ static id ApolloDevvitPlaceInSpec(id rootSpec, id hostSpec, NSUInteger depth) {
     @try {
         RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
         if (!ApolloDevvitLinkIsInteractive(link)) return orig;
+        // Gave up on this post — let Apollo render it natively (see showFailure).
+        if (ApolloDevvitPostFailed(ApolloDevvitFullName(link))) return orig;
         ASDisplayNode *host = ApolloDevvitEnsureHostNode(self);
         if (!host) return orig;
         ApolloDevvitSetNodeHeight(host, ApolloDevvitHeightForFullName(ApolloDevvitFullName(link)));
@@ -1111,7 +1445,8 @@ static id ApolloDevvitPlaceInSpec(id rootSpec, id hostSpec, NSUInteger depth) {
         RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
         // The feed sub-toggle routes through the SAME cleanup path as a
         // recycled cell, so flipping it off mid-session hides any live host.
-        if (!sDevvitFeedWidgets || !ApolloDevvitLinkIsInteractive(link)) {
+        if (!sDevvitFeedWidgets || !ApolloDevvitLinkIsInteractive(link) ||
+            ApolloDevvitPostFailed(ApolloDevvitFullName(link))) {
             // Recycled off a devvit post onto a normal one: the host node is
             // no longer in the layout, but its loaded view would linger —
             // hide it (carousel lesson #4).

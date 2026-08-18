@@ -10,6 +10,7 @@
 #import "InfoRowSettingsViewController.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloDirectChatWeb.h"
+#import "ApolloDevvitPosts.h"        // ApolloDevvitFeedOwnershipChangedNotification
 #import "settings/ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
@@ -1350,9 +1351,14 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf blockAnnouncementsSwitchToggled:sender]; }];
 
+    // Named for the whole class of Reddit Developer Platform posts, not the
+    // sports ones it was first built against: the same widget mechanism carries
+    // r/wallstreetbets' live market dashboard, brackets, polls and community
+    // games. Settings search indexes row TITLES only, so the footer below spells
+    // the range out for anyone who lands on this screen.
     ApolloSettingsRow *devvitPosts =
         [ApolloSettingsRow switchRowWithID:@"gen.devvitPosts"
-                                     title:@"Live Match Threads & Games"
+                                     title:@"Live Interactive Posts"
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf devvitPostsSwitchToggled:sender]; }];
 
@@ -1367,7 +1373,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list. Live Match Threads & Games shows the real live widget for Reddit's interactive posts — match scores, predictions, brackets, and community games — instead of a placeholder. Always shown in comments; Show in Feed also puts it on large-mode feed cards."
+                                            footer:@"Small tweaks for the post list. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
                                               rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
@@ -3540,11 +3546,15 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sDevvitInteractivePosts = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sDevvitInteractivePosts forKey:UDKeyDevvitInteractivePosts];
     [self visibilityDidChange];  // drives the "Interactive Posts in Feed" sub-row
+    // Community Highlights hands a PINNED interactive post back to the feed while
+    // its widget renders there, so both toggles change what belongs in a carousel.
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDevvitFeedOwnershipChangedNotification object:nil];
 }
 
 - (void)devvitFeedPostsSwitchToggled:(UISwitch *)sender {
     sDevvitFeedWidgets = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sDevvitFeedWidgets forKey:UDKeyDevvitFeedWidgets];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDevvitFeedOwnershipChangedNotification object:nil];
 }
 
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
