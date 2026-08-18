@@ -42,11 +42,12 @@
 //   - AVAudioSession Ambient/deactivate downgrades while PiP audio is playing
 //     (predicate consumed by the hooks in ApolloVideoUnmute.xm)
 //
-// Scope: Reddit-hosted v.redd.it videos (shareable, plus compact-mode
-// non-shareable fallback players) AND any other inline video that carries
-// audio — Streamable and similar external hosts — gated by PiPIsEligibleVideo.
-// Silent GIFs (also inline ASVideoNodes, but no audio track) and feed-initiated
-// card takeover are intentionally out of scope (see docs/pip-design.md §3).
+// Scope: any inline video that carries an audio track — Reddit-hosted v.redd.it
+// videos (shareable, plus compact-mode non-shareable fallback players) as well
+// as Streamable and similar external hosts — gated by PiPIsEligibleVideo.
+// Silent clips (also inline ASVideoNodes, but no audio track — GIFs, and the
+// v.redd.it posts Apollo itself labels "GIF") and feed-initiated card takeover
+// are intentionally out of scope (see docs/pip-design.md §3).
 //
 // Second entry point (issue #528): a PiP button in the fullscreen media
 // viewer, available ONLY while the video can't be autoplaying inline (setting
@@ -145,19 +146,36 @@ static NSURL *PiPAssetURLForNode(id videoNode, AVPlayer *player) {
     return nil;
 }
 
-// Strict eligibility: Reddit-hosted videos (shareable v.redd.it, plus compact-
-// mode non-shareable comments players that still point at a v.redd.it asset URL),
-// PLUS any other inline video that carries audio — Streamable and similar
-// external hosts. The audio requirement excludes silent GIFs here; GIFs are
-// admitted separately, by URL in "All Videos & GIFs" mode (PiPNodeURLIsGif).
-static BOOL PiPIsEligibleVideo(id videoNode, AVPlayer *player) {
+// Reddit-hosted playback: a shareable node, or a compact-mode non-shareable
+// comments player that still points at a v.redd.it asset URL.
+static BOOL PiPNodeIsRedditHosted(id videoNode, AVPlayer *player) {
     if (PiPNodeIsShareable(videoNode)) return YES;
+    NSString *host = PiPAssetURLForNode(videoNode, player).host.lowercaseString;
+    return host != nil && [host containsString:@"v.redd.it"];
+}
 
-    NSURL *url = PiPAssetURLForNode(videoNode, player);
-    NSString *host = url.host.lowercaseString;
-    if (host != nil && [host containsString:@"v.redd.it"]) return YES;
-
-    // Non-Reddit inline video (Streamable etc.): eligible iff it carries audio.
+// Strict eligibility: an inline video that carries audio — i.e. one the user can
+// actually unmute. The audio requirement excludes silent GIFs here; GIFs are
+// admitted separately, in "All Videos & GIFs" mode.
+//
+// Reddit-hosted playback gets the benefit of the doubt only until its item is
+// ReadyToPlay: v.redd.it hosts silent clips too (`has_audio: false`, `is_gif:
+// false` in the listing JSON), and Apollo itself calls those GIFs — its
+// RedditVideoIdentifier fetches the HLS manifest and looks for
+// "#EXT-X-MEDIA:TYPE=AUDIO", then RichMediaNode (sub_100584a6c) builds EITHER a
+// MuteUnmuteVideoButtonNode (audio) OR the "GIF" SmallInfoOverlayNode pill (no
+// audio), never both. With no mute button the player is never muted, so
+// player.muted reads NO forever and "Unmuted Videos Only" can never be
+// satisfied deliberately — treating such a clip as a real video let it slip
+// through that mode on any lingering exclusive-Playback session (issue: PiP
+// activating for a silent v.redd.it post in Unmuted-Only mode). Before
+// ReadyToPlay the audio question is simply unanswerable, so keep the pre-load
+// benefit of the doubt the compact-mode comments arm depends on.
+static BOOL PiPIsEligibleVideo(id videoNode, AVPlayer *player) {
+    if (PiPNodeIsRedditHosted(videoNode, player)) {
+        AVPlayerItem *item = player.currentItem;
+        if (!item || item.status != AVPlayerItemStatusReadyToPlay) return YES;
+    }
     return PiPVideoHasAudio(player);
 }
 
@@ -175,10 +193,11 @@ static BOOL PiPNodeURLIsGif(id videoNode, AVPlayer *player) {
 }
 
 // GIF content for PiP purposes (always loops, no audio, no mute button): a GIF
-// by origin URL, OR a non-strictly-eligible silent inline video. At takeover the
-// eligibility gate has already required ReadyToPlay for the non-URL case, so a
-// !PiPIsEligibleVideo result there is a genuinely silent clip, not a still-
-// loading audio video.
+// by origin URL, OR a non-strictly-eligible silent inline video — which now
+// includes a silent v.redd.it clip, the same content Apollo labels with its
+// "GIF" pill instead of a mute button. At takeover the eligibility gate has
+// already required ReadyToPlay for the non-URL case, so a !PiPIsEligibleVideo
+// result there is a genuinely silent clip, not a still-loading audio video.
 static BOOL PiPNodeIsGifContent(id videoNode, AVPlayer *player) {
     return PiPNodeURLIsGif(videoNode, player) || !PiPIsEligibleVideo(videoNode, player);
 }
@@ -190,14 +209,16 @@ static inline BOOL PiPGifsActivated(void) {
 }
 
 // Eligible to arm inline / feed System PiP (the swipe-home handoff, no floating
-// card). GIF-first, mirroring the card gate: a GIF (by URL) qualifies only in
-// "All Videos & GIFs"; everything else uses the strict audio-bearing check. The
-// URL check must come first — a GIF has no audio, and a compact-mode comments
-// player isn't ReadyToPlay at arm time, so the audio check can't yet see the
-// GIF-as-MP4's silent track.
+// card). Mirrors the card gate exactly: GIF content (a GIF by URL, or a silent
+// clip whose item is already loaded — incl. a silent v.redd.it post) qualifies
+// only in "All Videos & GIFs"; everything else is a real video and qualifies in
+// every mode. The GIF-content test resolves the URL case first, which matters
+// because a GIF has no audio and a compact-mode comments player isn't
+// ReadyToPlay at arm time, so the audio check can't yet see the GIF-as-MP4's
+// silent track.
 static BOOL PiPIsEligibleForInlineNativePiP(id videoNode, AVPlayer *player) {
-    if (PiPNodeURLIsGif(videoNode, player)) return PiPGifsActivated();
-    return PiPIsEligibleVideo(videoNode, player);
+    if (PiPNodeIsGifContent(videoNode, player)) return PiPGifsActivated();
+    return YES;
 }
 
 // Mixable, active Playback session for the System-PiP handoff. Callers must
@@ -803,10 +824,12 @@ static BOOL sPiPSessionHandbackInProgress = NO;
     // pauses the comments-header GIF while it's off-screen and doesn't auto-resume
     // it on the way back, leaving it at rate==0 (which blocks both the inline arm
     // and a fresh takeover). Nudge a loaded, visible, paused GIF back to playing.
+    // ReadyToPlay is already required here, so the GIF-content test can see a
+    // silent v.redd.it clip (Apollo's "GIF" pill) as well as a URL-GIF.
     if (sPiPEnabled && PiPGifsActivated() && visible && !self.active
         && player && player.rate == 0
         && player.currentItem.status == AVPlayerItemStatusReadyToPlay
-        && PiPNodeURLIsGif(videoNode, player)) {
+        && PiPNodeIsGifContent(videoNode, player)) {
         ApolloLog(@"[PiP] Resuming paused visible GIF for re-activation");
         PiPRewindIfStoppedAtEnd(player);
         [player play];
@@ -860,13 +883,19 @@ static BOOL sPiPSessionHandbackInProgress = NO;
     if (gifByURL || !strictlyEligible) {
         // GIF content: a GIF by origin URL (e.g. a Reddit .gif served as MP4,
         // which is strictly eligible only because its MP4 carries a silent audio
-        // track), or a non-strictly-eligible silent inline video. Admit only in
-        // the "All Videos & GIFs" activation mode. For the non-URL case require
-        // ReadyToPlay so a still-loading audio video (transiently not strictly
-        // eligible) re-evaluates on the strict path instead of slipping in here;
+        // track), or a non-strictly-eligible silent inline video — including a
+        // v.redd.it post with no audio track, which Apollo itself renders with a
+        // "GIF" pill and no mute button. Admit only in the "All Videos & GIFs"
+        // activation mode. For the non-URL case require ReadyToPlay so a
+        // still-loading audio video (transiently not strictly eligible)
+        // re-evaluates on the strict path instead of slipping in here;
         // URL-identified GIFs are reliable pre-load. GIFs bypass Unmuted-Only —
-        // no audio to unmute.
-        if (!PiPGifsActivated()) return NO;
+        // no audio to unmute (and no mute button, so "unmuted" is unreachable).
+        if (!PiPGifsActivated()) {
+            ApolloLog(@"[PiP] Skipping takeover — GIF content (byURL=%d, silent=%d) needs \"All Videos & GIFs\"",
+                      (int)gifByURL, (int)!strictlyEligible);
+            return NO;
+        }
         if (!gifByURL) {
             AVPlayerItem *item = player.currentItem;
             if (!item || item.status != AVPlayerItemStatusReadyToPlay) return NO;
@@ -957,7 +986,8 @@ static BOOL sPiPSessionHandbackInProgress = NO;
     // GIF content (always loops, no audio session, no mute button): a GIF by
     // origin URL — incl. a Reddit .gif served as MP4 that carries a silent audio
     // track and would otherwise read as a video — or a non-strictly-eligible
-    // silent inline video. v.redd.it/Streamable real videos stay non-GIF.
+    // silent inline video, incl. a v.redd.it post with no audio track. Real
+    // v.redd.it/Streamable videos (audio present) stay non-GIF.
     self.cardIsGifContent = PiPNodeIsGifContent(videoNode, player);
     self.cardFromFullscreen = NO; // fullscreen resolution flips it after takeover
     self.active = YES;
@@ -2888,12 +2918,13 @@ BOOL ApolloPiP_ShouldSuppressLoopForItem(AVPlayerItem *item) {
     }
     // Inline-armed system PiP actively showing this player. A Reddit .gif-as-MP4
     // is strictly eligible (silent audio track) so it can arm here too; keep it
-    // looping. URL-only GIF check — the only GIFs that arm inline are URL-GIFs.
+    // looping — as with a silent v.redd.it clip, which arms in the same mode.
     if (@available(iOS 15.0, *)) {
         if (controller.inlineNativePiP.pictureInPictureActive
             && controller.inlineNativePlayer
             && controller.inlineNativePlayer.currentItem == item) {
-            return !PiPNodeURLIsGif(controller.inlineNativeVideoNode, controller.inlineNativePlayer);
+            return !PiPNodeIsGifContent(controller.inlineNativeVideoNode,
+                                        controller.inlineNativePlayer);
         }
     }
     return NO;
