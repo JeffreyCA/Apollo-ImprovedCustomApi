@@ -1,9 +1,9 @@
 // ApolloFeedVideoScrubber.xm
 //
-// "Feed Video Scrubber" — press and hold the thin progress bar at the bottom
-// of an inline video, then slide left or right to scrub it, without opening
-// the fullscreen player. Covers feed cells AND the post's own video at the
-// top of comments. Off by default (sFeedVideoScrubber, toggle under
+// "Feed Video Scrubber" — grab the thin progress bar at the bottom of an
+// inline video and slide left or right to scrub it, without opening the
+// fullscreen player. Covers feed cells AND the post's own video at the top
+// of comments. Off by default (sFeedVideoScrubber, toggle under
 // Posts & Feeds).
 //
 //     ┌────────────────────────────────────┐
@@ -21,20 +21,20 @@
 //     scrubber. An invisible touch strip covers the bottom kStripHeight points
 //     of the video picture and drives the player; Apollo's own progress
 //     updates move the visible strip, so what you grab is what moves.
-//   • Press and hold the strip, then slide: playback position follows the
-//     finger's absolute position on the bar (finger at 1/3 of the width ≈ 1/3
-//     of the video), exactly like tapping into a scrubber anywhere else.
-//   • The feed's own touch delay does the flick/scrub disambiguation for
-//     free: UIScrollView holds content touches for ~150ms deciding whether
-//     they start a scroll, so a scrolling flick over the strip never reaches
-//     it, while a press-and-hold outlasts the window and is delivered here.
-//     (This is the same delaysContentTouches behavior the v1 overlay had to
-//     fight — for hold-to-scrub it is the correct gate, so it stays stock.)
-//   • While the finger is down: the interactive pop, Apollo's
-//     swipe-anywhere-back pan, and every ancestor long-press (the feed
-//     context menu's driver) are suspended, so a scrub can't pop the screen
-//     and a hold can't pop the menu. All restored the moment the touch ends,
-//     with a dealloc backstop.
+//   • Touch the strip and slide — no hold required: a UIGestureRecognizer
+//     subclass observes the touch the instant it lands (the scroll view's
+//     touch delay only holds back VIEW delivery, never recognizers) and the
+//     playback position follows the finger's absolute position on the bar
+//     (finger at 1/3 of the width ≈ 1/3 of the video).
+//   • Direction classifies the touch, deterministically: horizontal
+//     dominance scrubs (any speed), vertical dominance fails to the feed
+//     scroll. The bar owns horizontal gestures outright; swipe back/forward
+//     navigation owns the rest of the video.
+//   • While the finger is on the bar the time-based hold blockers (the feed
+//     context menu's driver, drag lifts) are quiet, and while a scrub is live
+//     the interactive pop, Apollo's swipe-anywhere pans, and the list's
+//     scrolling are all suspended, so a drag can't pop the screen or bob the
+//     feed. All restored the moment the touch ends, with a dealloc backstop.
 //   • A quick tap on the strip is forwarded to the stock open-fullscreen
 //     route (didTapVideoNode:), so the bottom of a video never becomes a
 //     dead zone for the tap everyone already knows.
@@ -58,6 +58,7 @@
 #import "UserDefaultConstants.h"
 
 #import <UIKit/UIKit.h>
+#import <UIKit/UIGestureRecognizerSubclass.h>
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -78,15 +79,20 @@ static const CGFloat kStripHeight = 32.0;
 // GIF badge). Touches there fall through to it.
 static const CGFloat kCornerExclusion = 56.0;
 
-// A finger has to move this far horizontally before the hold becomes a scrub;
-// below it a release is treated as a tap.
+// A release that never moved this far is a tap.
 static const CGFloat kScrubSlop = 6.0;
 
-// A touch that covers this much ground within the settle window was a swipe
-// already in flight when the scroll view's touch delay finally delivered it —
-// hand it back to the navigation gestures instead of scrubbing.
-static const CGFloat kSwipeRejectDistance = 12.0;
-static const NSTimeInterval kHoldSettleDuration = 0.12;
+// The instant-scrub gesture (ApolloFeedScrubGesture): it observes the touch
+// live — no waiting on the scroll view's touch delay — and classifies it by
+// direction alone, so the same gesture always does the same thing:
+//   • horizontal dominance past kGestureBeginDistance → scrub NOW, any speed
+//   • vertical dominance past kGestureVerticalFail → fail, the feed scrolls
+// The bar deterministically owns horizontal gestures; swipe back/forward
+// navigation owns the rest of the video (a velocity split was tried and
+// rejected — the same flick would sometimes scrub and sometimes navigate,
+// which reads as broken).
+static const CGFloat kGestureBeginDistance = 5.0;
+static const CGFloat kGestureVerticalFail = 8.0;
 
 // A press shorter than this with no slide is a tap, forwarded to the stock
 // open-fullscreen route. Longer means the user grabbed the bar deliberately —
@@ -152,7 +158,10 @@ static UIViewController *ViewControllerForView(UIView *view) {
 // loupe handling.
 static NSArray<UIGestureRecognizer *> *SuspendHoldBlockingGestures(UIView *view) {
     NSMutableArray<UIGestureRecognizer *> *disabled = [NSMutableArray array];
-    for (UIView *v = view; v; v = v.superview) {
+    // Ancestors only: the strip's own scrub recognizer lives on `view`, and it
+    // is neither a pan nor a tap — walking from `view` itself disabled OUR OWN
+    // gesture from inside its touchesBegan, killing every drag at birth.
+    for (UIView *v = view.superview; v; v = v.superview) {
         UIGestureRecognizer *scrollPan =
             [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
         for (UIGestureRecognizer *g in v.gestureRecognizers) {
@@ -173,7 +182,7 @@ static NSArray<UIGestureRecognizer *> *SuspendNavigationPans(UIView *view) {
         ViewControllerForView(view).navigationController.interactivePopGestureRecognizer;
     if (pop && pop.isEnabled) { pop.enabled = NO; [disabled addObject:pop]; }
 
-    for (UIView *v = view; v; v = v.superview) {
+    for (UIView *v = view.superview; v; v = v.superview) {
         UIGestureRecognizer *scrollPan =
             [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
         for (UIGestureRecognizer *g in v.gestureRecognizers) {
@@ -242,6 +251,14 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 // the video picture. Everything it needs (player, duration, the native strip's
 // presence) is resolved per-touch, never cached across touches — feed players
 // are created and torn down constantly as cells scroll.
+//
+// Two touch paths share it:
+//   • ApolloFeedScrubGesture (below) — a recognizer, so it sees the touch the
+//     instant it lands instead of waiting out the scroll view's ~150ms touch
+//     delay. It does ALL the scrubbing: drag the bar and it seeks right away,
+//     no hold required.
+//   • UIControl tracking — only ever receives the delayed/replayed delivery,
+//     and is kept purely so a plain TAP on the strip still opens fullscreen.
 @interface ApolloFeedScrubStrip : UIControl
 @property (nonatomic, weak) id richMediaNode;
 @property (nonatomic, weak) id videoNode;
@@ -250,14 +267,83 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 @property (nonatomic, weak) UIView *nativeStripView;         // touch-scoped
 @property (nonatomic, assign) BOOL pausedForScrub;           // touch-scoped
 @property (nonatomic, weak) UIScrollView *lockedScrollView;  // touch-scoped
+@property (nonatomic, assign) BOOL scrubbing;                // gesture Began..Ended
 @property (nonatomic, assign) CGFloat startX;
 @property (nonatomic, assign) CFTimeInterval touchStartedAt;
-@property (nonatomic, assign) BOOL didScrub;
-@property (nonatomic, assign) BOOL rejectedAsSwipe;
+@property (nonatomic, assign) BOOL movedTooFarForTap;
 @property (nonatomic, strong) NSArray<UIGestureRecognizer *> *suspendedGestures;
+@property (nonatomic, strong) UIGestureRecognizer *scrubGesture;
+@property (nonatomic, strong) NSHashTable<UIGestureRecognizer *> *deferredPans;
 @property (nonatomic, assign) BOOL seekInFlight;
 @property (nonatomic, assign) BOOL hasPendingSeek;
 @property (nonatomic, assign) CMTime pendingSeekTime;
+- (void)scrubTouchLanded;
+- (void)scrubGestureDidReset;
+- (void)wireFailureRequirements;
+- (CGFloat)fractionForLocationX:(CGFloat)x;
+@end
+
+// The instant path: a UIGestureRecognizer subclass observes touches live (the
+// scroll view's delaysContentTouches only delays VIEW delivery, never
+// recognizers), so a drag on the bar can start seeking immediately. Direction
+// and speed decide the touch's fate — see the constants above. Once this
+// recognizer Begins, UIKit's default mutual exclusion prevents every other
+// recognizer on the touch (scroll pan, back/forward pans), so nothing fights
+// the drag; when it Fails, those recognizers proceed exactly as stock.
+@interface ApolloFeedScrubGesture : UIGestureRecognizer
+@property (nonatomic, assign) CGPoint startPoint;
+@end
+
+@implementation ApolloFeedScrubGesture
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.numberOfTouches > 1) { self.state = UIGestureRecognizerStateFailed; return; }
+    UITouch *touch = touches.anyObject;
+    self.startPoint = [touch locationInView:self.view];
+    // Kill the time-based hold blockers (context menu, drag lift) right at
+    // touch-down — the strip owns holds. Restored in -reset for every outcome.
+    [(ApolloFeedScrubStrip *)self.view scrubTouchLanded];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    UITouch *touch = touches.anyObject;
+    CGPoint point = [touch locationInView:self.view];
+
+    if (self.state == UIGestureRecognizerStatePossible) {
+        CGFloat dx = fabs(point.x - self.startPoint.x);
+        CGFloat dy = fabs(point.y - self.startPoint.y);
+        if (dy >= kGestureVerticalFail && dy > dx) {
+            self.state = UIGestureRecognizerStateFailed;   // a scroll
+            return;
+        }
+        if (dx >= kGestureBeginDistance && dx > dy) {
+            self.state = UIGestureRecognizerStateBegan;    // a scrub, any speed
+        }
+        return;
+    }
+    if (self.state == UIGestureRecognizerStateBegan
+        || self.state == UIGestureRecognizerStateChanged) {
+        self.state = UIGestureRecognizerStateChanged;
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    BOOL active = self.state == UIGestureRecognizerStateBegan
+               || self.state == UIGestureRecognizerStateChanged;
+    self.state = active ? UIGestureRecognizerStateEnded : UIGestureRecognizerStateFailed;
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    BOOL active = self.state == UIGestureRecognizerStateBegan
+               || self.state == UIGestureRecognizerStateChanged;
+    self.state = active ? UIGestureRecognizerStateCancelled : UIGestureRecognizerStateFailed;
+}
+
+- (void)reset {
+    [super reset];
+    [(ApolloFeedScrubStrip *)self.view scrubGestureDidReset];
+}
+
 @end
 
 static char kFeedScrubStripKey;
@@ -271,7 +357,47 @@ static char kFeedScrubStripKey;
     self.isAccessibilityElement = YES;
     self.accessibilityLabel = @"Video progress";
     self.accessibilityTraits = UIAccessibilityTraitAdjustable;
+
+    ApolloFeedScrubGesture *gesture = [[ApolloFeedScrubGesture alloc] init];
+    [gesture addTarget:self action:@selector(handleScrubGesture:)];
+    [self addGestureRecognizer:gesture];
+    self.scrubGesture = gesture;
+    self.deferredPans = [NSHashTable weakObjectsHashTable];
     return self;
+}
+
+// Race-free arbitration with the navigation pans: a failure requirement makes
+// each ancestor pan (and the interactive pop) formally WAIT for this strip's
+// gesture to fail before it may begin on a touch the strip is tracking. When
+// the gesture classifies the touch as a flick or a scroll it fails within the
+// first few points of movement and the pans proceed; when it begins a scrub
+// they are blocked outright. Touches that never hit the strip never enter its
+// gesture's arena, so the requirement is vacuous there — navigation elsewhere
+// on the screen is untouched. (Without this, both recognizers classify the
+// same move event and whoever runs first wins — the pop gesture was beating
+// the strip to a slow drag and popping the screen instead of scrubbing.)
+- (void)wireFailureRequirements {
+    UIGestureRecognizer *gesture = self.scrubGesture;
+    if (!gesture) return;
+
+    UIGestureRecognizer *pop =
+        ViewControllerForView(self).navigationController.interactivePopGestureRecognizer;
+    if (pop && ![self.deferredPans containsObject:pop]) {
+        [pop requireGestureRecognizerToFail:gesture];
+        [self.deferredPans addObject:pop];
+    }
+
+    for (UIView *v = self.superview; v; v = v.superview) {
+        UIGestureRecognizer *scrollPan =
+            [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if (g == scrollPan) continue;   // scrolling stays fully stock
+            if (![g isKindOfClass:[UIPanGestureRecognizer class]]) continue;
+            if ([self.deferredPans containsObject:g]) continue;
+            [g requireGestureRecognizerToFail:gesture];
+            [self.deferredPans addObject:g];
+        }
+    }
 }
 
 - (void)dealloc {
@@ -344,45 +470,115 @@ static char kFeedScrubStripKey;
     [self accessibilityNudgeBy:-ScrubbableDuration(player) * 0.05];
 }
 
-#pragma mark Tracking
+#pragma mark Scrub gesture
 
-- (CGFloat)fractionForTouch:(UITouch *)touch {
+- (CGFloat)fractionForLocationX:(CGFloat)x {
     CGFloat width = self.bounds.size.width;
     if (width <= 0) return 0;
-    CGFloat x = [touch locationInView:self].x;
     return MAX(0.0, MIN(1.0, x / width));
 }
 
-- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    // Re-resolve everything: pointInside vetted the touch, but the player can
-    // change between then and now (and between any two touches).
-    self.player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
-    self.duration = self.player ? ScrubbableDuration(self.player) : 0;
-    if (!self.player || self.duration <= 0) { self.player = nil; return NO; }
+// Recognizer touch-down: the strip owns holds, so the time-based hold
+// blockers (context menu, drag lift) go quiet immediately. The navigation
+// pans and the scroll pan are left completely alone — the recognizer's
+// classification decides the touch's fate, and if it Fails they proceed as
+// stock. Restored in -scrubGestureDidReset, which fires for every outcome.
+- (void)scrubTouchLanded {
+    if (!self.suspendedGestures.count) {
+        self.suspendedGestures = SuspendHoldBlockingGestures(self);
+    }
+}
 
-    self.startX = [touch locationInView:self].x;
-    self.touchStartedAt = CACurrentMediaTime();
-    self.didScrub = NO;
-    self.rejectedAsSwipe = NO;
-    self.hasPendingSeek = NO;
+- (void)scrubGestureDidReset {
+    if (!self.scrubbing) [self restoreSuspendedGestures];
+}
 
-    // Grabbed for finger-tracking during the drag (see continueTracking).
-    UIView *nativeStrip = NodeIvar(self.richMediaNode, "videoGIFProgressView");
-    self.nativeStripView = [nativeStrip isKindOfClass:[UIView class]] ? nativeStrip : nil;
+- (void)handleScrubGesture:(ApolloFeedScrubGesture *)gesture {
+    switch (gesture.state) {
+        case UIGestureRecognizerStateBegan: {
+            // Re-resolve everything: pointInside vetted the touch at
+            // hit-test, but the player can change between then and now.
+            self.player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
+            self.duration = self.player ? ScrubbableDuration(self.player) : 0;
+            if (!self.player || self.duration <= 0) { self.player = nil; return; }
 
-    // Suspend both families at delivery. This is NOT what steals navigation
-    // swipes from the bar: recognizers observe touches live while the scroll
-    // view's touch delay holds view delivery back, so any swipe the
-    // back/forward pans want has already begun (and cancelled this delivery)
-    // before we get here. Suspending at delivery is what makes the scrub
-    // race-free — recognizers also see each event BEFORE view tracking does,
-    // so deferring the pan suspension to engagement lets a fast slide lose
-    // the touch to the pop gesture between two events.
-    NSMutableArray *suspended =
-        [NSMutableArray arrayWithArray:SuspendHoldBlockingGestures(self)];
-    [suspended addObjectsFromArray:SuspendNavigationPans(self)];
-    self.suspendedGestures = suspended;
-    return YES;
+            self.scrubbing = YES;
+            self.hasPendingSeek = NO;
+            UIView *nativeStrip = NodeIvar(self.richMediaNode, "videoGIFProgressView");
+            self.nativeStripView = [nativeStrip isKindOfClass:[UIView class]] ? nativeStrip : nil;
+
+            // UIKit's mutual exclusion already fails other recognizers on
+            // this touch once we Begin — but Apollo's swipe-anywhere pans are
+            // custom recognizers whose delegates may permit simultaneous
+            // recognition, so take them out explicitly for the drag too.
+            NSMutableArray *suspended =
+                [NSMutableArray arrayWithArray:self.suspendedGestures ?: @[]];
+            [suspended addObjectsFromArray:SuspendNavigationPans(self)];
+            self.suspendedGestures = suspended;
+
+            CGFloat fraction = [self fractionForLocationX:[gesture locationInView:self].x];
+            ApolloLog(@"[FeedScrubber] scrub engaged at %.0f%% (duration=%.1fs)",
+                      fraction * 100.0, self.duration);
+
+            // Lock the list so vertical finger drift can't bob it under the
+            // drag (stats-row loupe pattern; restored on every exit path)...
+            for (UIView *v = self.superview; v; v = v.superview) {
+                if ([v isKindOfClass:[UIScrollView class]]) {
+                    UIScrollView *scrollView = (UIScrollView *)v;
+                    if (scrollView.isScrollEnabled) {
+                        scrollView.scrollEnabled = NO;
+                        self.lockedScrollView = scrollView;
+                    }
+                    break;
+                }
+            }
+
+            // ...and pause for the duration of the drag, like every standard
+            // scrubber: with playback stopped, Apollo's progress observer
+            // only fires as seeks land (≈ the finger position), so it stops
+            // fighting the finger-tracked bar with stale playhead widths —
+            // and the drag stops playing chopped-up audio. Resumed on
+            // release/cancel, with a dealloc backstop. The player is never
+            // rate-changed outside the touch.
+            if (self.player.rate > 0) {
+                self.pausedForScrub = YES;
+                [self.player pause];
+            }
+
+            [self trackFingerOnNativeStrip:fraction];
+            [self scrubToFraction:fraction finished:NO];
+            break;
+        }
+        case UIGestureRecognizerStateChanged: {
+            if (!self.scrubbing) return;
+            CGFloat fraction = [self fractionForLocationX:[gesture locationInView:self].x];
+            [self trackFingerOnNativeStrip:fraction];
+            [self scrubToFraction:fraction finished:NO];
+            break;
+        }
+        case UIGestureRecognizerStateEnded: {
+            if (!self.scrubbing) return;
+            CGFloat fraction = [self fractionForLocationX:[gesture locationInView:self].x];
+            [self scrubToFraction:fraction finished:YES];
+            [self finishScrub];
+            break;
+        }
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            if (self.scrubbing) [self finishScrub];
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+- (void)finishScrub {
+    self.scrubbing = NO;
+    [self restoreSuspendedGestures];
+    [self unlockScrollView];
+    [self resumeIfPausedForScrub];
+    self.player = nil;
 }
 
 - (void)unlockScrollView {
@@ -391,68 +587,25 @@ static char kFeedScrubStripKey;
     self.lockedScrollView = nil;
 }
 
+#pragma mark Tap tracking
+
+// UIControl tracking only ever sees the scroll view's delayed/replayed
+// delivery — the gesture above owns all scrubbing. This path exists so a
+// plain tap on the strip still opens the video fullscreen.
+
+- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    self.startX = [touch locationInView:self].x;
+    self.touchStartedAt = CACurrentMediaTime();
+    self.movedTooFarForTap = NO;
+    return YES;
+}
+
 - (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    if (self.rejectedAsSwipe) return NO;
-
-    CGFloat x = [touch locationInView:self].x;
-    if (!self.didScrub) {
-        CGFloat travelled = fabs(x - self.startX);
-
-        // Settle window right after delivery: the scroll view REPLAYS the
-        // moves it buffered during its touch delay, so a flick that ended too
-        // fast for the navigation pans to claim live arrives here as a burst
-        // of movement after its touch already lifted. During the window a
-        // touch can only be CLASSIFIED, never engaged — big travel means it
-        // was a flick, and scrubbing off a replay would be acting on a
-        // gesture the user finished before we ever saw it. A genuine hold
-        // sits still through the window, because the finger was deliberately
-        // parked on the bar. (A slower swipe never gets here at all: the
-        // back/forward pans observe touches live and claim it before
-        // delivery, which is what keeps swipe navigation working on the bar.)
-        if (CACurrentMediaTime() - self.touchStartedAt < kHoldSettleDuration) {
-            if (travelled >= kSwipeRejectDistance) {
-                self.rejectedAsSwipe = YES;
-                [self restoreSuspendedGestures];
-                ApolloLog(@"[FeedScrubber] flick over the bar - not a scrub");
-                return NO;
-            }
-            return YES;
-        }
-
-        if (travelled < kScrubSlop) return YES;
-        self.didScrub = YES;
-        // Confirms the drag reached the strip rather than being claimed by the
-        // scroll view or the swipe-back pan — the failure mode to watch for.
-        ApolloLog(@"[FeedScrubber] scrub engaged at %.0f%% (duration=%.1fs)",
-                  [self fractionForTouch:touch] * 100.0, self.duration);
-
-        // Lock the list so vertical finger drift can't bob it under the
-        // drag (stats-row loupe pattern; restored on every exit path)...
-        for (UIView *v = self.superview; v; v = v.superview) {
-            if ([v isKindOfClass:[UIScrollView class]]) {
-                UIScrollView *scrollView = (UIScrollView *)v;
-                if (scrollView.isScrollEnabled) {
-                    scrollView.scrollEnabled = NO;
-                    self.lockedScrollView = scrollView;
-                }
-                break;
-            }
-        }
-
-        // ...and pause for the duration of the drag, like every standard
-        // scrubber: with playback stopped, Apollo's progress observer only
-        // fires as seeks land (≈ the finger position), so it stops fighting
-        // the finger-tracked bar with stale playhead widths — and the drag
-        // stops playing chopped-up audio. Resumed on release/cancel, with a
-        // dealloc backstop. The player is never rate-changed outside the touch.
-        if (self.player.rate > 0) {
-            self.pausedForScrub = YES;
-            [self.player pause];
-        }
+    if (fabs([touch locationInView:self].x - self.startX) >= kScrubSlop) {
+        // Includes a fast flick's post-lift replay burst: not a tap, and the
+        // gesture (which saw it live) already classified it — do nothing.
+        self.movedTooFarForTap = YES;
     }
-    CGFloat fraction = [self fractionForTouch:touch];
-    [self trackFingerOnNativeStrip:fraction];
-    [self scrubToFraction:fraction finished:NO];
     return YES;
 }
 
@@ -476,14 +629,8 @@ static char kFeedScrubStripKey;
 }
 
 - (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    [self restoreSuspendedGestures];
-    [self unlockScrollView];
-
-    if (self.didScrub) {
-        CGFloat fraction = touch ? [self fractionForTouch:touch] : 0;
-        [self scrubToFraction:fraction finished:YES];
-        [self resumeIfPausedForScrub];
-    } else if (CACurrentMediaTime() - self.touchStartedAt < kForwardTapMaxDuration) {
+    if (!self.scrubbing && !self.movedTooFarForTap
+        && CACurrentMediaTime() - self.touchStartedAt < kForwardTapMaxDuration) {
         // A plain tap: hand it to the stock route so tapping the bottom of a
         // video still opens it fullscreen, scrubber or no scrubber.
         id richMediaNode = self.richMediaNode;
@@ -494,17 +641,13 @@ static char kFeedScrubStripKey;
             ((void (*)(id, SEL, id))objc_msgSend)(richMediaNode, @selector(didTapVideoNode:), videoNode);
         }
     }
-
-    self.player = nil;
-    self.didScrub = NO;
+    self.movedTooFarForTap = NO;
 }
 
 - (void)cancelTrackingWithEvent:(UIEvent *)event {
-    [self restoreSuspendedGestures];
-    [self unlockScrollView];
-    [self resumeIfPausedForScrub];
-    self.player = nil;
-    self.didScrub = NO;
+    // The gesture Beginning cancels view tracking — its own handler owns all
+    // cleanup. Nothing to do here.
+    self.movedTooFarForTap = NO;
 }
 
 - (void)restoreSuspendedGestures {
@@ -591,9 +734,12 @@ static void EnsureScrubStrip(id richMediaNode) {
 
     if (strip.superview != host) [strip removeFromSuperview];
     if (!strip.superview) [host addSubview:strip];
+    [strip wireFailureRequirements];
 
-    // Never move the strip under the user's finger mid-scrub.
-    if (strip.tracking) return;
+    // Never move the strip under the user's finger mid-scrub. (.tracking
+    // covers the tap path; .scrubbing the gesture path — the gesture cancels
+    // view tracking when it begins, so .tracking alone would miss it.)
+    if (strip.tracking || strip.scrubbing) return;
 
     CGRect videoFrame = VideoContentRectInHost(videoView, host);
     if (CGRectIsEmpty(videoFrame)) return;
