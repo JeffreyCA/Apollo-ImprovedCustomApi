@@ -3228,12 +3228,25 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         }
     }
 
+    // Auto mode: the photo-button hook armed the window in NATIVE mode (the
+    // subreddit is known to allow image comments), so this comment upload takes
+    // Reddit's native media path even when the Media Upload Host is Imgur or
+    // ImgChest. Only bypasses provider SELECTION below — the keyless capability
+    // checks (synthetic bearer without a cookie lease, no captured bearer) still
+    // apply and degrade to Imgur exactly as a provider=Reddit upload would.
+    BOOL commentNativeForced = NO;
+    if (completionHandler && ApolloIsImgurImageUploadRequest(request) &&
+        !ApolloChatImageUploadPending() && ApolloCommentNativeUploadPending()) {
+        commentNativeForced = YES;
+        ApolloLog(@"[CommentLinkHost] Auto: forcing native Reddit routing for comment-editor upload (fromData)");
+    }
+
     // ImgChest host: divert Apollo's Imgur image upload to the ImgChest API
     // and answer with a synthetic Imgur response carrying the ImgChest link.
     // ImgChest uses its own API key (not Reddit's bearer), so this runs ahead of
     // the keyless Web JSON fallback below and always returns when it applies.
     if ((sImageUploadProvider == ImageUploadProviderImgChest || ApolloChatImageUploadPending() || commentLinkImgChest) &&
-        !commentLinkImgur && completionHandler && ApolloIsImgurImageUploadRequest(request)) {
+        !commentLinkImgur && !commentNativeForced && completionHandler && ApolloIsImgurImageUploadRequest(request)) {
         BOOL chestForChat = ApolloChatImageUploadPending();   // capture now; the upload completes asynchronously
         if (chestForChat) ApolloChatClearImageUpload();        // window consumed: don't let it leak to a later non-chat upload
         BOOL chestForCommentLink = commentLinkImgChest;
@@ -3314,7 +3327,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         if (sImgurClientId.length == 0) ApolloWarnKeylessUploadUnavailableOnce();
         return %orig;
     }
-    if ((sImageUploadProvider != ImageUploadProviderReddit && !cookieUpload) || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
+    if ((sImageUploadProvider != ImageUploadProviderReddit && !cookieUpload && !commentNativeForced) || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
         if (sImageUploadProvider == ImageUploadProviderReddit && completionHandler) ApolloLogUnhandledImgurUploadRequestOnce(request, @"fromData");
         return %orig;
     }
@@ -3414,11 +3427,20 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         }
     }
 
+    // Auto mode (see the fromData: hook): NATIVE-mode window forces this comment
+    // upload onto Reddit's native media path regardless of the Media Upload Host.
+    BOOL commentNativeForced = NO;
+    if (completionHandler && ApolloIsImgurImageUploadRequest(request) &&
+        !ApolloChatImageUploadPending() && ApolloCommentNativeUploadPending()) {
+        commentNativeForced = YES;
+        ApolloLog(@"[CommentLinkHost] Auto: forcing native Reddit routing for comment-editor upload (fromFile)");
+    }
+
     // ImgChest host (see the fromData: hook) — runs ahead of the keyless Web JSON
     // fallback since it authenticates with its own API key, and always returns when
     // ImgChest is the selected provider for an Imgur upload request.
     if ((sImageUploadProvider == ImageUploadProviderImgChest || ApolloChatImageUploadPending() || commentLinkImgChest) &&
-        !commentLinkImgur && completionHandler && ApolloIsImgurImageUploadRequest(request)) {
+        !commentLinkImgur && !commentNativeForced && completionHandler && ApolloIsImgurImageUploadRequest(request)) {
         BOOL chestForChat = ApolloChatImageUploadPending();   // capture now; the upload completes asynchronously
         if (chestForChat) ApolloChatClearImageUpload();        // window consumed: don't let it leak to a later non-chat upload
         BOOL chestForCommentLink = commentLinkImgChest;
@@ -3499,7 +3521,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         if (sImgurClientId.length == 0) ApolloWarnKeylessUploadUnavailableOnce();
         return %orig;
     }
-    if ((sImageUploadProvider != ImageUploadProviderReddit && !cookieUpload) || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
+    if ((sImageUploadProvider != ImageUploadProviderReddit && !cookieUpload && !commentNativeForced) || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
         if (sImageUploadProvider == ImageUploadProviderReddit && completionHandler) ApolloLogUnhandledImgurUploadRequestOnce(request, @"fromFile");
         return %orig;
     }

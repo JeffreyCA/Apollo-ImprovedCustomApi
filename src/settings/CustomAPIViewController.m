@@ -389,11 +389,18 @@ typedef NS_ENUM(NSInteger, Tag) {
     // un-blocks while a link host is set) — let it re-apply immediately.
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloCommentLinkHostChangedNotification object:nil];
     [self reloadRowWithID:@"media.commentLinkHost"];
+    // The Prefer Native Images row is only shown while a link host is set.
+    [self visibilityDidChange];
+}
+
+- (void)commentLinkPreferNativeSwitchToggled:(UISwitch *)sender {
+    sCommentLinkPreferNative = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyCommentLinkPreferNative];
 }
 
 - (void)presentCommentLinkHostSheetFromSourceView:(UIView *)sourceView {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Comment Link Host"
-                                                                   message:@"Images added to a comment or reply upload to this host and are inserted as a plain link instead of a native Reddit image — so they still work in subreddits that don't allow images or GIFs in comments. Apollo shows the linked image inline; other apps and the website show a tappable link. Posts keep using the Media Upload Host."
+                                                                   message:@"Images added to a comment or reply upload to this host and are inserted as a plain link instead of a native Reddit image — so they still work in subreddits that don't allow images or GIFs in comments. Apollo shows the linked image inline; other apps and the website show a tappable link. Posts keep using the Media Upload Host.\n\nTo use this host only where it's needed, turn on Prefer Native Images: comment images then upload to Reddit and display inline wherever the subreddit allows them."
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
     NSString *offTitle = (sCommentLinkHost == CommentLinkHostOff) ? @"Off (Current)" : @"Off";
@@ -1842,9 +1849,20 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }];
     commentLinkHost.configure = disclosure;
 
+    ApolloSettingsRow *commentLinkAuto =
+        [ApolloSettingsRow switchRowWithID:@"media.commentLinkAuto"
+                                     title:@"Prefer Native Images"
+                                      isOn:^BOOL { return sCommentLinkPreferNative; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf commentLinkPreferNativeSwitchToggled:sender]; }];
+    // Auto mode only means something while a link host is set (see -setCommentLinkHost:).
+    commentLinkAuto.visible = ^BOOL { return sCommentLinkHost != CommentLinkHostOff; };
+
+    // NOTE: the rendered footer for this section is the attributed one in
+    // -footerAttributedTextForSection: (matched by the "Uploads" title) — keep
+    // the two in sync when editing either.
     return [ApolloSettingsSection sectionWithTitle:@"Uploads"
                                             footer:@"Media Upload Host sets where images attached to posts and comments are uploaded. Comment Link Host uploads images in comments to Imgur or Image Chest and inserts a plain link, so they work even where images aren't allowed."
-                                              rows:@[ uploadHost, commentLinkHost ]];
+                                              rows:@[ uploadHost, commentLinkHost, commentLinkAuto ]];
 }
 
 - (ApolloSettingsSection *)buildMediaNetworkSection {
@@ -2726,7 +2744,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             attributes:plainAttrs]];
     } else if ([sectionTitle isEqualToString:@"Uploads"]) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Image Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nManage past uploads from Settings → General → Media → Manage Uploads."
+            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Image Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nWith Prefer Native Images on, comment images upload to Reddit and display inline wherever the subreddit allows image comments — the link host is used only where it doesn't, or when Apollo doesn't know yet.\n\nManage past uploads from Settings → General → Media → Manage Uploads."
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Network"]) {
         text = [[NSMutableAttributedString alloc]

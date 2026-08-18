@@ -119,6 +119,13 @@ static NSString *const UDKeyImageUploadProvider = @"ImageUploadProvider";
 // plain link (no native Reddit media) so they work in subreddits that disallow
 // image/GIF comments. See ApolloMarkdownToolbarGif.xm + ApolloImageUploadHost.xm.
 static NSString *const UDKeyCommentLinkHost = @"CommentLinkHost";
+// Auto mode for the Comment Link Host (default OFF). When ON, comment-editor
+// images are forced onto Reddit's NATIVE media upload (they render inline on
+// every client) wherever the subreddit allows image comments; the link host
+// above is used only where the subreddit disallows them — or when the
+// permissions aren't known yet, since a plain link always posts. Only
+// consulted while a Comment Link Host is set.
+static NSString *const UDKeyCommentLinkPreferNative = @"CommentLinkPreferNative";
 // Posted after sCommentLinkHost changes so open composers re-apply the comment
 // media-permission gating (the image button un-blocks while a link host is set).
 static NSString *const ApolloCommentLinkHostChangedNotification = @"ApolloCommentLinkHostChangedNotification";
