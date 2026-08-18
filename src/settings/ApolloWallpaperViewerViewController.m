@@ -44,11 +44,125 @@ static NSCache<NSURL *, NSData *> *ApolloWallpaperSharedDataCache(void) {
     return cache;
 }
 
-static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
-    static NSMutableSet<NSURL *> *URLs;
+typedef void (^ApolloWallpaperLoadCompletion)(NSData * _Nullable data,
+                                              UIImage * _Nullable image,
+                                              NSError * _Nullable error);
+
+@interface ApolloWallpaperLoadToken : NSObject
+@property (nonatomic, copy) NSURL *URL;
+@property (nonatomic, strong) NSUUID *identifier;
+@end
+
+@implementation ApolloWallpaperLoadToken
+@end
+
+@interface ApolloWallpaperLoadRecord : NSObject
+@property (nonatomic, strong) NSURLSessionDataTask *task;
+@property (nonatomic, strong) NSMutableDictionary<NSUUID *, ApolloWallpaperLoadCompletion> *completions;
+@end
+
+@implementation ApolloWallpaperLoadRecord
+@end
+
+// One broker owns all remote image transfers. A visible cell, nearby prefetch,
+// opening-page warmup, and download tap can therefore subscribe to the same
+// URL without starting parallel transfers of the original file.
+@interface ApolloWallpaperLoadBroker : NSObject
+@property (nonatomic, strong) NSMutableDictionary<NSURL *, ApolloWallpaperLoadRecord *> *records;
++ (instancetype)sharedBroker;
+- (nullable ApolloWallpaperLoadToken *)loadURL:(NSURL *)URL
+                                      priority:(float)priority
+                                    completion:(ApolloWallpaperLoadCompletion)completion;
+- (void)cancelToken:(nullable ApolloWallpaperLoadToken *)token;
+@end
+
+@implementation ApolloWallpaperLoadBroker
+
++ (instancetype)sharedBroker {
+    static ApolloWallpaperLoadBroker *broker;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ URLs = [NSMutableSet set]; });
-    return URLs;
+    dispatch_once(&onceToken, ^{
+        broker = [[self alloc] init];
+        broker.records = [NSMutableDictionary dictionary];
+    });
+    return broker;
+}
+
+- (ApolloWallpaperLoadToken *)loadURL:(NSURL *)URL
+                              priority:(float)priority
+                            completion:(ApolloWallpaperLoadCompletion)completion {
+    if (!URL || !completion) return nil;
+
+    NSData *cachedData = [ApolloWallpaperSharedDataCache() objectForKey:URL];
+    UIImage *cachedImage = [ApolloWallpaperSharedImageCache() objectForKey:URL];
+    if (cachedData.length > 0) {
+        if (!cachedImage) {
+            cachedImage = [UIImage imageWithData:cachedData];
+            if (cachedImage) ApolloWallpaperCacheImage(ApolloWallpaperSharedImageCache(), URL, cachedImage);
+        }
+        UIImage *resultImage = cachedImage;
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(cachedData, resultImage, nil); });
+        return nil;
+    }
+
+    ApolloWallpaperLoadToken *token = [[ApolloWallpaperLoadToken alloc] init];
+    token.URL = URL;
+    token.identifier = [NSUUID UUID];
+
+    ApolloWallpaperLoadRecord *record = self.records[URL];
+    if (record) {
+        record.completions[token.identifier] = [completion copy];
+        record.task.priority = MAX(record.task.priority, priority);
+        return token;
+    }
+
+    record = [[ApolloWallpaperLoadRecord alloc] init];
+    record.completions = [NSMutableDictionary dictionaryWithObject:[completion copy]
+                                                             forKey:token.identifier];
+    self.records[URL] = record;
+
+    __weak typeof(self) weakSelf = self;
+    __weak ApolloWallpaperLoadRecord *weakRecord = record;
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithURL:URL
+      completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
+        UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
+        if (image) {
+            ApolloWallpaperCacheImage(ApolloWallpaperSharedImageCache(), URL, image);
+            [ApolloWallpaperSharedDataCache() setObject:data forKey:URL cost:data.length];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            ApolloWallpaperLoadRecord *liveRecord = strongSelf.records[URL];
+            if (!strongSelf || liveRecord != weakRecord) return;
+            [strongSelf.records removeObjectForKey:URL];
+            NSArray<ApolloWallpaperLoadCompletion> *callbacks = liveRecord.completions.allValues.copy;
+            for (ApolloWallpaperLoadCompletion callback in callbacks) callback(data, image, error);
+        });
+    }];
+    record.task = task;
+    task.priority = priority;
+    [task resume];
+    return token;
+}
+
+- (void)cancelToken:(ApolloWallpaperLoadToken *)token {
+    if (!token) return;
+    ApolloWallpaperLoadRecord *record = self.records[token.URL];
+    if (!record) return;
+    [record.completions removeObjectForKey:token.identifier];
+    if (record.completions.count > 0) return;
+    [record.task cancel];
+    [self.records removeObjectForKey:token.URL];
+}
+
+@end
+
+static NSMutableDictionary<NSURL *, ApolloWallpaperLoadToken *> *ApolloWallpaperInitialPreloadTokens(void) {
+    static NSMutableDictionary<NSURL *, ApolloWallpaperLoadToken *> *tokens;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ tokens = [NSMutableDictionary dictionary]; });
+    return tokens;
 }
 
 @implementation ApolloWallpaperItem
@@ -67,7 +181,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 @property (nonatomic, strong) UIImageView *imageView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) UIView *retryView;
-@property (nonatomic, strong, nullable) NSURLSessionDataTask *task;
+@property (nonatomic, strong, nullable) ApolloWallpaperLoadToken *loadToken;
 @property (nonatomic, copy, nullable) NSURL *representedURL;
 @property (nonatomic, strong, nullable) NSCache<NSURL *, UIImage *> *imageCache;
 @property (nonatomic, strong, nullable) NSCache<NSURL *, NSData *> *dataCache;
@@ -78,6 +192,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 - (void)showURL:(NSURL *)URL
      imageCache:(NSCache<NSURL *, UIImage *> *)imageCache
       dataCache:(NSCache<NSURL *, NSData *> *)dataCache;
+- (void)cancelLoad;
 - (void)toggleZoomAtPoint:(CGPoint)point;
 @end
 
@@ -216,8 +331,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 - (void)prepareForReuse {
     [super prepareForReuse];
     self.loadGeneration++;
-    [self.task cancel];
-    self.task = nil;
+    [self cancelLoad];
     self.representedURL = nil;
     self.imageCache = nil;
     self.dataCache = nil;
@@ -230,12 +344,18 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
     self.retryView.hidden = YES;
 }
 
+- (void)cancelLoad {
+    [[ApolloWallpaperLoadBroker sharedBroker] cancelToken:self.loadToken];
+    self.loadToken = nil;
+    [self.spinner stopAnimating];
+}
+
 - (void)showURL:(NSURL *)URL
      imageCache:(NSCache<NSURL *, UIImage *> *)imageCache
       dataCache:(NSCache<NSURL *, NSData *> *)dataCache {
     NSUInteger generation = ++self.loadGeneration;
-    [self.task cancel];
-    self.task = nil;
+    [[ApolloWallpaperLoadBroker sharedBroker] cancelToken:self.loadToken];
+    self.loadToken = nil;
     self.representedURL = URL;
     self.imageCache = imageCache;
     self.dataCache = dataCache;
@@ -257,26 +377,25 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 
     [self.spinner startAnimating];
     __weak typeof(self) weakSelf = self;
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:URL completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
-        UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
-        if (image) {
-            ApolloWallpaperCacheImage(imageCache, URL, image);
-            [dataCache setObject:data forKey:URL cost:data.length];
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            typeof(self) strongSelf = weakSelf;
-            if (!strongSelf || strongSelf.loadGeneration != generation ||
-                ![strongSelf.representedURL isEqual:URL]) return;
-            strongSelf.task = nil;
-            [strongSelf.spinner stopAnimating];
-            strongSelf.imageView.image = image;
-            [strongSelf resetZoomGeometry];
-            strongSelf.retryView.hidden = (image != nil);
-            if (!image) ApolloLog(@"[Wallpapers] image load failed url=%@ error=%@", URL, error.localizedDescription ?: @"decode failed");
-        });
+    self.loadToken = [[ApolloWallpaperLoadBroker sharedBroker]
+        loadURL:URL
+       priority:NSURLSessionTaskPriorityHigh
+     completion:^(__unused NSData *data, UIImage *image, NSError *error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.loadGeneration != generation ||
+            ![strongSelf.representedURL isEqual:URL]) return;
+        strongSelf.loadToken = nil;
+        [strongSelf.spinner stopAnimating];
+        strongSelf.imageView.image = image;
+        [strongSelf resetZoomGeometry];
+        strongSelf.retryView.hidden = (image != nil);
+        if (!image) ApolloLog(@"[Wallpapers] image load failed url=%@ error=%@", URL,
+                              error.localizedDescription ?: @"decode failed");
     }];
-    self.task = task;
-    [task resume];
+}
+
+- (void)dealloc {
+    [self cancelLoad];
 }
 
 - (void)retryTapped {
@@ -319,7 +438,8 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 @property (nonatomic, strong) UIActivityIndicatorView *downloadSpinner;
 @property (nonatomic, strong) NSCache<NSURL *, UIImage *> *imageCache;
 @property (nonatomic, strong) NSCache<NSURL *, NSData *> *dataCache;
-@property (nonatomic, strong) NSMutableDictionary<NSURL *, NSURLSessionDataTask *> *prefetchTasks;
+@property (nonatomic, strong) NSMutableDictionary<NSURL *, ApolloWallpaperLoadToken *> *prefetchTokens;
+@property (nonatomic, strong, nullable) ApolloWallpaperLoadToken *downloadToken;
 @property (nonatomic, strong) NSMutableIndexSet *savedIndexes;
 @property (nonatomic, strong) UIPanGestureRecognizer *dismissPan;
 @property (nonatomic, strong) UITapGestureRecognizer *singleTap;
@@ -332,9 +452,19 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 @property (nonatomic) NSInteger prefetchDirection;
 @property (nonatomic) BOOL initialPositionApplied;
 @property (nonatomic) BOOL chromeVisible;
+- (void)cancelPrefetchLoads;
+- (void)cancelOutstandingLoads;
 @end
 
 @implementation ApolloWallpaperViewerViewController
+
++ (void)cancelOpeningPreloads {
+    ApolloWallpaperLoadBroker *broker = [ApolloWallpaperLoadBroker sharedBroker];
+    for (ApolloWallpaperLoadToken *token in ApolloWallpaperInitialPreloadTokens().allValues) {
+        [broker cancelToken:token];
+    }
+    [ApolloWallpaperInitialPreloadTokens() removeAllObjects];
+}
 
 + (void)preloadFirstItemFromItems:(NSArray<ApolloWallpaperItem *> *)items {
     ApolloWallpaperItem *item = items.firstObject;
@@ -352,27 +482,23 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
     // Device-picker actions run on the main thread. Track these tiny, bounded
     // three-device warmups there so repeated menu presentations cannot start
     // duplicate requests for the same opening wallpaper.
-    NSMutableSet<NSURL *> *preloadingURLs = ApolloWallpaperInitialPreloadURLs();
-    if ([preloadingURLs containsObject:URL]) return;
-    [preloadingURLs addObject:URL];
+    NSMutableDictionary<NSURL *, ApolloWallpaperLoadToken *> *tokens = ApolloWallpaperInitialPreloadTokens();
+    if (tokens[URL]) return;
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithURL:URL
-      completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
-        UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
-        if (image) {
-            ApolloWallpaperCacheImage(ApolloWallpaperSharedImageCache(), URL, image);
-            [ApolloWallpaperSharedDataCache() setObject:data forKey:URL cost:data.length];
-        } else if (error.code != NSURLErrorCancelled) {
+    __block ApolloWallpaperLoadToken *token = nil;
+    token = [[ApolloWallpaperLoadBroker sharedBroker]
+        loadURL:URL
+       priority:NSURLSessionTaskPriorityHigh
+     completion:^(__unused NSData *data, UIImage *image, NSError *error) {
+        if (!image && error.code != NSURLErrorCancelled) {
             ApolloLog(@"[Wallpapers] opening-page preload failed url=%@ error=%@", URL,
                       error.localizedDescription ?: @"decode failed");
         }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [ApolloWallpaperInitialPreloadURLs() removeObject:URL];
-        });
+        if (ApolloWallpaperInitialPreloadTokens()[URL] == token) {
+            [ApolloWallpaperInitialPreloadTokens() removeObjectForKey:URL];
+        }
     }];
-    task.priority = NSURLSessionTaskPriorityHigh;
-    [task resume];
+    if (token) tokens[URL] = token;
 }
 
 - (instancetype)initWithItems:(NSArray<ApolloWallpaperItem *> *)items {
@@ -381,7 +507,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
         _items = [items copy] ?: @[];
         _imageCache = ApolloWallpaperSharedImageCache();
         _dataCache = ApolloWallpaperSharedDataCache();
-        _prefetchTasks = [NSMutableDictionary dictionary];
+        _prefetchTokens = [NSMutableDictionary dictionary];
         _savedIndexes = [NSMutableIndexSet indexSet];
         _initialIndex = 0;
         _savingIndex = NSNotFound;
@@ -419,10 +545,15 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 
 - (void)didReceiveMemoryWarning {
     [super didReceiveMemoryWarning];
-    for (NSURLSessionDataTask *task in self.prefetchTasks.allValues) [task cancel];
-    [self.prefetchTasks removeAllObjects];
+    // Preserve the visible page and an in-progress user-initiated save. Only
+    // speculative work should be sacrificed in response to memory pressure.
+    [self cancelPrefetchLoads];
     [self.imageCache removeAllObjects];
     [self.dataCache removeAllObjects];
+}
+
+- (void)dealloc {
+    [self cancelOutstandingLoads];
 }
 
 - (void)viewDidLoad {
@@ -602,6 +733,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
 }
 
 - (void)closeTapped {
+    [self cancelOutstandingLoads];
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
@@ -744,6 +876,7 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
             self.view.backgroundColor = UIColor.clearColor;
             [self setDismissChromeAlpha:0.0];
         } completion:^(__unused BOOL finished) {
+            [self cancelOutstandingLoads];
             [self dismissViewControllerAnimated:NO completion:nil];
         }];
     } else {
@@ -828,15 +961,16 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
     // Cancel only work outside the larger active window. Unlike the old
     // previous/next strategy, consecutive fast swipes retain useful downloads
     // instead of repeatedly cancelling the image the user is approaching.
-    for (NSURL *URL in self.prefetchTasks.allKeys.copy) {
+    ApolloWallpaperLoadBroker *broker = [ApolloWallpaperLoadBroker sharedBroker];
+    for (NSURL *URL in self.prefetchTokens.allKeys.copy) {
         if ([desiredURLSet containsObject:URL]) continue;
-        [self.prefetchTasks[URL] cancel];
-        [self.prefetchTasks removeObjectForKey:URL];
+        [broker cancelToken:self.prefetchTokens[URL]];
+        [self.prefetchTokens removeObjectForKey:URL];
     }
 
     for (NSUInteger position = 0; position < desiredURLs.count; position++) {
         NSURL *URL = desiredURLs[position];
-        if (self.prefetchTasks[URL]) continue;
+        if (self.prefetchTokens[URL]) continue;
         NSData *cachedData = [self.dataCache objectForKey:URL];
         UIImage *cachedImage = [self.imageCache objectForKey:URL];
         if (cachedData && cachedImage) continue;
@@ -846,44 +980,44 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
             continue;
         }
 
+        float priority = position < 2 ? NSURLSessionTaskPriorityHigh
+            : (position < 4 ? NSURLSessionTaskPriorityDefault : NSURLSessionTaskPriorityLow);
         __weak typeof(self) weakSelf = self;
-        __block __weak NSURLSessionDataTask *weakTask = nil;
-        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:URL
-                                                                completionHandler:^(NSData *data,
-                                                                                    __unused NSURLResponse *response,
-                                                                                    NSError *error) {
-            UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
+        __block ApolloWallpaperLoadToken *token = nil;
+        token = [broker loadURL:URL priority:priority completion:^(__unused NSData *data,
+                                                                  UIImage *image,
+                                                                  NSError *error) {
             typeof(self) strongSelf = weakSelf;
-            if (image && strongSelf) {
-                ApolloWallpaperCacheImage(strongSelf.imageCache, URL, image);
-                [strongSelf.dataCache setObject:data forKey:URL cost:data.length];
-            } else if (error.code != NSURLErrorCancelled) {
+            if (strongSelf.prefetchTokens[URL] == token) {
+                [strongSelf.prefetchTokens removeObjectForKey:URL];
+            }
+            if (!image && error.code != NSURLErrorCancelled) {
                 ApolloLog(@"[Wallpapers] nearby preload failed url=%@ error=%@", URL,
                           error.localizedDescription ?: @"decode failed");
             }
-            dispatch_async(dispatch_get_main_queue(), ^{
-                typeof(self) mainSelf = weakSelf;
-                if (mainSelf.prefetchTasks[URL] == weakTask) {
-                    [mainSelf.prefetchTasks removeObjectForKey:URL];
-                }
-                if (!image || !mainSelf) return;
-                // A fast swipe may have made this prefetched URL visible while
-                // it was still downloading. Replace that cell's duplicate
-                // request immediately with the completed cached original.
-                for (UICollectionViewCell *visibleCell in mainSelf.collectionView.visibleCells) {
-                    if (![visibleCell isKindOfClass:ApolloWallpaperPageCell.class]) continue;
-                    ApolloWallpaperPageCell *pageCell = (ApolloWallpaperPageCell *)visibleCell;
-                    if ([pageCell.representedURL isEqual:URL] && !pageCell.imageView.image) {
-                        [pageCell showURL:URL imageCache:mainSelf.imageCache dataCache:mainSelf.dataCache];
-                    }
-                }
-            });
         }];
-        weakTask = task;
-        task.priority = position < 2 ? NSURLSessionTaskPriorityHigh
-            : (position < 4 ? NSURLSessionTaskPriorityDefault : NSURLSessionTaskPriorityLow);
-        self.prefetchTasks[URL] = task;
-        [task resume];
+        if (token) self.prefetchTokens[URL] = token;
+    }
+}
+
+- (void)cancelPrefetchLoads {
+    ApolloWallpaperLoadBroker *broker = [ApolloWallpaperLoadBroker sharedBroker];
+    for (ApolloWallpaperLoadToken *token in self.prefetchTokens.allValues) {
+        [broker cancelToken:token];
+    }
+    [self.prefetchTokens removeAllObjects];
+    [ApolloWallpaperViewerViewController cancelOpeningPreloads];
+}
+
+- (void)cancelOutstandingLoads {
+    ApolloWallpaperLoadBroker *broker = [ApolloWallpaperLoadBroker sharedBroker];
+    [self cancelPrefetchLoads];
+    [broker cancelToken:self.downloadToken];
+    self.downloadToken = nil;
+    for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
+        if ([cell isKindOfClass:ApolloWallpaperPageCell.class]) {
+            [(ApolloWallpaperPageCell *)cell cancelLoad];
+        }
     }
 }
 
@@ -900,22 +1034,22 @@ static NSMutableSet<NSURL *> *ApolloWallpaperInitialPreloadURLs(void) {
     }
 
     __weak typeof(self) weakSelf = self;
-    [[[NSURLSession sharedSession] dataTaskWithURL:item.URL completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
-        UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            typeof(self) strongSelf = weakSelf;
-            if (image) {
-                ApolloWallpaperCacheImage(strongSelf.imageCache, item.URL, image);
-                [strongSelf.dataCache setObject:data forKey:item.URL cost:data.length];
-                [strongSelf saveOriginalData:data atIndex:requestedIndex];
-            } else {
-                [strongSelf finishSavingAtIndex:requestedIndex error:error ?: [NSError errorWithDomain:@"ApolloWallpapers"
-                                                                                 code:1
-                                                                             userInfo:@{NSLocalizedDescriptionKey: @"The wallpaper could not be downloaded."}]];
-                [strongSelf showResultTitle:@"Download Failed" message:error.localizedDescription ?: @"The wallpaper could not be downloaded."];
-            }
-        });
-    }] resume];
+    self.downloadToken = [[ApolloWallpaperLoadBroker sharedBroker]
+        loadURL:item.URL
+       priority:NSURLSessionTaskPriorityHigh
+     completion:^(NSData *data, UIImage *image, NSError *error) {
+        typeof(self) strongSelf = weakSelf;
+        strongSelf.downloadToken = nil;
+        if (image && data.length > 0) {
+            [strongSelf saveOriginalData:data atIndex:requestedIndex];
+        } else {
+            NSError *resultError = error ?: [NSError errorWithDomain:@"ApolloWallpapers"
+                                                                code:1
+                                                            userInfo:@{NSLocalizedDescriptionKey: @"The wallpaper could not be downloaded."}];
+            [strongSelf finishSavingAtIndex:requestedIndex error:resultError];
+            [strongSelf showResultTitle:@"Download Failed" message:resultError.localizedDescription];
+        }
+    }];
 }
 
 - (void)beginSavingAtIndex:(NSInteger)index {
