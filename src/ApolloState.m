@@ -27,6 +27,8 @@ NSInteger sPreferredGIFFallbackFormat = 1; // 0=GIF, 1=MP4
 NSInteger sReadPostMaxCount = 0;
 
 NSInteger sUnmuteCommentsVideos = 0; // 0=Default, 1=Remember from Full Screen, 2=Always
+NSInteger sUnmuteFeedVideos = 0;     // 0=Never, 1=Remember, 2=Always (UDKeyUnmuteFeedVideos)
+BOOL sFeedVideoScrubber = NO;        // hold a feed video's progress bar and slide to scrub
 
 BOOL sVideoHoldSpeedEnabled = YES;   // effective default ON via registerDefaults (UDKeyVideoHoldSpeedEnabled)
 float sVideoHoldSpeed = 2.0f;        // effective default 2.0× via registerDefaults (UDKeyVideoHoldSpeed)

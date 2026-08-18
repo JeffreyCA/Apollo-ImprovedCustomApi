@@ -322,6 +322,36 @@ typedef NS_ENUM(NSInteger, Tag) {
         });
 }
 
+- (NSString *)unmuteFeedVideosModeText {
+    switch (sUnmuteFeedVideos) {
+        case 1:  return @"Remember";
+        case 2:  return @"Always";
+        default: return @"Never";
+    }
+}
+
+- (void)setUnmuteFeedVideosMode:(NSInteger)mode {
+    sUnmuteFeedVideos = mode;
+    [[NSUserDefaults standardUserDefaults] setInteger:sUnmuteFeedVideos forKey:UDKeyUnmuteFeedVideos];
+    [self reloadRowWithID:@"media.unmuteFeed"];
+}
+
+// Title + options + "(Current)" only — shared picker (option index == stored mode).
+- (void)presentUnmuteFeedVideosModeSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Unmute Videos in Feed",
+                                @[@"Never", @"Remember", @"Always"],
+                                sUnmuteFeedVideos,
+                                ^(NSInteger pickedIndex) {
+        [weakSelf setUnmuteFeedVideosMode:pickedIndex];
+    });
+}
+
+- (void)feedVideoScrubberSwitchToggled:(UISwitch *)sender {
+    sFeedVideoScrubber = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFeedVideoScrubber forKey:UDKeyFeedVideoScrubber];
+}
+
 - (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
         case ImageUploadProviderReddit:   return @"Reddit";
@@ -1352,6 +1382,12 @@ typedef NS_ENUM(NSInteger, Tag) {
             return [[InfoRowSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
+    ApolloSettingsRow *feedScrubber =
+        [ApolloSettingsRow switchRowWithID:@"media.feedScrubber"
+                                     title:@"Feed Video Scrubber"
+                                      isOn:^BOOL { return sFeedVideoScrubber; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedVideoScrubberSwitchToggled:sender]; }];
+
     ApolloSettingsRow *blockAnnouncements =
         [ApolloSettingsRow switchRowWithID:@"gen.blockAnnouncements"
                                      title:@"Block Announcements"
@@ -1380,8 +1416,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
-                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
+                                            footer:@"Small tweaks for the post list. Feed Video Scrubber: drag the progress bar at the bottom of a video — in the feed or on the post itself — to scrub it without opening the video. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
+                                              rows:@[ textPostThumbnails, infoRow, feedScrubber, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -1761,6 +1797,15 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }];
     gifFallback.configure = disclosure;
 
+    ApolloSettingsRow *unmuteFeed =
+        [ApolloSettingsRow valueRowWithID:@"media.unmuteFeed"
+                                    title:@"Unmute Videos in Feed"
+                                   detail:^NSString * { return [weakSelf unmuteFeedVideosModeText]; }
+                                 onSelect:^{
+            [weakSelf presentUnmuteFeedVideosModeSheetFromSourceView:[weakSelf cellForRowID:@"media.unmuteFeed"]];
+        }];
+    unmuteFeed.configure = disclosure;
+
     ApolloSettingsRow *unmuteComments =
         [ApolloSettingsRow valueRowWithID:@"media.unmuteComments"
                                     title:@"Unmute Videos in Comments"
@@ -1791,8 +1836,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     holdSpeedValue.visible = ^BOOL { return sVideoHoldSpeedEnabled; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Playback"
-                                            footer:@"Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
-                                              rows:@[ gifFallback, unmuteComments, holdSpeed, holdSpeedValue ]];
+                                            footer:@"Unmute Videos in Feed: Never keeps feed videos silent, Always plays every one with sound, and Remember follows the last video you muted or unmuted yourself. Only one feed video plays sound at a time. Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
+                                              rows:@[ gifFallback, unmuteFeed, unmuteComments, holdSpeed, holdSpeedValue ]];
 }
 
 - (ApolloSettingsSection *)buildMediaInlineSection {
