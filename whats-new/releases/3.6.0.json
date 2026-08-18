@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "version": "3.6.0",
+  "headline": "What's New in Apollo Reborn",
+  "items": [
+    { "icon": "square.grid.2x2.fill", "title": "Gallery View Everywhere", "subtitle": "Browse Home, Popular, All, and any profile as a media grid, now with real video controls and rotation." },
+    { "icon": "sportscourt.fill", "title": "Live Interactive Posts", "subtitle": "Live match threads, games, and other interactive posts now play inline instead of showing a placeholder." },
+    { "icon": "slider.horizontal.below.rectangle", "title": "Scrub Feed Videos", "subtitle": "Slide along an inline video's progress bar to seek, and let feed videos play with sound." },
+    { "icon": "paintbrush.fill", "title": "Redesigned Icon Picker", "subtitle": "Browse icon packs as cards, discover a new Daily Spotlight, and pin any icon to Light or Dark artwork." },
+    { "icon": "photo.on.rectangle.angled", "title": "Goodbye Wallpapers", "subtitle": "Apollo's farewell wallpapers are back for iPhone, iPad, and Mac, ready to save straight to Photos." },
+    { "icon": "checkmark.shield.fill", "title": "Stability & Fixes", "subtitle": "Crash fixes, no more hijacked video ads, smoother scrolling, and better link, tweet, and sports-clip previews." }
+  ]
+}
