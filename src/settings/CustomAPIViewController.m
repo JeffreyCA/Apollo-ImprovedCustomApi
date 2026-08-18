@@ -292,6 +292,35 @@ typedef NS_ENUM(NSInteger, Tag) {
     });
 }
 
+- (NSString *)shareLinkHostText {
+    return ApolloShareLinkHostDisplayName((ShareLinkHost)sShareLinkHost);
+}
+
+- (void)setShareLinkHost:(NSInteger)host {
+    sShareLinkHost = host;
+    [[NSUserDefaults standardUserDefaults] setInteger:sShareLinkHost
+                                                forKey:UDKeyShareLinkHost];
+    [self reloadRowWithID:@"media.shareLinkHost"];
+}
+
+- (void)presentShareLinkHostSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(
+        self,
+        sourceView,
+        @"Share Link Host",
+        @[
+            ApolloShareLinkHostDisplayName(ShareLinkHostDefault),
+            ApolloShareLinkHostDisplayName(ShareLinkHostOldReddit),
+            ApolloShareLinkHostDisplayName(ShareLinkHostVXReddit),
+            ApolloShareLinkHostDisplayName(ShareLinkHostFXReddit)
+        ],
+        sShareLinkHost,
+        ^(NSInteger pickedIndex) {
+            [weakSelf setShareLinkHost:pickedIndex];
+        });
+}
+
 - (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
         case ImageUploadProviderReddit:   return @"Reddit";
@@ -1757,6 +1786,29 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     return [ApolloSettingsSection sectionWithTitle:@"Inline Media"
                                             footer:@"Show images and play GIFs inline in the feed."
                                               rows:@[ [self buildInlineMediaRow] ]];
+}
+
+- (ApolloSettingsSection *)buildMediaSharingSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *shareLinkHost =
+        [ApolloSettingsRow valueRowWithID:@"media.shareLinkHost"
+                                    title:@"Share Link Host"
+                                   detail:^NSString * {
+            return [weakSelf shareLinkHostText];
+        }
+                                 onSelect:^{
+            [weakSelf presentShareLinkHostSheetFromSourceView:
+                [weakSelf cellForRowID:@"media.shareLinkHost"]];
+        }];
+
+    shareLinkHost.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    return [ApolloSettingsSection sectionWithTitle:@"Sharing"
+                                            footer:@"Choose which Reddit host Apollo uses for shared post and comment links, including Copy Link and links included with shared media. fxReddit uses fxddit.com."
+                                              rows:@[ shareLinkHost ]];
 }
 
 - (ApolloSettingsSection *)buildMediaUploadsSection {
@@ -3769,6 +3821,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
               [self buildMediaNSFWSection],
               [self buildMediaPlaybackSection],
               [self buildMediaInlineSection],
+              [self buildMediaSharingSection],
               [self buildMediaUploadsSection],
               [self buildMediaNetworkSection] ];
 }

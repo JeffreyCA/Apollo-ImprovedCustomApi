@@ -391,6 +391,29 @@ typedef NS_ENUM(NSInteger, CommentLinkHost) {
 };
 extern NSInteger sCommentLinkHost;
 
+// Share Link Host: rewrites outgoing Reddit URLs in Apollo share sheets. Default
+// preserves Apollo's original reddit.com links; Old Reddit/vxReddit swap only
+// the host/scheme while preserving the path and query.
+typedef NS_ENUM(NSInteger, ShareLinkHost) {
+    ShareLinkHostDefault = 0,
+    ShareLinkHostOldReddit = 1,
+    ShareLinkHostVXReddit = 2,
+    ShareLinkHostFXReddit = 3,
+};
+// extern "C" so the ObjC++ (.xm) caller in ApolloShareAsImageLink.xm and the
+// ObjC (.m) definitions in ApolloState.m agree on the unmangled symbol name.
+#ifdef __cplusplus
+extern "C" {
+#endif
+// nil for ShareLinkHostDefault — callers keep Apollo's original host.
+NSString *ApolloShareLinkHostDomain(ShareLinkHost host);
+// Settings-facing label for the picker row and its detail text.
+NSString *ApolloShareLinkHostDisplayName(ShareLinkHost host);
+#ifdef __cplusplus
+}
+#endif
+extern NSInteger sShareLinkHost;
+
 // Most recently observed Reddit bearer token, captured from outgoing Authorization
 // headers. Used by the native Reddit image upload path. nil if Apollo hasn't made an
 // authenticated Reddit API call yet.
