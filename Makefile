@@ -57,6 +57,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/settings/ApolloBackupRestore.m \
     $(SRC_DIR)/settings/ApolloThanksToViewController.m \
     $(SRC_DIR)/settings/ApolloBuyUsACoffeeViewController.m \
+    $(SRC_DIR)/settings/ApolloWallpaperViewerViewController.m \
+    $(SRC_DIR)/settings/ApolloWallpapersViewController.m \
     $(SRC_DIR)/settings/ApolloReportViewController.m \
     $(SRC_DIR)/settings/ApolloSettingsRouter.m \
     $(SRC_DIR)/settings/ApolloSettingsSearch.m \

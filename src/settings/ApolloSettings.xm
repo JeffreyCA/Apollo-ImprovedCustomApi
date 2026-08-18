@@ -12,10 +12,14 @@
 #import "ApolloSettingsSearch.h"
 #import "ApolloReportViewController.h"
 #import "ApolloThemeRuntime.h"
+#import "ApolloWallpapersViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
 @interface SettingsViewController : UIViewController
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView;
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section;
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath;
 @end
 
 @interface SettingsAboutViewController : UIViewController
@@ -55,6 +59,13 @@ static void ApolloApplyRootNativeSurface(UITableViewCell *cell, UIColor *surface
     if (!cell || !surface) return;
     cell.backgroundColor = surface;
     cell.contentView.backgroundColor = [UIColor clearColor];
+}
+
+static BOOL ApolloRootCellCopiesNativeSurface(NSIndexPath *indexPath) {
+    // Both cards are made from tweak-owned cells. They must follow a freshly
+    // themed native donor rather than retaining a resolved surface from the
+    // appearance in which they were first created.
+    return indexPath.section == 0 || indexPath.section == 2;
 }
 
 // Apollo's root Settings screen adds an Export button for its legacy settings
@@ -176,6 +187,11 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
         UIEdgeInsets indicatorInsets = tableView.verticalScrollIndicatorInsets;
         indicatorInsets.top -= 24.0;
         tableView.verticalScrollIndicatorInsets = indicatorInsets;
+
+        // Apollo 1.15.11's two-row About group is rendered below as Wallpapers,
+        // About, and Apollo Ultra. The native destinations retain their
+        // original handlers while no Apollo-owned cell is remapped.
+        ApolloLog(@"[Settings] Wallpapers row installed in native About group");
     }
 }
 
@@ -190,6 +206,21 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     sApolloLastSettingsVC = (UIViewController *)self;
 }
 
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    UIViewController *controller = (UIViewController *)self;
+    if (!previousTraitCollection ||
+        previousTraitCollection.userInterfaceStyle == controller.traitCollection.userInterfaceStyle) return;
+
+    // The native surface captured below may be a trait-resolved color. Drop
+    // it before rebuilding so the native rows donate their new appearance,
+    // then propagate that surface back to both tweak-owned cards.
+    objc_setAssociatedObject(self, &kApolloRootNativeSurfaceKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UITableView *tableView = ApolloRootSettingsTableInView(controller.view);
+    [tableView reloadData];
+}
+
 // Reborn and support form one compact primary card. The cells are tweak-owned
 // because UIKit requires a cell dequeued for an index path to be returned for
 // that same path. Their surface is copied from a real native row below after
@@ -201,6 +232,7 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 2;
+    if (section == 2) return 3;
     return %orig;
 }
 
@@ -217,7 +249,45 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
         cell.imageView.image = indexPath.row == 0
             ? (ApolloRebornOptionsSettingsIcon(29.0) ?: createSettingsIcon(@"key.fill", [UIColor systemTealColor]))
             : ApolloBuyMeACoffeeSettingsIcon(29.0);
+        cell.accessoryView = nil;
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        ApolloApplyRootNativeSurface(cell, objc_getAssociatedObject(self, &kApolloRootNativeSurfaceKey));
+        return cell;
+    }
+
+    if (indexPath.section == 2) {
+        NSArray<NSString *> *titles = @[ @"Wallpapers", @"About", @"Apollo Ultra" ];
+        NSString *title = titles[indexPath.row];
+        NSString *reuseID = [@"Cell_ApolloInfoRoot_" stringByAppendingString:title];
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseID];
+        }
+        cell.textLabel.text = title;
+        UIColor *primaryText = ApolloThemeRuntimeColor(ApolloThemeTokenLabel);
+        if (primaryText) cell.textLabel.textColor = primaryText;
+        cell.imageView.image = indexPath.row == 0
+            ? createSettingsIcon(@"photo.on.rectangle.angled", UIColor.systemRedColor)
+            : ApolloRootSettingsIconForTitle(title);
+        if (indexPath.row == 0) {
+            UIImageSymbolConfiguration *accessoryConfig =
+                [UIImageSymbolConfiguration configurationWithPointSize:17.0 weight:UIImageSymbolWeightRegular];
+            UIView *accessoryContainer = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 24.0, 24.0)];
+            accessoryContainer.clipsToBounds = NO;
+            accessoryContainer.accessibilityElementsHidden = YES;
+            UIImageView *downloadAccessory = [[UIImageView alloc]
+                initWithImage:[UIImage systemImageNamed:@"arrow.down.to.line" withConfiguration:accessoryConfig]];
+            downloadAccessory.tintColor = UIColor.tertiaryLabelColor;
+            downloadAccessory.contentMode = UIViewContentModeCenter;
+            downloadAccessory.frame = CGRectMake(8.0, 0.0, 24.0, 24.0);
+            [accessoryContainer addSubview:downloadAccessory];
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = accessoryContainer;
+        } else {
+            cell.accessoryView = nil;
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         ApolloApplyRootNativeSurface(cell, objc_getAssociatedObject(self, &kApolloRootNativeSurfaceKey));
         return cell;
@@ -230,14 +300,21 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         for (UITableViewCell *visibleCell in tableView.visibleCells) {
             NSIndexPath *visiblePath = [tableView indexPathForCell:visibleCell];
-            if (visiblePath.section == 0) ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
+            if (ApolloRootCellCopiesNativeSurface(visiblePath)) {
+                ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
+            }
         }
+        // Apollo can finish its own cell theming later in this run-loop turn.
+        // Reassert once more after that pass so the custom cards match the
+        // final native surface during animated appearance transitions.
         __weak UITableView *weakTable = tableView;
         dispatch_async(dispatch_get_main_queue(), ^{
             UITableView *liveTable = weakTable;
             for (UITableViewCell *visibleCell in liveTable.visibleCells) {
                 NSIndexPath *visiblePath = [liveTable indexPathForCell:visibleCell];
-                if (visiblePath.section == 0) ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
+                if (ApolloRootCellCopiesNativeSurface(visiblePath)) {
+                    ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
+                }
             }
         });
     }
@@ -271,6 +348,21 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
             return;
         }
     }
+
+    if (indexPath.section == 2 && indexPath.row == 0) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        UITableViewCell *sourceCell = [tableView cellForRowAtIndexPath:indexPath];
+        [ApolloWallpapersViewController presentDevicePickerFromViewController:(UIViewController *)self
+                                                                   sourceView:sourceCell ?: ((UIViewController *)self).view];
+        return;
+    }
+
+    if (indexPath.section == 2 && indexPath.row > 0) {
+        NSIndexPath *nativePath = [NSIndexPath indexPathForRow:indexPath.row - 1 inSection:2];
+        %orig(tableView, nativePath);
+        return;
+    }
+
     %orig;
 }
 
@@ -286,6 +378,7 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) return 52.0;
+    if (indexPath.section == 2) return 52.0;
     return %orig;
 }
 
