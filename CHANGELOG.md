@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v3.6.0] - 2026-08-??
+## [v3.6.0] - 2026-08-18
 
 ### Features
 
