@@ -100,6 +100,7 @@ NSString *sLinkPreviewCardColorHex = nil;
 uint32_t sLinkPreviewCardColorPacked = 0;
 NSInteger sImageUploadProvider = ImageUploadProviderImgur;
 NSInteger sCommentLinkHost = CommentLinkHostOff;
+BOOL sCommentLinkPreferNative = NO;
 NSInteger sShareLinkHost = ShareLinkHostDefault;
 
 NSString *ApolloShareLinkHostDomain(ShareLinkHost host) {

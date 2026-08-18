@@ -3578,6 +3578,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyLinkPreviewCardColor: @(ApolloLinkPreviewCardColorNeutral),
                                     UDKeyImageUploadProvider: @(ImageUploadProviderImgur),
                                     UDKeyCommentLinkHost: @(CommentLinkHostOff),
+                                    UDKeyCommentLinkPreferNative: @NO,
                                     UDKeyShareLinkHost: @(ShareLinkHostDefault),
                                     UDKeyShowUserAvatars: @NO,
                                     UDKeyUseProfileAvatarTabIcon: @NO,
@@ -3812,6 +3813,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sImageUploadProvider = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyImageUploadProvider];
     sCommentLinkHost = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyCommentLinkHost];
     if (sCommentLinkHost < CommentLinkHostOff || sCommentLinkHost > CommentLinkHostImgChest) sCommentLinkHost = CommentLinkHostOff;
+    sCommentLinkPreferNative = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommentLinkPreferNative];
     sShareLinkHost = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyShareLinkHost];
     if (sShareLinkHost < ShareLinkHostDefault || sShareLinkHost > ShareLinkHostFXReddit) sShareLinkHost = ShareLinkHostDefault;
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
