@@ -719,6 +719,15 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
 // in that window would walk PAST the list. Reset on entering a conversation
 // so re-opening a room re-arms the gesture at once.
 @property (nonatomic, assign) NSTimeInterval conversationBackIssuedAt;
+// The conversation list exactly as it was rendered when the current
+// conversation was opened. A room is a web route inside this one web view,
+// so there is no second view to reveal behind it during an interactive back —
+// this still frame stands in for it while the drag runs, and is swapped for
+// the live (identical) list once the panes have actually flipped.
+@property (nonatomic, strong) UIView *conversationBackSnapshot;
+@property (nonatomic, strong) UIView *conversationBackDimView;
+@property (nonatomic, assign) BOOL conversationBackInteractive;
+@property (nonatomic, assign) CGFloat conversationBackDirection;
 // A fresh, isolated WKWebView can leave Reddit's Modmail bundle waiting
 // forever when /mail/all is its very first document. Prime the authenticated
 // reddit.com client through the known-good Chat route, then replace it with
@@ -767,6 +776,12 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
 - (BOOL)apollo_isChatConversationPath:(NSString *)path;
 - (NSString *)apollo_currentChatPath;
 - (BOOL)apollo_goBackToConversationList;
+- (void)apollo_captureConversationBackSnapshot;
+- (BOOL)apollo_beginInteractiveConversationBack;
+- (void)apollo_updateInteractiveConversationBack:(CGFloat)progress;
+- (void)apollo_finishInteractiveConversationBack:(BOOL)commit velocity:(CGFloat)velocity;
+- (void)apollo_waitForConversationBackSwapAttempt:(NSUInteger)attempt;
+- (void)apollo_endInteractiveConversationBack;
 - (void)apollo_beginChatTransitionToURL:(NSURL *)url isList:(BOOL)isList;
 - (void)apollo_waitForChatTransitionStabilityAttempt:(NSUInteger)attempt
                                           generation:(NSUInteger)generation
@@ -1237,6 +1252,11 @@ static BOOL ApolloReturnToMailboxFromNavigationController(UINavigationController
                 // whatever the swipe driver did on the way out of the last one
                 // must not swallow the first back gesture in this one.
                 self.conversationBackIssuedAt = 0.0;
+                // Grab the list while it is still the rendered frame — this
+                // observer runs in the same turn as Reddit's pane swap, before
+                // the room paints and before the transition cover blanks the
+                // document — so an interactive back has something to reveal.
+                [self apollo_captureConversationBackSnapshot];
             }
             if (isConversation) {
                 // Same-document room switches sometimes deliver no policy
@@ -2012,6 +2032,177 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
                        completionHandler:nil];
     });
     return YES;
+}
+
+// MARK: - Interactive conversation back
+//
+// The gesture drivers (the Inbox hub's mode-pan) hand progress to these three
+// calls so the back reads like every other iOS back: the conversation tracks
+// the finger while the list slides in behind it at the usual parallax, and a
+// drag that is let go short of the commit point returns without touching the
+// web view at all. Only on commit does the web-level back run, hidden behind
+// the still frame that is already covering the same pixels.
+
+- (void)apollo_captureConversationBackSnapshot {
+    self.conversationBackSnapshot = nil;
+    if (self.mailboxKind != ApolloModernMailboxKindChat) return;
+    // A hidden hub renders nothing worth capturing, and an off-window view
+    // snapshots empty.
+    if (!self.view.window || CGRectIsEmpty(self.view.bounds)) return;
+    if (self.embeddedInInbox && !self.embeddedInboxVisible) return;
+    UIView *snapshot = [self.view snapshotViewAfterScreenUpdates:NO];
+    if (!snapshot) return;
+    snapshot.userInteractionEnabled = NO;
+    self.conversationBackSnapshot = snapshot;
+}
+
+- (BOOL)apollo_beginInteractiveConversationBack {
+    if (self.mailboxKind != ApolloModernMailboxKindChat) return NO;
+    if (![self apollo_isChatConversationPath:[self apollo_currentChatPath]]) return NO;
+    if (self.conversationBackInteractive) {
+        // Grabbed again mid-settle: hand the views straight back to the finger
+        // instead of letting the previous animation keep driving them.
+        [self.view.layer removeAllAnimations];
+        [self.conversationBackSnapshot.layer removeAllAnimations];
+        return YES;
+    }
+    // A back already on its way owns these views until it settles.
+    if (self.conversationBackIssuedAt > 0.0 &&
+        [NSDate date].timeIntervalSince1970 - self.conversationBackIssuedAt < 1.5) return NO;
+    UIView *container = self.view.superview;
+    UIView *snapshot = self.conversationBackSnapshot;
+    if (!container || !snapshot || CGRectIsEmpty(self.view.bounds)) return NO;
+
+    self.view.transform = CGAffineTransformIdentity;
+    snapshot.transform = CGAffineTransformIdentity;
+    snapshot.alpha = 1.0;
+    snapshot.frame = self.view.frame;
+    [container insertSubview:snapshot belowSubview:self.view];
+
+    UIView *dim = [[UIView alloc] initWithFrame:snapshot.bounds];
+    dim.backgroundColor = UIColor.blackColor;
+    dim.alpha = 0.0;
+    dim.userInteractionEnabled = NO;
+    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [snapshot addSubview:dim];
+    self.conversationBackDimView = dim;
+
+    // The same leading-edge shadow UIKit draws under a screen being popped.
+    self.view.layer.shadowColor = UIColor.blackColor.CGColor;
+    self.view.layer.shadowOffset = CGSizeZero;
+    self.view.layer.shadowRadius = 10.0;
+    self.view.layer.shadowOpacity = 0.24;
+    self.view.layer.shadowPath = [UIBezierPath bezierPathWithRect:self.view.bounds].CGPath;
+
+    self.conversationBackDirection =
+        (self.view.effectiveUserInterfaceLayoutDirection ==
+         UIUserInterfaceLayoutDirectionRightToLeft) ? -1.0 : 1.0;
+    self.conversationBackInteractive = YES;
+    [self apollo_updateInteractiveConversationBack:0.0];
+    return YES;
+}
+
+- (void)apollo_updateInteractiveConversationBack:(CGFloat)progress {
+    if (!self.conversationBackInteractive) return;
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    if (width <= 0.0) return;
+    CGFloat clamped = MAX(0.0, MIN(1.0, progress));
+    CGFloat sign = self.conversationBackDirection;
+    self.view.transform = CGAffineTransformMakeTranslation(sign * clamped * width, 0.0);
+    // UIKit moves the screen underneath at 30% of the top screen's travel.
+    self.conversationBackSnapshot.transform =
+        CGAffineTransformMakeTranslation(sign * (clamped - 1.0) * width * 0.3, 0.0);
+    self.conversationBackDimView.alpha = (1.0 - clamped) * 0.12;
+}
+
+- (void)apollo_finishInteractiveConversationBack:(BOOL)commit velocity:(CGFloat)velocity {
+    if (!self.conversationBackInteractive) return;
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    CGFloat current = width > 0.0 ? fabs(self.view.transform.tx) / width : 0.0;
+    CGFloat remaining = MAX(0.05, commit ? (1.0 - current) : current);
+    // Carry the throw's speed into the settle instead of always spending the
+    // same time, the way a released interactive pop does.
+    NSTimeInterval duration = width > 0.0 && fabs(velocity) > 1.0
+        ? MIN(0.42, MAX(0.14, remaining * width / fabs(velocity)))
+        : 0.28;
+    UIView *snapshot = self.conversationBackSnapshot;
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:duration
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseOut |
+                                UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        [weakSelf apollo_updateInteractiveConversationBack:commit ? 1.0 : 0.0];
+    } completion:^(BOOL finished) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        self.conversationBackInteractive = NO;
+        self.view.layer.shadowOpacity = 0.0;
+        if (!commit) {
+            [self apollo_endInteractiveConversationBack];
+            return;
+        }
+        // The still frame now covers exactly the pixels the live list will
+        // occupy. Lift it above the conversation, put that back in place, and
+        // flip the web panes underneath — the swap is one identical frame
+        // replacing another instead of a visible jump.
+        [snapshot.superview bringSubviewToFront:snapshot];
+        snapshot.transform = CGAffineTransformIdentity;
+        self.conversationBackDimView.alpha = 0.0;
+        self.view.transform = CGAffineTransformIdentity;
+        [self apollo_goBackToConversationList];
+        [self apollo_waitForConversationBackSwapAttempt:0];
+    }];
+}
+
+// Hold the still frame until the web view is actually showing the list, then
+// cross-fade it out. The cap covers the paths where the pane flip needs a real
+// navigation (a reply thread, a stale room) — the load runs behind this frame
+// and the transition cover picks it up from there.
+- (void)apollo_waitForConversationBackSwapAttempt:(NSUInteger)attempt {
+    UIView *snapshot = self.conversationBackSnapshot;
+    if (!snapshot.superview) return;
+    BOOL leftConversation = ![self apollo_isChatConversationPath:[self apollo_currentChatPath]];
+    if (!leftConversation && attempt < 28) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [weakSelf apollo_waitForConversationBackSwapAttempt:attempt + 1];
+        });
+        return;
+    }
+    // Leaving the room route is not quite the same as the list being finished:
+    // the CSS that hides Reddit's own list chrome re-applies on the sweep after
+    // the URL repair, so an immediate hand-off flashed that chrome through the
+    // fade. The still frame is identical to the settled list, so holding it a
+    // beat longer costs nothing.
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        [UIView animateWithDuration:0.12
+                         animations:^{ snapshot.alpha = 0.0; }
+                         completion:^(BOOL finished) {
+            // The list is on screen for real now; the next room open captures
+            // its own frame.
+            [self apollo_endInteractiveConversationBack];
+            self.conversationBackSnapshot = nil;
+        }];
+    });
+}
+
+- (void)apollo_endInteractiveConversationBack {
+    self.conversationBackInteractive = NO;
+    [self.conversationBackDimView removeFromSuperview];
+    self.conversationBackDimView = nil;
+    UIView *snapshot = self.conversationBackSnapshot;
+    [snapshot removeFromSuperview];
+    snapshot.transform = CGAffineTransformIdentity;
+    snapshot.alpha = 1.0;
+    self.view.transform = CGAffineTransformIdentity;
+    self.view.layer.shadowOpacity = 0.0;
 }
 
 // Drops a pending lightweight transition cover when a full-cover pipeline
@@ -3306,6 +3497,23 @@ BOOL ApolloModernChatControllerIsOnConversationRoute(UIViewController *controlle
 BOOL ApolloModernChatControllerGoBackToConversationList(UIViewController *controller) {
     if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return NO;
     return [(ApolloDirectChatWebViewController *)controller apollo_goBackToConversationList];
+}
+
+BOOL ApolloModernChatControllerBeginInteractiveBack(UIViewController *controller) {
+    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return NO;
+    return [(ApolloDirectChatWebViewController *)controller apollo_beginInteractiveConversationBack];
+}
+
+void ApolloModernChatControllerUpdateInteractiveBack(UIViewController *controller, CGFloat progress) {
+    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return;
+    [(ApolloDirectChatWebViewController *)controller apollo_updateInteractiveConversationBack:progress];
+}
+
+void ApolloModernChatControllerFinishInteractiveBack(UIViewController *controller,
+                                                     BOOL commit, CGFloat velocity) {
+    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return;
+    [(ApolloDirectChatWebViewController *)controller apollo_finishInteractiveConversationBack:commit
+                                                                                     velocity:velocity];
 }
 
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller) {

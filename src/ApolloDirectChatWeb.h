@@ -75,6 +75,17 @@ BOOL ApolloModernChatControllerIsOnConversationRoute(UIViewController * _Nullabl
 // flight) and NO when `controller` is not a modern Chat controller inside a
 // conversation, in which case the caller keeps its own behavior.
 BOOL ApolloModernChatControllerGoBackToConversationList(UIViewController * _Nullable controller);
+// Interactive form of that same step, for a gesture that should feel like
+// every other iOS back: Begin sets up the conversation over a still frame of
+// the list it was opened from (NO if there is nothing to reveal, or a back is
+// already running — the caller then falls back to the plain call above),
+// Update tracks the drag in 0...1, and Finish either completes the step or
+// puts the conversation back with the web view never touched.
+BOOL ApolloModernChatControllerBeginInteractiveBack(UIViewController * _Nullable controller);
+void ApolloModernChatControllerUpdateInteractiveBack(UIViewController * _Nullable controller,
+                                                     CGFloat progress);
+void ApolloModernChatControllerFinishInteractiveBack(UIViewController * _Nullable controller,
+                                                     BOOL commit, CGFloat velocity);
 // API-key-free accounts cannot use Apollo's OAuth-only native new-Modmail
 // endpoints. This presents Reddit's current cookie-authenticated Modmail inbox
 // in the same isolated, Apollo-themed mailbox shell as modern Chat.

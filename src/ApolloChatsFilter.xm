@@ -743,6 +743,31 @@ static ApolloInboxChatHubViewController *ApolloEnsureInboxChatHub(UIViewControll
 static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, BOOL animated);
 static void ApolloDismantleInboxChatHub(UIViewController *host, NSString *reason);
 static void ApolloInboxWireModePanPrecedence(UIViewController *controller, UIPanGestureRecognizer *modePan);
+static BOOL ApolloInboxBeginModeTransition(UIViewController *host, BOOL toChat);
+static void ApolloInboxUpdateModeTransition(UIViewController *host, CGFloat progress);
+static void ApolloInboxFinishModeTransition(UIViewController *host, BOOL commit, CGFloat velocity);
+
+// What the in-flight swipe is doing. One drag at a time, on one singleton pan,
+// so this state is a file static rather than per-host bookkeeping.
+typedef NS_ENUM(NSUInteger, ApolloInboxSwipeKind) {
+    ApolloInboxSwipeKindNone = 0,
+    ApolloInboxSwipeKindMode,               // Notifications <-> Chat, as sibling pages
+    ApolloInboxSwipeKindConversationBack,   // out of an open conversation, as a pop
+};
+static ApolloInboxSwipeKind sInboxSwipeKind = ApolloInboxSwipeKindNone;
+static BOOL sInboxSwipeInteractive = NO;    // NO = fall back to the plain switch at release
+static BOOL sInboxSwipeToChat = NO;
+static CGFloat sInboxSwipeProgress = 0.0;
+// Bumped by every drag that starts. A settle animation from an earlier drag
+// carries its own value and leaves the shared state alone if a newer drag has
+// already claimed these views.
+static NSUInteger sInboxSwipeGeneration = 0;
+static __weak ApolloInboxChatHubViewController *sInboxSwipeHub = nil;
+static __weak UITableView *sInboxSwipeTableView = nil;
+// While a drag owns the two pages, ApolloSetInboxChatHubVisible must not run
+// its cross-fade or hide the hub: the drag's own animation IS the transition,
+// and its completion applies the settled alpha/hidden state.
+static BOOL sInboxModeTransitionActive = NO;
 
 // The inbox mode-pan (both tab-switch directions) is a PROCESS SINGLETON,
 // not a per-host recognizer. Apollo's full-width back/forward pans and the
@@ -1061,7 +1086,12 @@ static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, B
         BOOL stillVisible = [objc_getAssociatedObject(host, &kInboxAllChatHubVisibleKey) boolValue];
         if (!stillVisible) hub.view.hidden = YES;
     };
-    if (animated && host.view.window) {
+    if (sInboxModeTransitionActive) {
+        // A swipe is holding both pages in place mid-drag. Everything above
+        // (bar items, the mode control, tab-bar ownership) still applies so
+        // the chrome settles with the motion, but the hub's alpha and hidden
+        // flag belong to the drag until it finishes.
+    } else if (animated && host.view.window) {
         // The single host-owned switcher stays above the fading hub, so the
         // content cross-fade can run immediately alongside its native thumb
         // animation — exactly like a stock segmented control driving a
@@ -1309,6 +1339,117 @@ static void ApolloInboxEnsureRefreshHaptic(UITableView *tableView) {
                        action:@selector(apollo_inboxRefreshTriggered:)
              forControlEvents:UIControlEventValueChanged];
     objc_setAssociatedObject(refreshControl, &kInboxRefreshHapticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+// MARK: - Interactive mode transition
+//
+// Notifications and Chat are sibling tabs, so a swipe between them moves both
+// pages together like a paging scroll view — the finger drags the incoming
+// page in and the outgoing one out at the same rate, and letting go short of
+// the commit point slides them back. (Tapping the mode control keeps the
+// cross-fade it was tuned for: a tap has no position to track.) The pages are
+// the notification table and the Chat hub's own view, both full-bounds
+// siblings under the fixed mode control and its navigation backdrop, so the
+// whole transition is two transforms.
+static BOOL ApolloInboxBeginModeTransition(UIViewController *host, BOOL toChat) {
+    if (!host || CGRectGetWidth(host.view.bounds) <= 0.0) return NO;
+    ApolloInboxChatHubViewController *hub = toChat
+        ? ApolloEnsureInboxChatHub(host)
+        : objc_getAssociatedObject(host, &kInboxAllChatHubKey);
+    UITableView *tableView = ApolloInboxControllerTableView(host);
+    if (!hub || !hub.viewIfLoaded || !tableView) return NO;
+    sInboxSwipeHub = hub;
+    sInboxSwipeTableView = tableView;
+    sInboxSwipeToChat = toChat;
+    sInboxSwipeGeneration += 1;
+    sInboxModeTransitionActive = YES;
+    // Grabbing the pages again mid-settle hands them straight back to the
+    // finger instead of letting the old animation keep driving them.
+    [hub.view.layer removeAllAnimations];
+    [tableView.layer removeAllAnimations];
+    // Reveal the incoming page off-screen: it is only "visible" in the
+    // hub-state sense once the drag commits.
+    hub.view.hidden = NO;
+    hub.view.alpha = 1.0;
+    hub.view.userInteractionEnabled = NO;
+    [host.view bringSubviewToFront:hub.view];
+    UIView *navigationBackdrop = objc_getAssociatedObject(host, &kInboxAllNavigationBackdropKey);
+    if (navigationBackdrop.superview == host.view) {
+        [host.view bringSubviewToFront:navigationBackdrop];
+    }
+    ApolloInboxModeSwitcherView *switcher = objc_getAssociatedObject(host, &kInboxAllModeSwitcherKey);
+    if (switcher.superview == host.view) [host.view bringSubviewToFront:switcher];
+    ApolloInboxUpdateModeTransition(host, 0.0);
+    return YES;
+}
+
+static void ApolloInboxUpdateModeTransition(UIViewController *host, CGFloat progress) {
+    ApolloInboxChatHubViewController *hub = sInboxSwipeHub;
+    UITableView *tableView = sInboxSwipeTableView;
+    if (!hub || !tableView) return;
+    CGFloat width = CGRectGetWidth(host.view.bounds);
+    if (width <= 0.0) return;
+    CGFloat clamped = MAX(0.0, MIN(1.0, progress));
+    sInboxSwipeProgress = clamped;
+    // Mirror under RTL, where Chat sits on the physical left.
+    CGFloat rtlSign = (host.view.effectiveUserInterfaceLayoutDirection ==
+                       UIUserInterfaceLayoutDirectionRightToLeft) ? -1.0 : 1.0;
+    // Chat's offset from settled, in pages; the list is always exactly one
+    // page to its leading side, which is what makes them read as adjacent
+    // tabs instead of one screen covering another.
+    CGFloat chatOffset = sInboxSwipeToChat ? (1.0 - clamped) : clamped;
+    hub.view.transform = CGAffineTransformMakeTranslation(rtlSign * chatOffset * width, 0.0);
+    tableView.transform = CGAffineTransformMakeTranslation(rtlSign * (chatOffset - 1.0) * width, 0.0);
+}
+
+static void ApolloInboxFinishModeTransition(UIViewController *host, BOOL commit, CGFloat velocity) {
+    ApolloInboxChatHubViewController *hub = sInboxSwipeHub;
+    UITableView *tableView = sInboxSwipeTableView;
+    BOOL toChat = sInboxSwipeToChat;
+    NSUInteger generation = sInboxSwipeGeneration;
+    if (!host || !hub || !tableView) {
+        sInboxModeTransitionActive = NO;
+        return;
+    }
+    CGFloat width = CGRectGetWidth(host.view.bounds);
+    CGFloat rtlSign = (host.view.effectiveUserInterfaceLayoutDirection ==
+                       UIUserInterfaceLayoutDirectionRightToLeft) ? -1.0 : 1.0;
+    // Settled offset of the Chat page, in pages, once this drag resolves.
+    CGFloat finalChatOffset = (commit == toChat) ? 0.0 : 1.0;
+    BOOL finalVisible = commit ? toChat : !toChat;
+    CGFloat remaining = MAX(0.05, commit ? (1.0 - sInboxSwipeProgress) : sInboxSwipeProgress);
+    // Carry the throw's speed into the settle rather than always spending the
+    // same time on it.
+    NSTimeInterval duration = (width > 0.0 && fabs(velocity) > 1.0)
+        ? MIN(0.42, MAX(0.14, remaining * width / fabs(velocity)))
+        : 0.28;
+    // Settle the chrome with the motion: the mode control's thumb animates
+    // across while the pages slide, and the navigation bar's buttons leave or
+    // return over the same beat. The hub's own alpha/hidden state is held back
+    // by sInboxModeTransitionActive until the slide lands.
+    if (commit) ApolloSetInboxChatHubVisible(host, finalVisible, YES);
+    [UIView animateWithDuration:duration
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseOut |
+                                UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        // Drive the captured pages directly rather than through the shared
+        // drag state, which a newer drag may already have replaced.
+        hub.view.transform =
+            CGAffineTransformMakeTranslation(rtlSign * finalChatOffset * width, 0.0);
+        tableView.transform =
+            CGAffineTransformMakeTranslation(rtlSign * (finalChatOffset - 1.0) * width, 0.0);
+    } completion:^(BOOL finished) {
+        if (generation != sInboxSwipeGeneration) return;   // a newer drag owns these pages
+        sInboxModeTransitionActive = NO;
+        hub.view.transform = CGAffineTransformIdentity;
+        tableView.transform = CGAffineTransformIdentity;
+        // One owner for the settled state, cancelled drags included.
+        ApolloSetInboxChatHubVisible(host, finalVisible, NO);
+        sInboxSwipeHub = nil;
+        sInboxSwipeTableView = nil;
+    }];
 }
 
 // A drag that begins over horizontally scrollable web content belongs to that
@@ -1977,43 +2118,96 @@ static NSArray *ApolloChatFilterOutChats(NSArray *messages) {
     ApolloSetInboxChatHubVisible((UIViewController *)self, YES, YES);
 }
 
+// The swipe drives its transition frame by frame, like every other iOS
+// navigation gesture: the pages track the finger and a release either carries
+// them the rest of the way or puts them back. Chat is three levels deep inside
+// Inbox and a back gesture climbs them one at a time — conversation -> chat
+// list -> Notifications -> out of Inbox — so which transition runs depends on
+// what is open, not on which way the finger moved.
 %new
 - (void)apollo_inboxModePanned:(UIPanGestureRecognizer *)pan {
-    if (pan.state != UIGestureRecognizerStateEnded) return;
     if (!ApolloInboxControllerIsAll(self) || !ApolloModernChatShouldOpen()) return;
-    // The delegate already vetted chat state, drag direction, and the
-    // conversation route at begin time; here only judge whether the finished
-    // drag reads as a deliberate tab switch.
+    UIViewController *host = (UIViewController *)self;
+    ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(self, &kInboxAllChatHubKey);
     BOOL chatVisible = [objc_getAssociatedObject(self, &kInboxAllChatHubVisibleKey) boolValue];
     // Same RTL mirror as the delegate's quadrant rule.
     CGFloat rtlSign = (pan.view.effectiveUserInterfaceLayoutDirection ==
                        UIUserInterfaceLayoutDirectionRightToLeft) ? -1.0 : 1.0;
     CGFloat direction = (chatVisible ? 1.0 : -1.0) * rtlSign;   // toward Notifications : toward Chat
+    CGFloat width = CGRectGetWidth(host.view.bounds);
     CGPoint translation = [pan translationInView:pan.view];
     CGPoint velocity = [pan velocityInView:pan.view];
-    CGFloat progress = translation.x * direction;
-    BOOL far = progress > 60.0 && fabs(translation.x) > 2.0 * fabs(translation.y);
-    // The flick arm needs its own axis-dominance check: the begin gate only
-    // samples the FIRST velocity, so a drag that starts horizontal and turns
-    // into a vertical list scroll can still end with residual horizontal
-    // velocity — without the dominance test that diagonal release flipped
-    // tabs mid-scroll.
-    BOOL flick = velocity.x * direction > 300.0 && progress > 20.0 &&
-                 fabs(translation.x) > fabs(translation.y);
-    if (!far && !flick) return;
-    ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(self, &kInboxAllChatHubKey);
-    if (chatVisible && ApolloModernChatControllerIsOnConversationRoute(hub.chatController)) {
-        // Chat is three levels deep inside Inbox, and a back gesture climbs
-        // them one at a time: conversation -> chat list -> Notifications ->
-        // out of Inbox. This is the first step; the next swipe (now on the
-        // list) switches tabs, and the one after that pops to Boxes.
-        ChatsFilterLog(@"Inbox (All) swipe: Chat conversation -> chat list");
-        ApolloModernChatControllerGoBackToConversationList(hub.chatController);
-        return;
+    CGFloat progress = width > 0.0 ? (translation.x * direction) / width : 0.0;
+    CGFloat commitVelocity = velocity.x * direction;
+
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan: {
+            sInboxSwipeInteractive = NO;
+            if (chatVisible && ApolloModernChatControllerIsOnConversationRoute(hub.chatController)) {
+                sInboxSwipeKind = ApolloInboxSwipeKindConversationBack;
+                // NO here means there is nothing to reveal yet (no captured
+                // list frame, or a back already running); the release below
+                // then falls back to the plain, instant step.
+                sInboxSwipeInteractive =
+                    ApolloModernChatControllerBeginInteractiveBack(hub.chatController);
+            } else {
+                sInboxSwipeKind = ApolloInboxSwipeKindMode;
+                sInboxSwipeInteractive = ApolloInboxBeginModeTransition(host, !chatVisible);
+            }
+            break;
+        }
+        case UIGestureRecognizerStateChanged: {
+            if (!sInboxSwipeInteractive) break;
+            if (sInboxSwipeKind == ApolloInboxSwipeKindConversationBack) {
+                ApolloModernChatControllerUpdateInteractiveBack(hub.chatController, progress);
+            } else if (sInboxSwipeKind == ApolloInboxSwipeKindMode) {
+                ApolloInboxUpdateModeTransition(host, progress);
+            }
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            ApolloInboxSwipeKind kind = sInboxSwipeKind;
+            BOOL interactive = sInboxSwipeInteractive;
+            sInboxSwipeKind = ApolloInboxSwipeKindNone;
+            sInboxSwipeInteractive = NO;
+            if (kind == ApolloInboxSwipeKindNone) break;
+            // Commit like an interactive pop: past the halfway point, or a
+            // decisive throw in the same direction. The flick arm keeps its own
+            // axis-dominance check — the begin gate only samples the FIRST
+            // velocity, so a drag that starts horizontal and turns into a
+            // vertical list scroll can still end with residual horizontal
+            // velocity, and without the test that diagonal release flipped
+            // tabs mid-scroll.
+            BOOL flick = commitVelocity > 350.0 && progress > 0.12 &&
+                         fabs(translation.x) > fabs(translation.y);
+            BOOL commit = pan.state == UIGestureRecognizerStateEnded &&
+                          (progress >= 0.5 || flick);
+            if (kind == ApolloInboxSwipeKindConversationBack) {
+                if (commit) ChatsFilterLog(@"Inbox (All) swipe: Chat conversation -> chat list");
+                if (interactive) {
+                    ApolloModernChatControllerFinishInteractiveBack(hub.chatController,
+                                                                    commit, commitVelocity);
+                } else if (commit) {
+                    ApolloModernChatControllerGoBackToConversationList(hub.chatController);
+                }
+                break;
+            }
+            if (commit) {
+                ChatsFilterLog(@"Inbox (All) swipe: %@", chatVisible ? @"Chat hub -> Notifications"
+                                                                     : @"Notifications -> Chat hub");
+            }
+            if (interactive) {
+                ApolloInboxFinishModeTransition(host, commit, commitVelocity);
+            } else if (commit) {
+                ApolloSetInboxChatHubVisible(host, !chatVisible, YES);
+            }
+            break;
+        }
+        default:
+            break;
     }
-    ChatsFilterLog(@"Inbox (All) swipe: %@", chatVisible ? @"Chat hub -> Notifications"
-                                                        : @"Notifications -> Chat hub");
-    ApolloSetInboxChatHubVisible((UIViewController *)self, !chatVisible, YES);
 }
 
 %new
