@@ -29,11 +29,16 @@ _LG_IPAD_ICON_FILES=("AppIcon60x60" "AppIcon76x76")
 _LG_IPHONE_ICON_FILES=("AppIcon60x60")
 
 _lg_load_alternate_icons() {
-    local i=0 id
+    local i=0 id group
     while id=$(plutil -extract "icons.${i}.id" raw -o - "$_LG_ICONS_REGISTRY" 2>/dev/null); do
         echo "$id"
-        echo "${id}__apollo_light"
-        echo "${id}__apollo_dark"
+        # Only Liquid Glass group icons have static Light/Dark clones.
+        # Standard-pack additions are dynamic system-appearance icons.
+        group=$(plutil -extract "icons.${i}.group" raw -o - "$_LG_ICONS_REGISTRY" 2>/dev/null || true)
+        if [[ -n "$group" ]]; then
+            echo "${id}__apollo_light"
+            echo "${id}__apollo_dark"
+        fi
         ((i++))
     done
 }
