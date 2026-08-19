@@ -1161,24 +1161,27 @@ static UIRefreshControl *ApolloInboxRefreshControl(UITableView *tableView) {
 // Apollo pops screens with full-width swipe-back PANS on the navigation
 // container (plus the system interactive pop), and offers the mirrored
 // full-width FORWARD pan to re-enter the screen you swiped back from. Inside
-// the Inbox those whole-screen gestures belong only to their "end" tabs:
-// back means "previous screen" only from Notifications (the first tab) and
-// forward only from Chat (the last tab). Everything in between is the
-// tab-switch pan installed in ApolloInstallInboxModeSwitcher, so every pan on
-// the host's ancestor chain is wired here to REQUIRE the mode-pan's failure:
+// the Inbox those whole-screen gestures belong only to its outermost levels:
+// back means "previous screen" only from Notifications (the first tab, with
+// nothing open above it) and forward only from Chat (the last tab). Everything
+// in between — the tab switch, and the step out of an open conversation — is
+// the tab-switch pan installed in ApolloInstallInboxModeSwitcher, so every pan
+// on the host's ancestor chain is wired here to REQUIRE the mode-pan's failure:
 // when the mode-pan begins (a horizontal drag toward the other tab — see the
 // shared delegate's gestureRecognizerShouldBegin:), Apollo's back/forward
 // pans and the interactive pop sit the touch out; in every other situation
 // the mode-pan fails on the spot and they behave exactly as stock. Scroll
 // views' own pans are spared (the delegate already recognizes simultaneously
 // with them). The chat hub's WKWebView edge gestures (history back/forward)
-// are wired too, so an edge grab on the chat LIST cleanly returns to
-// Notifications instead of also walking web history — inside a conversation
-// the mode-pan fails (route guard), which hands the edge back to the web
-// view's own history gesture untouched. A pan — not a discrete swipe
-// recognizer — because WebKit's deferring gates release held recognizers with
-// the touch history accumulated so far, which lets a pan begin late but
-// leaves a discrete swipe dead (verified with real HID swipes over the hub).
+// are wired too, so an edge grab returns to the chat list or Notifications
+// instead of also walking web history. Inside a conversation the same pan owns
+// the back direction as well, and its handler climbs one level of Reddit's
+// chat hierarchy (conversation -> list) rather than switching tabs — without
+// it, Apollo's stock pop skipped both levels and left Inbox entirely. A pan —
+// not a discrete swipe recognizer — because WebKit's deferring gates release
+// held recognizers with the touch history accumulated so far, which lets a pan
+// begin late but leaves a discrete swipe dead (verified with real HID swipes
+// over the hub).
 static void ApolloInboxWireModePanPrecedence(UIViewController *controller, UIPanGestureRecognizer *modePan) {
     // Only wire while the pan actually belongs to this controller — never
     // point shared recognizers at the pan on a stale host's behalf.
@@ -1308,6 +1311,27 @@ static void ApolloInboxEnsureRefreshHaptic(UITableView *tableView) {
     objc_setAssociatedObject(refreshControl, &kInboxRefreshHapticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// A drag that begins over horizontally scrollable web content belongs to that
+// content, not to the conversation back-swipe (a media carousel inside a
+// bubble, a horizontal picker row). WebKit backs every CSS overflow scroller
+// with a real, private UIScrollView in the public view hierarchy, so one hit
+// test answers this. Measure in WINDOW coordinates: locationInView: reads a
+// stale view-local cache for synthesized touches (only _locationInWindow is
+// maintained), which would make the simulator's own driver probe the wrong
+// point.
+static BOOL ApolloInboxPanStartsOverHorizontalScroller(UIPanGestureRecognizer *pan, UIView *hubView) {
+    if (!pan || !hubView.window) return NO;
+    CGPoint point = [hubView convertPoint:[pan locationInView:nil] fromView:nil];
+    if (!CGRectContainsPoint(hubView.bounds, point)) return NO;
+    UIView *hit = [hubView hitTest:point withEvent:nil];
+    for (UIView *view = hit; view && view != hubView; view = view.superview) {
+        if (![view isKindOfClass:[UIScrollView class]]) continue;
+        UIScrollView *scrollView = (UIScrollView *)view;
+        if (scrollView.contentSize.width > CGRectGetWidth(scrollView.bounds) + 8.0) return YES;
+    }
+    return NO;
+}
+
 // Delegate for the singleton inbox mode-pan. It lives on the host view above
 // two scroll surfaces (the notifications ASTableView and the Chat hub's
 // WKWebView scroll view), whose pan recognizers begin on ANY drag — and once a
@@ -1364,13 +1388,21 @@ static void ApolloInboxEnsureRefreshHaptic(UITableView *tableView) {
     CGFloat horizontal = velocity.x * rtlSign;
     if ([objc_getAssociatedObject(host, &kInboxAllChatHubVisibleKey) boolValue]) {
         if (horizontal <= 0.0) return NO;   // further toward-Chat on Chat = Apollo's forward pan
-        // Inside a conversation a toward-Notifications drag must never yank
-        // the user out to Notifications (rooms keep their own back
-        // affordances — the web view's edge history-back — and the GIF
-        // picker's grid scrolls horizontally). Failing here also un-gates
-        // those wired gestures.
         ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(host, &kInboxAllChatHubKey);
-        if (!hub || ApolloModernChatControllerIsOnConversationRoute(hub.chatController)) return NO;
+        if (!hub) return NO;
+        // Inside a conversation the same drag means one level UP Reddit's
+        // chat hierarchy — back to the list the room was opened from — not
+        // the tab switch, and above all not Apollo's stock pop, which used to
+        // skip BOTH the room and the list and land on Boxes. Beginning here
+        // is what keeps that pop (and the web view's own history edge
+        // gestures, all wired to require this pan's failure) out of the
+        // touch; the handler picks which of the two actions the finished drag
+        // performs. A drag that starts over horizontally scrollable web
+        // content still belongs to that content.
+        if (ApolloModernChatControllerIsOnConversationRoute(hub.chatController) &&
+            ApolloInboxPanStartsOverHorizontalScroller(pan, hub.viewIfLoaded)) {
+            return NO;
+        }
         return YES;
     }
     return horizontal < 0.0;   // toward-Notifications/back on Notifications stays with back-swipe / pop
@@ -1969,6 +2001,16 @@ static NSArray *ApolloChatFilterOutChats(NSArray *messages) {
     BOOL flick = velocity.x * direction > 300.0 && progress > 20.0 &&
                  fabs(translation.x) > fabs(translation.y);
     if (!far && !flick) return;
+    ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(self, &kInboxAllChatHubKey);
+    if (chatVisible && ApolloModernChatControllerIsOnConversationRoute(hub.chatController)) {
+        // Chat is three levels deep inside Inbox, and a back gesture climbs
+        // them one at a time: conversation -> chat list -> Notifications ->
+        // out of Inbox. This is the first step; the next swipe (now on the
+        // list) switches tabs, and the one after that pops to Boxes.
+        ChatsFilterLog(@"Inbox (All) swipe: Chat conversation -> chat list");
+        ApolloModernChatControllerGoBackToConversationList(hub.chatController);
+        return;
+    }
     ChatsFilterLog(@"Inbox (All) swipe: %@", chatVisible ? @"Chat hub -> Notifications"
                                                         : @"Notifications -> Chat hub");
     ApolloSetInboxChatHubVisible((UIViewController *)self, !chatVisible, YES);

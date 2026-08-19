@@ -64,11 +64,17 @@ void ApolloModernChatControllerSetInboxVisible(UIViewController *controller, BOO
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller);
 // YES while `controller` (a modern Chat controller) is inside a conversation
 // (/chat/room/… or a /chat/threads/<id> reply thread) rather than one of the
-// list surfaces. The Inbox hub's Chat -> Notifications swipe tracker checks
-// this so a horizontal flick inside a room (message bubbles, the GIF picker's
-// horizontally scrolling grid, …) can never yank the user out to
-// Notifications; rooms keep their own back affordances.
+// list surfaces. The Inbox hub's back-swipe tracker checks this to decide
+// which level of the hierarchy one gesture climbs: out of the conversation
+// while one is open, otherwise Chat -> Notifications.
 BOOL ApolloModernChatControllerIsOnConversationRoute(UIViewController * _Nullable controller);
+// Climbs that first level: from an open conversation back to the list it was
+// opened from, by clicking Reddit's own in-room Back control — the same
+// instant pane flip a tap performs, URL repair and all. Returns YES when the
+// caller's gesture was consumed (a back was issued, or one is still in
+// flight) and NO when `controller` is not a modern Chat controller inside a
+// conversation, in which case the caller keeps its own behavior.
+BOOL ApolloModernChatControllerGoBackToConversationList(UIViewController * _Nullable controller);
 // API-key-free accounts cannot use Apollo's OAuth-only native new-Modmail
 // endpoints. This presents Reddit's current cookie-authenticated Modmail inbox
 // in the same isolated, Apollo-themed mailbox shell as modern Chat.
