@@ -26,7 +26,8 @@
 //     grid of every icon in that group, optionally headed by the group's
 //     description. See LGPackGridRowCell / LGGroupIconsViewController.
 //   • A matching "Standard Icon Packs" card grid for Apollo Originals,
-//     Community, Ultra, and Sekrit. Apollo's SPCA support row stays separate.
+//     Community, Ultra, and Sekrit. The retired SPCA support row is removed;
+//     its icon now lives in Ultra with the other selectable icons.
 //
 // Featured cards preview the light and dark renditions as an overlapping fan.
 // Pack cards use three of the group's cover icons so each pack remains easy to
@@ -1016,7 +1017,8 @@ typedef struct {
     const LGIconRowEntry *addedEntry;
 } LGUltraDisplayedRow;
 
-static LGUltraDisplayedRow LGUltraRowAtDisplayedRow(NSInteger displayedRow);
+static LGUltraDisplayedRow LGUltraRowAtDisplayedRow(NSInteger displayedRow,
+                                                     NSInteger nativeRowCount);
 static const LGIconRowEntry *LGStandardPackAddedEntryForIconID(NSString *iconID);
 
 static NSString *LGActiveStandardAddedIconID(void) {
@@ -1032,10 +1034,11 @@ static NSString *LGActiveStandardAddedIconID(void) {
     return LGStandardPackAddedEntryForIconID(systemID) ? systemID : nil;
 }
 
-static BOOL LGStandardPackRowIsActive(LGStandardPack pack, NSInteger row) {
+static BOOL LGStandardPackRowIsActive(LGStandardPack pack, NSInteger row,
+                                      NSInteger nativeRowCount) {
     if (row < 0) return NO;
     if (pack == LGStandardPackUltra) {
-        LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(row);
+        LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(row, nativeRowCount);
         NSString *addedID = LGActiveStandardAddedIconID();
         if (mapped.isAdded) {
             return addedID.length && [addedID isEqualToString:@(mapped.addedEntry->iconID)];
@@ -1073,21 +1076,16 @@ static NSInteger LGStandardPackIconCount(LGStandardPack pack) {
     switch (pack) {
         case LGStandardPackApolloOriginals: return 32;
         case LGStandardPackCommunity:       return 19;
-        case LGStandardPackUltra:           return 80 + (NSInteger)kLGStandardPackEntries_ultraCount;
+        case LGStandardPackUltra:           return 81 + (NSInteger)kLGStandardPackEntries_ultraCount;
         case LGStandardPackSekrit:          return 21;
         case LGStandardPackCount:           return 0;
     }
 }
 
-static NSInteger LGNativeStandardPackIconCount(LGStandardPack pack) {
-    switch (pack) {
-        case LGStandardPackApolloOriginals: return 32;
-        case LGStandardPackCommunity:       return 19;
-        case LGStandardPackUltra:           return 80;
-        case LGStandardPackSekrit:          return 21;
-        case LGStandardPackCount:           return 0;
-    }
-}
+// SPCA is already a complete native alternate icon in Apollo's bundle. Keep
+// its original file-based registration intact and expose it through the same
+// added-row bridge as the tweak-supplied Ultra additions.
+static const LGIconRowEntry kLGSPCAUltraEntry = { "spca", "SPCA", "David Lanham" };
 
 static LGUltraDisplayedRow LGUltraRowAtDisplayedRow(NSInteger displayedRow,
                                                      NSInteger nativeRowCount) {
@@ -1119,6 +1117,9 @@ static LGUltraDisplayedRow LGUltraRowAtDisplayedRow(NSInteger displayedRow,
         }
     }
 
+    if (outputRow == displayedRow) {
+        return (LGUltraDisplayedRow){ YES, NSNotFound, &kLGSPCAUltraEntry };
+    }
     return missing;
 }
 
@@ -1129,6 +1130,7 @@ static const LGIconRowEntry *LGStandardPackAddedEntryForIconID(NSString *iconID)
             return &kLGStandardPackEntries_ultra[i];
         }
     }
+    if ([iconID isEqualToString:@(kLGSPCAUltraEntry.iconID)]) return &kLGSPCAUltraEntry;
     return NULL;
 }
 
@@ -1217,9 +1219,8 @@ static BOOL LGAlternateIconsAvailable(void) {
 static BOOL LGSectionIsOurs(NSInteger section) { return section < LGInjectedSectionCount(); }
 
 static NSInteger LGRemapSectionToOriginal(NSInteger section) {
-    // The four native icon collections move into the standard pack cards.
-    // Only Apollo's standalone SPCA support row (native section 2) remains on
-    // the main screen below the injected grids.
+    // The native icon collections move into the standard pack cards, and the
+    // old SPCA purchase/support row is intentionally no longer forwarded.
     return section - LGInjectedSectionCount() + 2;
 }
 
@@ -2845,7 +2846,7 @@ static UIImage *LGAddedUltraThumbnail(NSString *iconID) {
 
     UIImage *cached = [cache objectForKey:iconID];
     if (cached) return cached;
-    UIImage *source = LGPreviewImage(iconID, @"default");
+    UIImage *source = LGPreviewImage(iconID, @"default") ?: LGStandardIconPreview(iconID);
     if (!source) return nil;
 
     // Apollo's native Ultra cells use 76-point thumbnails. Generated picker
@@ -2910,7 +2911,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     fill.layer.maskedCorners = corners;
 }
 
-// The four tweak-owned Ultra rows are plain UITableViewCells rather than
+// The additional Ultra rows are plain UITableViewCells rather than
 // ApolloTableViewCell instances, so Apollo's hooked Standard-row press path
 // does not reach them. Mirror that path here: the same 0.97 scale/spring,
 // stable circular checkmark, and no custom-theme full-row selection wash.
@@ -2975,17 +2976,24 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     return count;
 }
 
+- (BOOL)lg_rowIsActive:(NSInteger)row tableView:(UITableView *)tableView {
+    NSInteger nativeRowCount = _pack == LGStandardPackUltra
+        ? [self lg_nativeRowCountForTableView:tableView] : NSNotFound;
+    return LGStandardPackRowIsActive(_pack, row, nativeRowCount);
+}
+
 - (const LGIconRowEntry *)lg_addedEntryForRow:(NSInteger)row
                                     tableView:(UITableView *)tableView {
     if (_pack != LGStandardPackUltra) return NULL;
-    (void)tableView;
-    LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(row);
+    NSInteger nativeRowCount = [self lg_nativeRowCountForTableView:tableView];
+    LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(row, nativeRowCount);
     return mapped.isAdded ? mapped.addedEntry : NULL;
 }
 
 - (NSIndexPath *)lg_nativeIndexPathForDisplayedIndexPath:(NSIndexPath *)indexPath {
     if (_pack != LGStandardPackUltra) return indexPath;
-    LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(indexPath.row);
+    NSInteger nativeRowCount = [self lg_nativeRowCountForTableView:self.tableView];
+    LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(indexPath.row, nativeRowCount);
     if (mapped.isAdded || mapped.nativeRow == NSNotFound) return nil;
     return [NSIndexPath indexPathForRow:mapped.nativeRow inSection:0];
 }
@@ -3012,7 +3020,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
                                         indexPath.row == 0,
                                         indexPath.row == rowCount - 1);
     LGSetNativeIconCellCheckmark(cell,
-        LGStandardPackRowIsActive(_pack, indexPath.row));
+        [self lg_rowIsActive:indexPath.row tableView:tableView]);
 }
 
 - (void)lg_captureNativeTypographyFromCell:(UITableViewCell *)cell {
@@ -3055,7 +3063,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
                                             indexPath.row == 0,
                                             indexPath.row == rowCount - 1);
         LGSetNativeIconCellCheckmark(cell,
-            LGStandardPackRowIsActive(_pack, indexPath.row));
+            [self lg_rowIsActive:indexPath.row tableView:tableView]);
     }
 }
 
@@ -3160,7 +3168,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSInteger nativeCount = [self lg_nativeRowCountForTableView:tableView];
     return nativeCount + (_pack == LGStandardPackUltra
-        ? (NSInteger)kLGStandardPackEntries_ultraCount : 0);
+        ? (NSInteger)kLGStandardPackEntries_ultraCount + 1 : 0);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -3202,7 +3210,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
     LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                         indexPath.row == 0, indexPath.row == rowCount - 1);
-    BOOL selected = LGStandardPackRowIsActive(_pack, indexPath.row);
+    BOOL selected = [self lg_rowIsActive:indexPath.row tableView:tableView];
     LGSetNativeIconCellCheckmark(cell, selected);
     return cell;
 }
@@ -3244,7 +3252,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     // persisted selection afterward so backgrounding cannot visually revert
     // an active Standard icon to Default.
     LGSetNativeIconCellCheckmark(cell,
-        LGStandardPackRowIsActive(_pack, indexPath.row));
+        [self lg_rowIsActive:indexPath.row tableView:tableView]);
     if (_pack == LGStandardPackUltra) {
         LGFixLegacyUltraPreview(cell, nativeIndexPath.row);
         [cell setNeedsLayout];
@@ -3309,7 +3317,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     // second time. Besides doing unnecessary work, that path briefly mutates
     // Apollo's private accessory state and makes the persisted checkmark
     // appear to change. End only the table's transient pressed state.
-    if (LGStandardPackRowIsActive(_pack, indexPath.row)) {
+    if ([self lg_rowIsActive:indexPath.row tableView:tableView]) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
         // Do not reload the row while its press-release transform is still
         // animating. In some dark custom themes UIKit keeps the outgoing cell
@@ -3827,7 +3835,10 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
     sLGAppIconPickerTableView = tableView;
     NSInteger originalCount = %orig;
     if (!LGAlternateIconsAvailable()) return originalCount;
-    return LGInjectedSectionCount() + (originalCount > 2 ? 1 : 0);
+    // Every selectable native collection is represented by the Standard pack
+    // cards. Do not leave Apollo's obsolete standalone SPCA purchase card at
+    // the bottom now that its icon is directly available inside Ultra.
+    return LGInjectedSectionCount();
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -4222,7 +4233,8 @@ static void LGStyleCommunityIconCell(id controller,
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     BOOL replayingSelection = [objc_getAssociatedObject(self, &kLGCommunitySelectionReplayKey) boolValue];
-    if (!replayingSelection && LGStandardPackRowIsActive(LGStandardPackCommunity, indexPath.row)) {
+    if (!replayingSelection &&
+        LGStandardPackRowIsActive(LGStandardPackCommunity, indexPath.row, NSNotFound)) {
         // Match the tweak-owned Standard packs: an already-active row keeps
         // its checkmark and ends only the table's temporary pressed state.
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
@@ -4328,7 +4340,11 @@ static void LGKeepMainSettingsIconSquare(UITableViewCell *cell) {
     UIImage *preview = nil;
     NSString *displayName = nil;
     if (addedStandardEntry) {
-        preview = LGPreviewImage(@(addedStandardEntry->iconID), @"default");
+        NSString *iconID = @(addedStandardEntry->iconID);
+        // Tweak-supplied Ultra additions use generated previews, while SPCA
+        // keeps Apollo's original file-based icon. Match the Ultra detail row
+        // fallback so the parent Settings row refreshes correctly for both.
+        preview = LGPreviewImage(iconID, @"default") ?: LGStandardIconPreview(iconID);
         displayName = @(addedStandardEntry->displayName);
     } else {
         NSString *activeName = LGActiveAlternateIconName();
