@@ -21,13 +21,13 @@
 //   nav bar stays put (true Liquid Glass feel; native API only minimizes the
 //   tab bar). When the toggle is OFF we restore .never (raw value 1).
 //
-//   Mode B ("Tab Bar Re-Expands When Idle"): a deliberate short upward drag
-//   switches to .never to fully expand the bar. That reveal is owned by the
-//   gesture which requested it: direction noise within the same gesture cannot
-//   switch back and thrash the safe area. Once that gesture has completely
-//   ended, restore .onScrollDown exactly once so the next downward gesture is
-//   enrolled from its beginning. If the user leaves the pill collapsed, the
-//   longer idle timer still requests an automatic expansion.
+//   Mode B ("Tab Bar Re-Expands When Idle") keeps the same native interactive
+//   behavior and adds only a longer idle expansion. "Classic Tab Bar Scroll
+//   Behavior" additionally restores Apollo's old bidirectional response on
+//   iOS 27: the first motion back toward the top expands the pill immediately.
+//   Both reveals drive UIKit's floating visual provider directly while leaving
+//   .onScrollDown installed, so expansion morphs instead of snapping and the
+//   very next downward gesture remains enrolled for collapse.
 //
 // iOS <26 (legacy mirror):
 //   Apollo's hide-on-swipe hides the bottom UITabBar but never restores it.
@@ -37,10 +37,6 @@
 
 @interface UITabBarController (ApolloHideFix)
 - (void)setTabBarHidden:(BOOL)hidden animated:(BOOL)animated; // private
-@end
-
-@interface UIScrollView (ApolloAutoHidePan)
-- (void)_apolloAutoHideTabBarPanChanged:(UIPanGestureRecognizer *)pan;
 @end
 
 // iOS 26 SDK selector — declared via NSInteger to avoid hard SDK dependency.
@@ -56,22 +52,48 @@ typedef NS_ENUM(NSInteger, ApolloTabBarMinimizeBehavior) {
 };
 
 static char kApolloRequestedHidesBarsOnSwipeKey;
-static char kApolloAppliedMinimizeBehaviorKey;
-static char kApolloIdleRevealTimerKey;
-static char kApolloIdleRevealTimerScheduledAtKey;
-static char kApolloCustomRevealActiveKey;
-static char kApolloCustomRevealGestureTokenKey;
-static char kApolloCustomRevealStartedAtKey;
-static char kApolloScrollGestureTokenKey;
-static char kApolloUpwardRevealDistanceKey;
-static char kApolloAutoHidePanObserverAttachedKey;
+static char kApolloTabBarRuntimeStateKey;
 
-static NSString *const ApolloAutoHideTabBarShowOnIdleChangedNotification = @"ApolloAutoHideTabBarShowOnIdleChangedNotification";
+static NSString *const ApolloTabBarScrollBehaviorChangedNotification = @"ApolloTabBarScrollBehaviorChangedNotification";
 static const NSTimeInterval ApolloIdleRevealDelaySeconds = 30.0;
-static const NSTimeInterval ApolloIdleRevealRearmDelaySeconds = 0.5;
 static const NSTimeInterval ApolloIdleRevealRescheduleInterval = 0.25;
-static const CGFloat ApolloUpwardRevealDistanceThreshold = 120.0;
-static NSUInteger sApolloScrollGestureToken = 0;
+// UIKit's native collapse settles quickly; use the same compact cadence for
+// our provider-driven reveal so reversing scroll direction feels symmetric.
+static const NSTimeInterval ApolloAnimatedRevealDurationSeconds = 0.18;
+static const NSTimeInterval ApolloIdleRevealTransientRetrySeconds = 0.12;
+static const NSInteger ApolloIdleRevealMaxTransientRetries = 8;
+static BOOL sApolloNativeHideBarsOnScrollEnabled = NO;
+
+@class ApolloTabBarRevealAnimator;
+
+// One controller-owned mutable state object replaces the former collection of
+// boxed associated values. In particular, scroll-frame timer resets now mutate
+// primitive fields without allocating an NSNumber on every content-offset
+// update.
+@interface ApolloTabBarRuntimeState : NSObject
+@property (nonatomic, assign) BOOL hasAppliedMinimizeBehavior;
+@property (nonatomic, assign) NSInteger appliedMinimizeBehavior;
+@property (nonatomic, strong) dispatch_source_t idleRevealTimer;
+@property (nonatomic, assign) NSTimeInterval idleRevealTimerScheduledAt;
+@property (nonatomic, assign) NSInteger idleRevealGeneration;
+@property (nonatomic, strong) ApolloTabBarRevealAnimator *revealAnimator;
+@end
+
+@implementation ApolloTabBarRuntimeState
+@end
+
+static ApolloTabBarRuntimeState *ApolloRuntimeState(UITabBarController *tbc,
+                                                     BOOL create) {
+    if (!tbc) return nil;
+    ApolloTabBarRuntimeState *state =
+        objc_getAssociatedObject(tbc, &kApolloTabBarRuntimeStateKey);
+    if (!state && create) {
+        state = [ApolloTabBarRuntimeState new];
+        objc_setAssociatedObject(tbc, &kApolloTabBarRuntimeStateKey, state,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return state;
+}
 
 static SEL ApolloMinimizeBehaviorSetter(void) {
     return NSSelectorFromString(@"setTabBarMinimizeBehavior:");
@@ -97,9 +119,9 @@ static void ApolloApplyMinimizeBehaviorInternal(UITabBarController *tbc,
                                                 ApolloTabBarMinimizeBehavior behavior,
                                                 BOOL reconcileUIKitState) {
     if (!tbc || !ApolloSupportsNativeTabBarMinimize()) return;
-    NSNumber *lastApplied = objc_getAssociatedObject(tbc, &kApolloAppliedMinimizeBehaviorKey);
-    if ([lastApplied isKindOfClass:[NSNumber class]] &&
-        lastApplied.integerValue == (NSInteger)behavior) {
+    ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, YES);
+    if (state.hasAppliedMinimizeBehavior &&
+        state.appliedMinimizeBehavior == (NSInteger)behavior) {
         if (!reconcileUIKitState) return;
         if (ApolloCurrentMinimizeBehavior(tbc) == (NSInteger)behavior) return;
     }
@@ -113,7 +135,8 @@ static void ApolloApplyMinimizeBehaviorInternal(UITabBarController *tbc,
     NSInteger raw = (NSInteger)behavior;
     [inv setArgument:&raw atIndex:2];
     [inv invoke];
-    objc_setAssociatedObject(tbc, &kApolloAppliedMinimizeBehaviorKey, @(raw), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    state.hasAppliedMinimizeBehavior = YES;
+    state.appliedMinimizeBehavior = raw;
     ApolloLog(@"[AutoHideTabBarFix] Native tabBarMinimizeBehavior=%ld reconcile=%d on %@",
               (long)raw, reconcileUIKitState, NSStringFromClass([tbc class]));
 }
@@ -125,152 +148,6 @@ static void ApolloApplyMinimizeBehavior(UITabBarController *tbc,
     // consulting UIKit's live property on every call made iOS 27 fight us
     // between .never and .onScrollDown at display-link cadence.
     ApolloApplyMinimizeBehaviorInternal(tbc, behavior, NO);
-}
-
-static BOOL ApolloCustomRevealIsActive(UITabBarController *tbc) {
-    return [objc_getAssociatedObject(tbc, &kApolloCustomRevealActiveKey) boolValue];
-}
-
-static void ApolloClearCustomRevealState(UITabBarController *tbc) {
-    if (!tbc) return;
-    objc_setAssociatedObject(tbc, &kApolloCustomRevealActiveKey, nil,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(tbc, &kApolloCustomRevealGestureTokenKey, nil,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(tbc, &kApolloCustomRevealStartedAtKey, nil,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-static CGFloat ApolloUpwardRevealDistance(UIScrollView *scrollView) {
-    NSNumber *distance = objc_getAssociatedObject(scrollView, &kApolloUpwardRevealDistanceKey);
-    return [distance isKindOfClass:[NSNumber class]] ? (CGFloat)distance.doubleValue : 0.0;
-}
-
-static void ApolloSetUpwardRevealDistance(UIScrollView *scrollView, CGFloat distance) {
-    if (!scrollView) return;
-    objc_setAssociatedObject(scrollView,
-                             &kApolloUpwardRevealDistanceKey,
-                             distance > 0.0 ? @(distance) : nil,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-static NSNumber *ApolloScrollGestureToken(UIScrollView *scrollView) {
-    NSNumber *token = objc_getAssociatedObject(scrollView, &kApolloScrollGestureTokenKey);
-    if ([token isKindOfClass:[NSNumber class]]) return token;
-
-    // The pan target normally stamps the token at .began. Keep this fallback
-    // for scroll-view subclasses which update contentOffset before forwarding
-    // the recognizer callback.
-    token = @(++sApolloScrollGestureToken);
-    objc_setAssociatedObject(scrollView, &kApolloScrollGestureTokenKey, token,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return token;
-}
-
-// Apollo's tab-driving content views are tables/collection views. Text views
-// and WKWebView internals also inherit UIScrollView, but observing every one
-// of those adds several targets per cell/web page and lets a nested editor
-// gesture alter the main tab bar's reveal state. The pan observer AND the
-// custom-reveal trigger must use the same filter: a reveal triggered from an
-// unobserved scroll view would never receive its gesture-end re-arm, leaving
-// .never stuck (no collapse) until the next list gesture's began-branch rescue.
-static BOOL ApolloAutoHideScrollViewParticipates(UIScrollView *scrollView) {
-    return [scrollView isKindOfClass:[UITableView class]] ||
-           [scrollView isKindOfClass:[UICollectionView class]];
-}
-
-static void ApolloEnsureAutoHidePanObserver(UIScrollView *scrollView) {
-    // The observer only powers Mode B's custom upward reveal. Avoid adding a
-    // gesture target to every scroll view for users who leave that mode off.
-    // If it is enabled later, setContentOffset: attaches to the live pan.
-    if (!scrollView || !sAutoHideTabBarShowOnIdle ||
-        !ApolloSupportsNativeTabBarMinimize()) return;
-    if (!ApolloAutoHideScrollViewParticipates(scrollView)) return;
-
-    UIPanGestureRecognizer *pan = scrollView.panGestureRecognizer;
-    if (!pan || objc_getAssociatedObject(pan, &kApolloAutoHidePanObserverAttachedKey)) return;
-
-    objc_setAssociatedObject(pan, &kApolloAutoHidePanObserverAttachedKey, @YES,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [pan addTarget:scrollView action:@selector(_apolloAutoHideTabBarPanChanged:)];
-
-    // ASTableView can bypass UIScrollView's didMoveToWindow implementation or
-    // replace its recognizer after that callback. If first seen while already
-    // dragging, establish this gesture's token now; the newly attached target
-    // will still receive its eventual ended/cancelled transition.
-    if ((pan.state == UIGestureRecognizerStateBegan ||
-         pan.state == UIGestureRecognizerStateChanged) &&
-        (scrollView.tracking || scrollView.dragging)) {
-        NSNumber *token = @(++sApolloScrollGestureToken);
-        objc_setAssociatedObject(scrollView, &kApolloScrollGestureTokenKey, token,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        ApolloSetUpwardRevealDistance(scrollView, 0.0);
-        ApolloLog(@"[AutoHideTabBarFix] Attached live pan observer late scroll=%@ token=%@ state=%ld",
-                  NSStringFromClass(scrollView.class), token, (long)pan.state);
-    } else {
-        ApolloLog(@"[AutoHideTabBarFix] Attached pan observer scroll=%@ state=%ld",
-                  NSStringFromClass(scrollView.class), (long)pan.state);
-    }
-}
-
-// Re-arm .onScrollDown for the reveal owned by `token` once the bar's expand
-// morph has settled (stable target 0, not animating). A behavior write while
-// the morph is in flight restarts the glass transition — the visible stutter
-// this defers around. The token check on every hop hands ownership to the
-// began-branch re-arm if a new gesture starts first; the attempt deadline
-// guarantees the controller can never wedge on .never if the morph state stays
-// unsettled or unreadable.
-static const NSInteger ApolloRearmMaxAttempts = 12; // ~1s at 80ms steps
-// _currentMorphTarget flips to the DESTINATION at animation start, and on
-// iOS 27 the isAnimatingCollapsedState ivar is gone (device logs: animKnown=no)
-// — so "target 0" alone cannot prove the expand finished. The time floor below
-// (measured from when the reveal applied .never) is the reliable settle signal
-// across versions; the glass expand runs ~300ms. Waiting is free: applying
-// .onScrollDown to a settled expanded bar changes nothing visible.
-static const NSTimeInterval ApolloRevealExpandSettleSeconds = 0.45;
-static void ApolloRearmCustomRevealWhenExpanded(UITabBarController *tbc,
-                                                NSNumber *token,
-                                                NSInteger attempt) {
-    __weak UITabBarController *weakTBC = tbc;
-    int64_t delay = attempt == 0 ? 0 : (int64_t)(80 * NSEC_PER_MSEC);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay), dispatch_get_main_queue(), ^{
-        UITabBarController *strongTBC = weakTBC;
-        if (!strongTBC) return;
-
-        // Like the idle timer, a settle poll can become overdue if the app is
-        // suspended during its 450ms floor. Never let that delayed behavior
-        // write land inside the next foreground transition. willEnterForeground
-        // invalidates its token below, and the paired activation reconcile
-        // restores the desired policy after UIKit resumes.
-        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
-
-        NSNumber *currentRevealToken = objc_getAssociatedObject(strongTBC,
-            &kApolloCustomRevealGestureTokenKey);
-        if (!ApolloCustomRevealIsActive(strongTBC) ||
-            ![token isEqual:currentRevealToken]) return;
-
-        NSNumber *startedAt = objc_getAssociatedObject(strongTBC, &kApolloCustomRevealStartedAtKey);
-        BOOL pastSettleFloor = ![startedAt isKindOfClass:[NSNumber class]] ||
-            CACurrentMediaTime() - startedAt.doubleValue >= ApolloRevealExpandSettleSeconds;
-
-        BOOL morphKnown = NO;
-        NSInteger morphTarget = ApolloTabBarVisualMorphTarget(strongTBC.tabBar, &morphKnown);
-        BOOL animKnown = NO;
-        BOOL animating = ApolloTabBarVisualProviderBoolIvar(strongTBC.tabBar,
-            "isAnimatingCollapsedState", &animKnown);
-        BOOL settledExpanded = pastSettleFloor &&
-            (!morphKnown || (morphTarget == 0 && !(animKnown && animating)));
-        if (!settledExpanded && attempt < ApolloRearmMaxAttempts) {
-            ApolloRearmCustomRevealWhenExpanded(strongTBC, token, attempt + 1);
-            return;
-        }
-        // Settled or deadline reached (morph unreadable counts as settled once
-        // past the time floor — fail open).
-        ApolloClearCustomRevealState(strongTBC);
-        ApolloApplyMinimizeBehavior(strongTBC, ApolloTabBarMinimizeBehaviorOnScrollDown);
-        ApolloLog(@"[AutoHideTabBarFix] Custom reveal re-armed after gesture token=%@ attempt=%ld morph=%ld",
-                  token, (long)attempt, (long)morphTarget);
-    });
 }
 
 // Walk only the parentViewController chain so modally-presented nav controllers
@@ -313,13 +190,316 @@ static BOOL ApolloTabBarControllerWantsNativeMinimize(UITabBarController *tbc) {
     return NO;
 }
 
+// MARK: - Native floating-provider reveal
+//
+// UITabBar's `_setMinimized:` is guarded by an Apple-app assertion (calling it
+// in Apollo raises "This can only be called by an approved app"). The floating
+// provider's scroll-away callback is the unguarded entry point UIKit itself
+// uses to scrub the Liquid Glass morph. Runtime inspection on iOS 26.5 found:
+//
+//   -[_UITabBarVisualProvider_Floating
+//       scrollAwayInteraction:progressDidChange:tracking:]
+//
+// with progress 1 = minimized and 0 = expanded. Drive it at display refresh so
+// an idle reveal and the opt-in classic upward reveal both animate, without
+// ever changing tabBarMinimizeBehavior away from .onScrollDown.
+@interface ApolloTabBarRevealAnimator : NSObject
+@property (nonatomic, weak) UITabBarController *controller;
+@property (nonatomic, strong) id provider;
+@property (nonatomic, strong) id interaction;
+@property (nonatomic, strong) CADisplayLink *displayLink;
+@property (nonatomic, assign) CFTimeInterval startedAt;
+@property (nonatomic, assign) CGFloat startProgress;
+@property (nonatomic, assign) CGFloat targetProgress;
+@property (nonatomic, assign) NSTimeInterval duration;
+@property (nonatomic, assign) CGFloat providerProgress;
+- (instancetype)initWithController:(UITabBarController *)controller
+                           provider:(id)provider
+                        interaction:(id)interaction;
+- (void)start;
+- (void)invalidate;
+- (void)retargetToProgress:(CGFloat)progress;
+- (void)finishProviderTracking;
+- (void)apollo_step:(CADisplayLink *)displayLink;
+@end
+
+// CADisplayLink retains its target. Keep that edge weak so an animator which
+// loses its controller/window cannot form animator -> link -> animator forever.
+@interface ApolloTabBarRevealDisplayLinkProxy : NSObject
+@property (nonatomic, weak) ApolloTabBarRevealAnimator *animator;
+- (void)tick:(CADisplayLink *)displayLink;
+@end
+
+@implementation ApolloTabBarRevealDisplayLinkProxy
+- (void)tick:(CADisplayLink *)displayLink {
+    ApolloTabBarRevealAnimator *animator = self.animator;
+    if (animator) {
+        [animator apollo_step:displayLink];
+    } else {
+        [displayLink invalidate];
+    }
+}
+@end
+
+@implementation ApolloTabBarRevealAnimator
+
+- (instancetype)initWithController:(UITabBarController *)controller
+                           provider:(id)provider
+                        interaction:(id)interaction {
+    self = [super init];
+    if (self) {
+        _controller = controller;
+        _provider = provider;
+        _interaction = interaction;
+        // We only create the animator from UIKit's settled minimized target.
+        // Keeping the progress here also lets a rapid direction reversal
+        // continue smoothly from the currently rendered synthetic state.
+        _providerProgress = 1.0;
+        _startProgress = 1.0;
+        _targetProgress = 0.0;
+        _duration = ApolloAnimatedRevealDurationSeconds;
+    }
+    return self;
+}
+
+- (void)start {
+    if (self.displayLink) return;
+    ApolloTabBarRevealDisplayLinkProxy *proxy = [ApolloTabBarRevealDisplayLinkProxy new];
+    proxy.animator = self;
+    self.displayLink = [CADisplayLink displayLinkWithTarget:proxy selector:@selector(tick:)];
+    [self.displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+}
+
+- (void)invalidate {
+    [self.displayLink invalidate];
+    self.displayLink = nil;
+    UITabBarController *controller = self.controller;
+    ApolloTabBarRuntimeState *state = ApolloRuntimeState(controller, NO);
+    if (state.revealAnimator == self) {
+        state.revealAnimator = nil;
+    }
+    self.provider = nil;
+    self.interaction = nil;
+}
+
+- (void)finishProviderTracking {
+    id provider = self.provider;
+    id interaction = self.interaction;
+    if (provider && interaction) {
+        SEL selector = NSSelectorFromString(@"scrollAwayInteraction:progressDidChange:tracking:");
+        @try {
+            ((void (*)(id, SEL, id, double, BOOL))objc_msgSend)(
+                provider, selector, interaction, (double)self.providerProgress, NO);
+        } @catch (NSException *exception) {
+            ApolloLog(@"[AutoHideTabBarFix] Ending animated reveal tracking failed: %@",
+                      exception.name);
+        }
+    }
+    [self invalidate];
+}
+
+- (void)retargetToProgress:(CGFloat)progress {
+    progress = MIN(1.0, MAX(0.0, progress));
+    if (fabs(self.targetProgress - progress) < 0.001) return;
+    self.startProgress = self.providerProgress;
+    self.targetProgress = progress;
+    self.duration = MAX(0.04, ApolloAnimatedRevealDurationSeconds *
+                               fabs(self.targetProgress - self.startProgress));
+    self.startedAt = 0.0;
+}
+
+- (void)apollo_step:(CADisplayLink *)displayLink {
+    if (!self.controller || !self.provider) {
+        [self finishProviderTracking];
+        return;
+    }
+    if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+        // Do not strand UIKit in tracking=YES if the app resigns active during
+        // the 180 ms reveal window.
+        [self finishProviderTracking];
+        return;
+    }
+
+    if (self.startedAt <= 0.0) self.startedAt = displayLink.timestamp;
+    CGFloat elapsed = (CGFloat)(displayLink.timestamp - self.startedAt);
+    CGFloat fraction = MIN(1.0, MAX(0.0, elapsed / self.duration));
+    // Cubic ease-out between the current and requested provider progress. This
+    // also permits a rapid direction reversal without first asking UIKit to
+    // settle a partially tracked reveal in the opposite direction.
+    CGFloat remaining = 1.0 - fraction;
+    CGFloat eased = 1.0 - remaining * remaining * remaining;
+    CGFloat providerProgress = self.startProgress +
+        (self.targetProgress - self.startProgress) * eased;
+    self.providerProgress = providerProgress;
+    SEL selector = NSSelectorFromString(@"scrollAwayInteraction:progressDidChange:tracking:");
+
+    @try {
+        ((void (*)(id, SEL, id, double, BOOL))objc_msgSend)(
+            self.provider, selector, self.interaction, (double)providerProgress, fraction < 1.0);
+    } @catch (NSException *exception) {
+        ApolloLog(@"[AutoHideTabBarFix] Animated reveal provider call failed: %@", exception.name);
+        // Earlier frames used tracking=YES. Always attempt the matching final
+        // tracking=NO callback before tearing the driver down.
+        [self finishProviderTracking];
+        return;
+    }
+
+    if (fraction >= 1.0) [self invalidate];
+}
+
+@end
+
+typedef NS_ENUM(NSInteger, ApolloTabBarRevealResult) {
+    ApolloTabBarRevealResultUnsupported = 0,
+    ApolloTabBarRevealResultTransient,
+    ApolloTabBarRevealResultAlreadyExpanded,
+    ApolloTabBarRevealResultActive,
+    ApolloTabBarRevealResultStarted,
+};
+
+static BOOL ApolloIvarCanStoreObject(Class cls, Ivar ivar) {
+    if (!cls || !ivar) return NO;
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    if (offset < 0 || (size_t)offset + sizeof(id) > class_getInstanceSize(cls)) return NO;
+
+    // UIKit's ObjC ivars encode objects as '@'. The floating provider is a
+    // Swift class and its stored object ivars expose an empty encoding, so an
+    // empty type is accepted only after the bounds check above.
+    const char *encoding = ivar_getTypeEncoding(ivar);
+    return !encoding || encoding[0] == '\0' || encoding[0] == '@';
+}
+
+static BOOL ApolloRevealCallbackHasExpectedABI(id provider, SEL callback) {
+    if (!provider || !callback) return NO;
+    Method method = class_getInstanceMethod(object_getClass(provider), callback);
+    if (!method || method_getNumberOfArguments(method) != 5) return NO;
+
+    char returnType[8] = {0};
+    char interactionType[8] = {0};
+    char progressType[8] = {0};
+    char trackingType[8] = {0};
+    method_getReturnType(method, returnType, sizeof(returnType));
+    method_getArgumentType(method, 2, interactionType, sizeof(interactionType));
+    method_getArgumentType(method, 3, progressType, sizeof(progressType));
+    method_getArgumentType(method, 4, trackingType, sizeof(trackingType));
+    return returnType[0] == 'v' && interactionType[0] == '@' &&
+           progressType[0] == 'd' &&
+           (trackingType[0] == 'B' || trackingType[0] == 'c');
+}
+
+// Resolve the private bridge once per provider class. A future iOS layout
+// mismatch must fail open without repeating runtime/ABI inspection on every
+// scroll frame.
+static Class sApolloRevealProviderClass = Nil;
+static Ivar sApolloRevealInteractionIvar = NULL;
+static BOOL sApolloRevealProviderChecked = NO;
+static BOOL sApolloRevealProviderSupported = NO;
+
+static BOOL ApolloResolveRevealProviderBridge(id provider, SEL callback) {
+    if (!provider || !callback) return NO;
+    Class providerClass = object_getClass(provider);
+    if (providerClass != sApolloRevealProviderClass) {
+        sApolloRevealProviderClass = providerClass;
+        sApolloRevealProviderChecked = YES;
+        sApolloRevealInteractionIvar = class_getInstanceVariable(providerClass,
+                                                                 "scrollAwayInteraction");
+        sApolloRevealProviderSupported =
+            [provider respondsToSelector:callback] &&
+            ApolloRevealCallbackHasExpectedABI(provider, callback) &&
+            ApolloIvarCanStoreObject(providerClass, sApolloRevealInteractionIvar);
+        ApolloLog(@"[AutoHideTabBarFix] Reveal bridge class=%@ supported=%d callback=%@ interactionOffset=%td",
+                  NSStringFromClass(providerClass), sApolloRevealProviderSupported,
+                  NSStringFromSelector(callback),
+                  sApolloRevealInteractionIvar ? ivar_getOffset(sApolloRevealInteractionIvar) : -1);
+    }
+    return sApolloRevealProviderChecked && sApolloRevealProviderSupported;
+}
+
+static id ApolloTabBarVisualProviderForReveal(UITabBar *tabBar) {
+    if (!tabBar) return nil;
+    Class cls = object_getClass(tabBar);
+    Ivar providerIvar = class_getInstanceVariable(cls, "_visualProvider");
+    if (!ApolloIvarCanStoreObject(cls, providerIvar)) return nil;
+    return providerIvar ? object_getIvar(tabBar, providerIvar) : nil;
+}
+
+static ApolloTabBarRevealResult ApolloStartAnimatedTabBarReveal(UITabBarController *tbc,
+                                                                 NSString *reason) {
+    if (!tbc || !ApolloSupportsNativeTabBarMinimize()) {
+        return ApolloTabBarRevealResultUnsupported;
+    }
+    ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, YES);
+    ApolloTabBarRevealAnimator *active = state.revealAnimator;
+    if (active) {
+        [active retargetToProgress:0.0];
+        return ApolloTabBarRevealResultActive;
+    }
+
+    BOOL morphKnown = NO;
+    NSInteger morphTarget = ApolloTabBarVisualMorphTarget(tbc.tabBar, &morphKnown);
+    if (!morphKnown) return ApolloTabBarRevealResultUnsupported;
+    // Target 1 is an in-flight morph. Starting our animation at progress 1
+    // there would visibly snap it back to fully minimized before revealing.
+    // Let UIKit finish its own interactive transition and only synthesize a
+    // reveal from the stable minimized target (2).
+    if (morphTarget == 0) return ApolloTabBarRevealResultAlreadyExpanded;
+    if (morphTarget == 1) return ApolloTabBarRevealResultTransient;
+    if (morphTarget != 2) {
+        ApolloLog(@"[AutoHideTabBarFix] Unknown tab-bar morph target=%ld; reveal skipped",
+                  (long)morphTarget);
+        return ApolloTabBarRevealResultUnsupported;
+    }
+
+    id provider = ApolloTabBarVisualProviderForReveal(tbc.tabBar);
+    SEL callback = NSSelectorFromString(@"scrollAwayInteraction:progressDidChange:tracking:");
+    if (!ApolloResolveRevealProviderBridge(provider, callback)) {
+        return ApolloTabBarRevealResultUnsupported;
+    }
+    id interaction = sApolloRevealInteractionIvar
+        ? object_getIvar(provider, sApolloRevealInteractionIvar) : nil;
+    if (!interaction) return ApolloTabBarRevealResultTransient;
+
+    if (UIAccessibilityIsReduceMotionEnabled()) {
+        @try {
+            ((void (*)(id, SEL, id, double, BOOL))objc_msgSend)(
+                provider, callback, interaction, 0.0, NO);
+            return ApolloTabBarRevealResultStarted;
+        } @catch (NSException *exception) {
+            ApolloLog(@"[AutoHideTabBarFix] Reduced-motion reveal failed: %@", exception.name);
+            return ApolloTabBarRevealResultUnsupported;
+        }
+    }
+
+    ApolloTabBarRevealAnimator *animator =
+        [[ApolloTabBarRevealAnimator alloc] initWithController:tbc
+                                                      provider:provider
+                                                   interaction:interaction];
+    state.revealAnimator = animator;
+    [animator start];
+    ApolloLog(@"[AutoHideTabBarFix] Started animated reveal reason=%@ morph=%ld",
+              reason ?: @"unknown", (long)morphTarget);
+    return ApolloTabBarRevealResultStarted;
+}
+
+static void ApolloFinishAnimatedTabBarReveal(UITabBarController *tbc) {
+    ApolloTabBarRevealAnimator *animator = ApolloRuntimeState(tbc, NO).revealAnimator;
+    [animator finishProviderTracking];
+}
+
+static BOOL ApolloReverseAnimatedTabBarRevealTowardCollapsed(UITabBarController *tbc) {
+    ApolloTabBarRevealAnimator *animator = ApolloRuntimeState(tbc, NO).revealAnimator;
+    if (!animator) return NO;
+    [animator retargetToProgress:1.0];
+    return YES;
+}
+
 static void ApolloCancelIdleRevealTimer(UITabBarController *tbc) {
-    if (!tbc) return;
-    dispatch_source_t timer = objc_getAssociatedObject(tbc, &kApolloIdleRevealTimerKey);
-    if (!timer) return;
-    dispatch_source_cancel(timer);
-    objc_setAssociatedObject(tbc, &kApolloIdleRevealTimerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(tbc, &kApolloIdleRevealTimerScheduledAtKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, NO);
+    if (!state) return;
+    state.idleRevealGeneration += 1;
+    if (state.idleRevealTimer) dispatch_source_cancel(state.idleRevealTimer);
+    state.idleRevealTimer = nil;
+    state.idleRevealTimerScheduledAt = 0.0;
 }
 
 static void ApolloReapplyNativeMinimizeBehavior(UITabBarController *tbc, NSString *reason) {
@@ -327,7 +507,7 @@ static void ApolloReapplyNativeMinimizeBehavior(UITabBarController *tbc, NSStrin
 
     BOOL anyWantsMinimize = ApolloTabBarControllerWantsNativeMinimize(tbc);
     ApolloCancelIdleRevealTimer(tbc);
-    ApolloClearCustomRevealState(tbc);
+    ApolloFinishAnimatedTabBarReveal(tbc);
 
     ApolloTabBarMinimizeBehavior behavior = anyWantsMinimize
         ? ApolloTabBarMinimizeBehaviorOnScrollDown
@@ -342,7 +522,6 @@ static void ApolloReconcileNativeMinimizeBehaviorAfterActivation(UITabBarControl
     if (!tbc || !ApolloSupportsNativeTabBarMinimize()) return;
 
     BOOL anyWantsMinimize = ApolloTabBarControllerWantsNativeMinimize(tbc);
-    ApolloClearCustomRevealState(tbc);
     ApolloTabBarMinimizeBehavior behavior = anyWantsMinimize
         ? ApolloTabBarMinimizeBehaviorOnScrollDown
         : ApolloTabBarMinimizeBehaviorNever;
@@ -582,15 +761,41 @@ static void ApolloHideTabBar(UITabBarController *tbc, BOOL animated) {
     [CATransaction commit];
 }
 
+static void ApolloRetryTransientIdleReveal(UITabBarController *tbc,
+                                           NSInteger generation,
+                                           NSInteger attempt) {
+    if (!tbc || attempt >= ApolloIdleRevealMaxTransientRetries) return;
+    __weak UITabBarController *weakTBC = tbc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+        (int64_t)(ApolloIdleRevealTransientRetrySeconds * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+        UITabBarController *strongTBC = weakTBC;
+        if (!strongTBC ||
+            UIApplication.sharedApplication.applicationState != UIApplicationStateActive ||
+            !sAutoHideTabBarShowOnIdle ||
+            !ApolloTabBarControllerWantsNativeMinimize(strongTBC) ||
+            ApolloRuntimeState(strongTBC, NO).idleRevealGeneration != generation) return;
+
+        ApolloTabBarRevealResult result =
+            ApolloStartAnimatedTabBarReveal(strongTBC, @"idle transient retry");
+        if (result == ApolloTabBarRevealResultTransient) {
+            ApolloRetryTransientIdleReveal(strongTBC, generation, attempt + 1);
+        }
+    });
+}
+
 static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc) {
-    if (!tbc || !sAutoHideTabBarShowOnIdle || ApolloCustomRevealIsActive(tbc) ||
+    if (!tbc || !sAutoHideTabBarShowOnIdle ||
         !ApolloTabBarControllerWantsNativeMinimize(tbc)) return;
 
     NSTimeInterval now = CACurrentMediaTime();
-    NSNumber *lastScheduled = objc_getAssociatedObject(tbc, &kApolloIdleRevealTimerScheduledAtKey);
-    dispatch_source_t existingTimer = objc_getAssociatedObject(tbc, &kApolloIdleRevealTimerKey);
-    if (existingTimer && [lastScheduled isKindOfClass:[NSNumber class]] &&
-        now - lastScheduled.doubleValue < ApolloIdleRevealRescheduleInterval) {
+    ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, YES);
+    // Every meaningful scroll update invalidates a transient retry, even when
+    // the 250ms throttle lets the existing dispatch-source deadline stand.
+    state.idleRevealGeneration += 1;
+    dispatch_source_t existingTimer = state.idleRevealTimer;
+    if (existingTimer && state.idleRevealTimerScheduledAt > 0.0 &&
+        now - state.idleRevealTimerScheduledAt < ApolloIdleRevealRescheduleInterval) {
         return;
     }
 
@@ -599,7 +804,7 @@ static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc) {
                                   dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ApolloIdleRevealDelaySeconds * NSEC_PER_SEC)),
                                   DISPATCH_TIME_FOREVER,
                                   (uint64_t)(50 * NSEC_PER_MSEC));
-        objc_setAssociatedObject(tbc, &kApolloIdleRevealTimerScheduledAtKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        state.idleRevealTimerScheduledAt = now;
         return;
     }
 
@@ -614,8 +819,9 @@ static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc) {
     dispatch_source_set_event_handler(timer, ^{
         UITabBarController *strongTBC = weakTBC;
         if (!strongTBC) return;
-        objc_setAssociatedObject(strongTBC, &kApolloIdleRevealTimerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(strongTBC, &kApolloIdleRevealTimerScheduledAtKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloTabBarRuntimeState *strongState = ApolloRuntimeState(strongTBC, NO);
+        strongState.idleRevealTimer = nil;
+        strongState.idleRevealTimerScheduledAt = 0.0;
         // A timer armed before backgrounding fires immediately (overdue) when
         // the process resumes — its .never/.onScrollDown pulse would then land
         // exactly as the user's first post-foreground gesture begins. The
@@ -623,32 +829,24 @@ static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc) {
         // this covers the race where the overdue fire beats that observer.
         if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
         if (!sAutoHideTabBarShowOnIdle || !ApolloTabBarControllerWantsNativeMinimize(strongTBC)) return;
-        ApolloApplyMinimizeBehavior(strongTBC, ApolloTabBarMinimizeBehaviorNever);
-        __weak UITabBarController *rearmTBC = strongTBC;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(ApolloIdleRevealRearmDelaySeconds * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            UITabBarController *rearmStrongTBC = rearmTBC;
-            if (!rearmStrongTBC || !sAutoHideTabBarShowOnIdle || !ApolloTabBarControllerWantsNativeMinimize(rearmStrongTBC)) return;
-            // Same resume hazard as the timer handler above: if the app
-            // suspends inside this 0.5s window, the block fires overdue at
-            // resume and would write policy during UIKit's foreground
-            // restoration, ahead of the didBecomeActive reconcile.
-            if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
-            // A custom upward reveal can arm inside the window too; its
-            // token-owned re-arm (settle-floor deferred) supersedes this
-            // un-tokened one — clobbering it here would collapse the bar the
-            // user just deliberately expanded.
-            if (ApolloCustomRevealIsActive(rearmStrongTBC)) return;
-            // Scrolling may already have scheduled the next idle pulse. That
-            // timer does not supersede restoring the stable interactive
-            // policy from this completed pulse; otherwise the controller can
-            // remain stuck on .never until the next 30-second idle fire.
-            ApolloApplyMinimizeBehavior(rearmStrongTBC, ApolloTabBarMinimizeBehaviorOnScrollDown);
-        });
+        NSInteger fireGeneration = strongState.idleRevealGeneration;
+        // Keep .onScrollDown armed while the provider performs its own morph.
+        // This is what makes the first post-idle downward gesture collapse;
+        // the old .never -> delayed .onScrollDown pulse missed that gesture.
+        ApolloTabBarRevealResult result = ApolloStartAnimatedTabBarReveal(strongTBC, @"idle");
+        if (result == ApolloTabBarRevealResultTransient) {
+            ApolloRetryTransientIdleReveal(strongTBC, fireGeneration, 0);
+            return;
+        }
+        if (result != ApolloTabBarRevealResultUnsupported) return;
+        // A future UIKit layout may remove or change the private provider
+        // callback. Fail open by leaving .onScrollDown untouched: skipping one
+        // idle reveal is preferable to resurrecting the old .never -> delayed
+        // re-arm path that consumed the user's next downward gesture.
+        ApolloLog(@"[AutoHideTabBarFix] Animated idle reveal unavailable; leaving native policy armed");
     });
-    objc_setAssociatedObject(tbc, &kApolloIdleRevealTimerKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(tbc, &kApolloIdleRevealTimerScheduledAtKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    state.idleRevealTimer = timer;
+    state.idleRevealTimerScheduledAt = now;
     dispatch_resume(timer);
 }
 
@@ -796,6 +994,10 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 
 - (void)setHidesBarsOnSwipe:(BOOL)value {
     if (ApolloSupportsNativeTabBarMinimize()) {
+        // Apollo applies this app-wide preference to each navigation
+        // controller. Cache the effective prerequisite so dormant tweak
+        // preferences can leave the global scroll hook on its cheapest path.
+        sApolloNativeHideBarsOnScrollEnabled = value;
         // Suppress Apollo's nav-bar hide-on-swipe; the native API only
         // collapses the tab bar so we want the nav bar to stay visible.
         ApolloStoreRequestedHidesBarsOnSwipe(self, value);
@@ -805,15 +1007,10 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
             ApolloTabBarMinimizeBehavior behavior = value
                 ? ApolloTabBarMinimizeBehaviorOnScrollDown
                 : ApolloTabBarMinimizeBehaviorNever;
-            // Apollo may repeat its YES configuration while the user-driven
-            // reveal intentionally holds .never. Do not let that unrelated
-            // setup call collapse the bar before the next downward gesture.
-            if (!value || !ApolloCustomRevealIsActive(tbc)) {
-                ApolloApplyMinimizeBehavior(tbc, behavior);
-            }
+            ApolloApplyMinimizeBehavior(tbc, behavior);
             if (!value) {
                 ApolloCancelIdleRevealTimer(tbc);
-                ApolloClearCustomRevealState(tbc);
+                ApolloFinishAnimatedTabBarReveal(tbc);
             }
         }
         return;
@@ -852,74 +1049,28 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
     %orig;
     if (self.window) {
         ApolloApplyScrollEdgeEffectStyle(self);
-        ApolloEnsureAutoHidePanObserver(self);
-    }
-}
-
-%new
-- (void)_apolloAutoHideTabBarPanChanged:(UIPanGestureRecognizer *)pan {
-    // The token/reveal bookkeeping below only serves Mode B's custom upward
-    // reveal. With the idle mode off this handler is pure overhead on every
-    // gesture; if the user turns it on mid-gesture, the setContentOffset
-    // fallback mints the missing token.
-    if (!sAutoHideTabBarShowOnIdle) return;
-
-    if (pan.state == UIGestureRecognizerStateBegan) {
-        NSNumber *token = @(++sApolloScrollGestureToken);
-        objc_setAssociatedObject(self, &kApolloScrollGestureTokenKey, token,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        ApolloSetUpwardRevealDistance(self, 0.0);
-
-        UITabBarController *tbc = ApolloTabBarControllerForScrollView(self);
-        NSNumber *revealToken = objc_getAssociatedObject(tbc, &kApolloCustomRevealGestureTokenKey);
-        if (ApolloCustomRevealIsActive(tbc) && ![token isEqual:revealToken]) {
-            // tabBarMinimizeBehavior must be in place when UIKit begins the
-            // pan. Changing .never -> .onScrollDown after contentOffset has
-            // already moved does not enroll that in-flight gesture in the
-            // collapse transition on iOS 27.
-            ApolloClearCustomRevealState(tbc);
-            ApolloApplyMinimizeBehavior(tbc, ApolloTabBarMinimizeBehaviorOnScrollDown);
-            ApolloLog(@"[AutoHideTabBarFix] Custom reveal re-armed before next gesture token=%@",
-                      token);
-        }
-    } else if (pan.state == UIGestureRecognizerStateEnded ||
-               pan.state == UIGestureRecognizerStateCancelled ||
-               pan.state == UIGestureRecognizerStateFailed) {
-        ApolloSetUpwardRevealDistance(self, 0.0);
-
-        // `token` can be nil for a pan that never delivered .began to our
-        // late-attached target — compare with nil-safe isEqual: on the token
-        // (nil receiver → NO), never isEqualToNumber: with a nil argument.
-        NSNumber *token = objc_getAssociatedObject(self, &kApolloScrollGestureTokenKey);
-        UITabBarController *tbc = ApolloTabBarControllerForScrollView(self);
-        NSNumber *revealToken = objc_getAssociatedObject(tbc, &kApolloCustomRevealGestureTokenKey);
-        if (ApolloCustomRevealIsActive(tbc) && [token isEqual:revealToken]) {
-            // Leave .never in place until UIKit has fully finished delivering
-            // the reveal gesture, AND until the expand morph has settled at
-            // target 0. When the finger lifts right as the reveal threshold
-            // crosses, an immediate re-arm lands mid-morph — and a behavior
-            // write during a morph restarts the glass transition (visible bar
-            // stutter; device logs showed re-arms 8ms after the reveal). Poll
-            // briefly for the stable expanded state; if a new gesture begins
-            // first, the began-branch re-arm above takes over via the token
-            // check, and the deadline fallback re-arms regardless so the
-            // controller can never wedge on .never.
-            ApolloRearmCustomRevealWhenExpanded(tbc, token, 0);
-        }
     }
 }
 
 - (void)setContentOffset:(CGPoint)contentOffset {
-    if (!sAutoHideTabBarShowOnIdle || !ApolloSupportsNativeTabBarMinimize() || !self.window ||
+    if ((!sAutoHideTabBarShowOnIdle && !sClassicTabBarScrollBehavior) ||
+        !sApolloNativeHideBarsOnScrollEnabled ||
+        !ApolloSupportsNativeTabBarMinimize() || !self.window ||
         !(self.tracking || self.dragging || self.decelerating)) {
         %orig(contentOffset);
         return;
     }
 
-    // AsyncDisplayKit's ASTableView does not reliably reach our inherited
-    // didMoveToWindow hook with the recognizer it ultimately scrolls with.
-    // Attach against the live recognizer from the path every scroller uses.
-    ApolloEnsureAutoHidePanObserver(self);
+    BOOL mainList = [self isKindOfClass:UITableView.class] ||
+                    [self isKindOfClass:UICollectionView.class];
+    BOOL userDriven = self.tracking || self.dragging;
+    // Classic mode only consumes vertical list gestures. Avoid walking the
+    // responder/controller hierarchy for every unrelated scroll view when the
+    // idle feature (which intentionally watches all scrolling) is disabled.
+    if (!sAutoHideTabBarShowOnIdle && (!mainList || !userDriven)) {
+        %orig(contentOffset);
+        return;
+    }
 
     CGPoint oldOffset = self.contentOffset;
     CGFloat deltaY = contentOffset.y - oldOffset.y;
@@ -929,55 +1080,17 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
     if (fabs(deltaY) >= 0.5) {
         tbc = ApolloTabBarControllerForScrollView(self);
         if (ApolloTabBarControllerWantsNativeMinimize(tbc)) {
-            // Same filter as the pan observer (see above): non-list scrollers
-            // never trigger a reveal, never mint tokens, and stay fully
-            // neutral to the reveal state machine. UIKit's native
-            // .onScrollDown collapse still tracks them on its own.
-            BOOL participates = ApolloAutoHideScrollViewParticipates(self);
-            BOOL userDriven = participates && (self.tracking || self.dragging);
-            NSNumber *gestureToken = userDriven ? ApolloScrollGestureToken(self) : nil;
-            BOOL customRevealActive = ApolloCustomRevealIsActive(tbc);
-
-            if (userDriven && deltaY > 0.0) {
-                ApolloSetUpwardRevealDistance(self, 0.0);
-            } else if (userDriven && deltaY < 0.0) {
-                if (!customRevealActive) {
-                    // Shared cached reader (ApolloCommon): UITabBar's private
-                    // _isMinimized accessor is Apple-app-assertion-guarded, so
-                    // the provider's stored morph target is the only safe read.
-                    BOOL morphKnown = NO;
-                    NSInteger morphTarget = ApolloTabBarVisualMorphTarget(tbc.tabBar, &morphKnown);
-
-                    // If UIKit has already reached target 0, the full bar is
-                    // open and forcing .never would only create an unnecessary
-                    // layout.
-                    if (!morphKnown || morphTarget != 0) {
-                        CGFloat upwardDistance = ApolloUpwardRevealDistance(self) + fabs(deltaY);
-                        if (upwardDistance >= ApolloUpwardRevealDistanceThreshold) {
-                            ApolloSetUpwardRevealDistance(self, 0.0);
-                            ApolloCancelIdleRevealTimer(tbc);
-                            objc_setAssociatedObject(tbc, &kApolloCustomRevealActiveKey, @YES,
-                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                            objc_setAssociatedObject(tbc, &kApolloCustomRevealGestureTokenKey,
-                                                     gestureToken,
-                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                            objc_setAssociatedObject(tbc, &kApolloCustomRevealStartedAtKey,
-                                                     @(CACurrentMediaTime()),
-                                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                            ApolloApplyMinimizeBehavior(tbc, ApolloTabBarMinimizeBehaviorNever);
-                            ApolloLog(@"[AutoHideTabBarFix] Custom upward reveal token=%@ morph=%ld known=%d",
-                                      gestureToken, (long)morphTarget, morphKnown);
-                        } else {
-                            ApolloSetUpwardRevealDistance(self, upwardDistance);
-                        }
-                    } else {
-                        ApolloSetUpwardRevealDistance(self, 0.0);
-                    }
-                }
-            } else if (deltaY > 0.0) {
-                ApolloSetUpwardRevealDistance(self, 0.0);
+            BOOL userDrivenTowardTop = mainList && userDriven && deltaY < 0.0;
+            BOOL userDrivenTowardBottom = mainList && userDriven && deltaY > 0.0;
+            if (sClassicTabBarScrollBehavior && userDrivenTowardTop) {
+                ApolloStartAnimatedTabBarReveal(tbc, @"classic upward scroll");
+            } else if (sClassicTabBarScrollBehavior && userDrivenTowardBottom) {
+                // Reverse the one synthetic driver instead of ending partial
+                // tracking and asking UIKit to settle it opposite the user's
+                // new direction while native scrolling begins collapsing.
+                ApolloReverseAnimatedTabBarRevealTowardCollapsed(tbc);
             }
-            shouldScheduleIdleReveal = YES;
+            shouldScheduleIdleReveal = sAutoHideTabBarShowOnIdle;
         }
     }
 
@@ -1010,8 +1123,10 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 %end
 
 %ctor {
+    sApolloNativeHideBarsOnScrollEnabled =
+        [[NSUserDefaults standardUserDefaults] boolForKey:@"HideBarsOnScroll"];
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-    [center addObserverForName:ApolloAutoHideTabBarShowOnIdleChangedNotification
+    [center addObserverForName:ApolloTabBarScrollBehaviorChangedNotification
                         object:nil
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(__unused NSNotification *notification) {
@@ -1041,7 +1156,7 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
         sPendingForegroundReconcile = YES;
         ApolloForEachVisibleTabBarController(^(UITabBarController *tbc) {
             ApolloCancelIdleRevealTimer(tbc);
-            ApolloClearCustomRevealState(tbc);
+            ApolloFinishAnimatedTabBarReveal(tbc);
         });
     }];
     [center addObserverForName:UIApplicationDidBecomeActiveNotification
