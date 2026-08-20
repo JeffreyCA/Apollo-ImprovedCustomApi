@@ -45,6 +45,14 @@
 //     Badge-"GIF" posts whose animation is a Texture animated image have no
 //     playing AVPlayer and no native progress strip; the strip refuses the
 //     hit outright (pointInside), so their touches pass through untouched.
+//   • GIF-mp4s usually have a real AVPlayer but NO native progress strip:
+//     Apollo creates videoGIFProgressView asynchronously and for feed GIFs
+//     mostly never does, so they read as a dead zone here even though the
+//     player is perfectly seekable. When a playable player exists and the
+//     native strip is missing, a fallback strip stands in for it (drawn to
+//     the native strip's shape, kept fresh by a timer that re-resolves the
+//     player each tick since feed players churn constantly). It hides again
+//     the moment Apollo's own strip shows up; pointInside accepts either.
 //
 // The touch strip is installed lazily from the cell visibility events of
 // LargePostCellNode (feed) and RichMediaHeaderCellNode/CommentsHeaderCellNode
@@ -78,6 +86,13 @@ static const CGFloat kStripHeight = 32.0;
 // The bottom-right corner of the video belongs to the mute button (and the
 // GIF badge). Touches there fall through to it.
 static const CGFloat kCornerExclusion = 56.0;
+
+// The fallback strip matches the native strip's shape: a 5pt bar pinned
+// across the bottom of the video picture.
+static const CGFloat kFallbackStripHeight = 5.0;
+
+// How often the fallback strip re-resolves its player and refreshes its fill.
+static const NSTimeInterval kFallbackTickInterval = 0.25;
 
 // A release that never moved this far is a tap.
 static const CGFloat kScrubSlop = 6.0;
@@ -245,6 +260,112 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
     return seconds;
 }
 
+#pragma mark - Fallback progress strip (GIF-mp4s without a native strip)
+
+// A visible stand-in for videoGIFProgressView on content that never gets one.
+// Purely visual: touches go to the invisible touch strip exactly as for
+// videos. Re-resolves its player on every tick rather than holding one, since
+// feed players are created and torn down constantly as cells scroll.
+@interface ApolloFeedScrubFallbackStrip : UIView
+@property (nonatomic, weak) id richMediaNode;
+@property (nonatomic, weak) id videoNode;
+@property (nonatomic, strong) UIView *fillView;
+@property (nonatomic, strong) NSTimer *tickTimer;
+@property (nonatomic, assign) CGFloat lastFraction;
+// While a scrub drag is live the finger owns the fill and the tick must not
+// fight it with the playhead.
+@property (nonatomic, assign) BOOL suspendAutoUpdates;
+- (void)setFillFraction:(CGFloat)fraction;
+@end
+
+@implementation ApolloFeedScrubFallbackStrip
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.userInteractionEnabled = NO;
+    self.clipsToBounds = YES;
+    self.hidden = YES;   // shown by the first tick that finds a playable player
+    self.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.3];
+
+    UIView *fill = [[UIView alloc] initWithFrame:CGRectZero];
+    fill.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.9];
+    [self addSubview:fill];
+    self.fillView = fill;
+    return self;
+}
+
+// Tick only while in a window; cells leaving the screen take their views out
+// of the window, which is exactly when ticking should stop. Block-based with
+// a weak self so the timer never pins the strip or its cell alive.
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (!self.window) {
+        [self.tickTimer invalidate];
+        self.tickTimer = nil;
+        return;
+    }
+    if (self.tickTimer) return;
+    __weak typeof(self) weakSelf = self;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:kFallbackTickInterval
+                                            repeats:YES
+                                              block:^(NSTimer *t) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) { [t invalidate]; return; }
+        [strongSelf tick];
+    }];
+    timer.tolerance = kFallbackTickInterval / 2.0;
+    // Common modes so the fill keeps moving while the feed scrolls.
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+    self.tickTimer = timer;
+    [self tick];
+}
+
+- (void)dealloc {
+    [_tickTimer invalidate];
+}
+
+- (void)tick {
+    if (self.suspendAutoUpdates) return;
+    if (!sFeedVideoScrubber) { self.hidden = YES; return; }
+
+    // Defer to Apollo's own strip the moment it materializes.
+    UIView *nativeStrip = NodeIvar(self.richMediaNode, "videoGIFProgressView");
+    if ([nativeStrip isKindOfClass:[UIView class]] && !nativeStrip.hidden) {
+        self.hidden = YES;
+        return;
+    }
+
+    AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(self.videoNode);
+    NSTimeInterval duration = player ? ScrubbableDuration(player) : 0;
+    if (!player || duration <= 0) {
+        self.hidden = YES;
+        return;
+    }
+
+    NSTimeInterval current = CMTimeGetSeconds(player.currentTime);
+    if (!isfinite(current) || current < 0) current = 0;
+    if (self.hidden) {
+        self.hidden = NO;
+        ApolloLog(@"[FeedScrubber] fallback strip live on %p (no native strip; duration=%.1fs)",
+                  (void *)self.richMediaNode, duration);
+    }
+    [self setFillFraction:(CGFloat)(current / duration)];
+}
+
+- (void)setFillFraction:(CGFloat)fraction {
+    self.lastFraction = MAX(0.0, MIN(1.0, fraction));
+    CGRect bounds = self.bounds;
+    self.fillView.frame = CGRectMake(0, 0, self.lastFraction * bounds.size.width, bounds.size.height);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self setFillFraction:self.lastFraction];
+}
+
+@end
+
 #pragma mark - Touch strip
 
 // One invisible UIControl per feed RichMediaNode, covering the bottom strip of
@@ -265,6 +386,7 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 @property (nonatomic, strong) AVPlayer *player;              // touch-scoped
 @property (nonatomic, assign) NSTimeInterval duration;       // touch-scoped
 @property (nonatomic, weak) UIView *nativeStripView;         // touch-scoped
+@property (nonatomic, weak) ApolloFeedScrubFallbackStrip *fallbackStrip;   // wired by EnsureScrubStrip
 @property (nonatomic, assign) BOOL pausedForScrub;           // touch-scoped
 @property (nonatomic, weak) UIScrollView *lockedScrollView;  // touch-scoped
 @property (nonatomic, assign) BOOL scrubbing;                // gesture Began..Ended
@@ -347,6 +469,7 @@ static NSTimeInterval ScrubbableDuration(AVPlayer *player) {
 @end
 
 static char kFeedScrubStripKey;
+static char kFeedScrubFallbackKey;
 
 @implementation ApolloFeedScrubStrip
 
@@ -406,6 +529,7 @@ static char kFeedScrubStripKey;
     RestoreCompetingGestures(_suspendedGestures);
     if (_pausedForScrub && _player) [_player play];
     if (_lockedScrollView) _lockedScrollView.scrollEnabled = YES;
+    _fallbackStrip.suspendAutoUpdates = NO;
 }
 
 #pragma mark Hit testing
@@ -421,9 +545,13 @@ static char kFeedScrubStripKey;
 
     // From here down the touch is genuinely on the strip, so a refusal is
     // worth naming — it is the difference between "scrub" and "dead zone".
+    // Either visible bar will do: Apollo's own strip, or the fallback one
+    // standing in for it on GIF-mp4s.
     UIView *nativeStrip = NodeIvar(self.richMediaNode, "videoGIFProgressView");
-    if (![nativeStrip isKindOfClass:[UIView class]] || nativeStrip.hidden) {
-        ApolloLog(@"[FeedScrubber] refusing touch: native strip %@",
+    BOOL nativeVisible = [nativeStrip isKindOfClass:[UIView class]] && !nativeStrip.hidden;
+    BOOL fallbackVisible = self.fallbackStrip && !self.fallbackStrip.hidden;
+    if (!nativeVisible && !fallbackVisible) {
+        ApolloLog(@"[FeedScrubber] refusing touch: native strip %@, no fallback",
                   nativeStrip ? @"hidden" : @"missing");
         return NO;
     }
@@ -506,6 +634,8 @@ static char kFeedScrubStripKey;
             self.hasPendingSeek = NO;
             UIView *nativeStrip = NodeIvar(self.richMediaNode, "videoGIFProgressView");
             self.nativeStripView = [nativeStrip isKindOfClass:[UIView class]] ? nativeStrip : nil;
+            // The finger owns the fallback's fill for the drag.
+            self.fallbackStrip.suspendAutoUpdates = YES;
 
             // UIKit's mutual exclusion already fails other recognizers on
             // this touch once we Begin — but Apollo's swipe-anywhere pans are
@@ -575,6 +705,7 @@ static char kFeedScrubStripKey;
 
 - (void)finishScrub {
     self.scrubbing = NO;
+    self.fallbackStrip.suspendAutoUpdates = NO;
     [self restoreSuspendedGestures];
     [self unlockScrollView];
     [self resumeIfPausedForScrub];
@@ -622,10 +753,15 @@ static char kFeedScrubStripKey;
 // fill view's frame is the least invasive way in — no Swift ivar writes.
 - (void)trackFingerOnNativeStrip:(CGFloat)fraction {
     UIView *fill = NodeIvar(self.nativeStripView, "progressBarView");
-    if (![fill isKindOfClass:[UIView class]] || !fill.superview) return;
-    CGRect frame = fill.frame;
-    frame.size.width = MAX(0.0, MIN(1.0, fraction)) * fill.superview.bounds.size.width;
-    fill.frame = frame;
+    if ([fill isKindOfClass:[UIView class]] && fill.superview) {
+        CGRect frame = fill.frame;
+        frame.size.width = MAX(0.0, MIN(1.0, fraction)) * fill.superview.bounds.size.width;
+        fill.frame = frame;
+        return;
+    }
+    // No native strip (GIF-mp4s): the fallback strip is the visible bar.
+    ApolloFeedScrubFallbackStrip *fallback = self.fallbackStrip;
+    if (fallback && !fallback.hidden) [fallback setFillFraction:fraction];
 }
 
 - (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
@@ -748,6 +884,30 @@ static void EnsureScrubStrip(id richMediaNode) {
                                    videoFrame.size.width,
                                    kStripHeight);
     strip.frame = stripFrame;
+
+    // The fallback bar for content whose native strip never shows up.
+    // Installed unconditionally and cheap when idle: its own tick hides it
+    // whenever the native strip exists or there is no playable player, so on
+    // ordinary videos it never appears.
+    ApolloFeedScrubFallbackStrip *fallback =
+        objc_getAssociatedObject(richMediaNode, &kFeedScrubFallbackKey);
+    if (!fallback) {
+        fallback = [[ApolloFeedScrubFallbackStrip alloc] initWithFrame:CGRectZero];
+        objc_setAssociatedObject(richMediaNode, &kFeedScrubFallbackKey, fallback,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    fallback.richMediaNode = richMediaNode;
+    fallback.videoNode = videoNode;
+    strip.fallbackStrip = fallback;
+    if (fallback.superview != host) [fallback removeFromSuperview];
+    if (!fallback.superview) [host addSubview:fallback];
+    fallback.frame = CGRectMake(videoFrame.origin.x,
+                                CGRectGetMaxY(videoFrame) - kFallbackStripHeight,
+                                videoFrame.size.width,
+                                kFallbackStripHeight);
+
+    // Touch strip stays on top of everything, fallback bar just under it.
+    [host bringSubviewToFront:fallback];
     [host bringSubviewToFront:strip];
 }
 
