@@ -62,7 +62,15 @@ static const NSTimeInterval ApolloIdleRevealRescheduleInterval = 0.25;
 static const NSTimeInterval ApolloAnimatedRevealDurationSeconds = 0.18;
 static const NSTimeInterval ApolloIdleRevealTransientRetrySeconds = 0.12;
 static const NSInteger ApolloIdleRevealMaxTransientRetries = 8;
-static BOOL sApolloNativeHideBarsOnScrollEnabled = NO;
+// Process-wide prerequisite cache. This must mirror Apollo's persisted
+// preference, not the most recent UINavigationController setter argument:
+// individual navigation contexts can temporarily request NO during lifecycle
+// restoration even while the app-wide setting remains enabled.
+static BOOL sApolloNativeHideBarsOnScrollPreferenceEnabled = NO;
+
+static BOOL ApolloNativeHideBarsOnScrollPreferenceEnabled(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"HideBarsOnScroll"];
+}
 
 @class ApolloTabBarRevealAnimator;
 
@@ -994,10 +1002,19 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 
 - (void)setHidesBarsOnSwipe:(BOOL)value {
     if (ApolloSupportsNativeTabBarMinimize()) {
-        // Apollo applies this app-wide preference to each navigation
-        // controller. Cache the effective prerequisite so dormant tweak
-        // preferences can leave the global scroll hook on its cheapest path.
-        sApolloNativeHideBarsOnScrollEnabled = value;
+        // Apollo usually applies its app-wide preference to each navigation
+        // controller, but controller-local lifecycle restoration can also call
+        // this setter with NO. Never let one such call disable the classic
+        // reveal hook process-wide while the persisted setting is still ON.
+        // Reading defaults here is off the scroll hot path and also picks up a
+        // real settings change before Apollo's notification reaches every nav.
+        sApolloNativeHideBarsOnScrollPreferenceEnabled =
+            ApolloNativeHideBarsOnScrollPreferenceEnabled();
+        if (value != sApolloNativeHideBarsOnScrollPreferenceEnabled) {
+            ApolloLog(@"[AutoHideTabBarFix] Ignoring controller-local hidesBarsOnSwipe=%d for global prerequisite; preference=%d controller=%@",
+                      value, sApolloNativeHideBarsOnScrollPreferenceEnabled,
+                      NSStringFromClass([self class]));
+        }
         // Suppress Apollo's nav-bar hide-on-swipe; the native API only
         // collapses the tab bar so we want the nav bar to stay visible.
         ApolloStoreRequestedHidesBarsOnSwipe(self, value);
@@ -1054,7 +1071,7 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 
 - (void)setContentOffset:(CGPoint)contentOffset {
     if ((!sAutoHideTabBarShowOnIdle && !sClassicTabBarScrollBehavior) ||
-        !sApolloNativeHideBarsOnScrollEnabled ||
+        !sApolloNativeHideBarsOnScrollPreferenceEnabled ||
         !ApolloSupportsNativeTabBarMinimize() || !self.window ||
         !(self.tracking || self.dragging || self.decelerating)) {
         %orig(contentOffset);
@@ -1123,13 +1140,15 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 %end
 
 %ctor {
-    sApolloNativeHideBarsOnScrollEnabled =
-        [[NSUserDefaults standardUserDefaults] boolForKey:@"HideBarsOnScroll"];
+    sApolloNativeHideBarsOnScrollPreferenceEnabled =
+        ApolloNativeHideBarsOnScrollPreferenceEnabled();
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
     [center addObserverForName:ApolloTabBarScrollBehaviorChangedNotification
                         object:nil
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(__unused NSNotification *notification) {
+        sApolloNativeHideBarsOnScrollPreferenceEnabled =
+            ApolloNativeHideBarsOnScrollPreferenceEnabled();
         ApolloForEachVisibleTabBarController(^(UITabBarController *tbc) {
             ApolloCancelIdleRevealTimer(tbc);
             ApolloReapplyNativeMinimizeBehavior(tbc, @"idleModeChanged");
@@ -1154,6 +1173,11 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(__unused NSNotification *notification) {
         sPendingForegroundReconcile = YES;
+        // Heal the process-wide fast-path cache from the source of truth. A
+        // controller-local setter call during suspension/restore must not make
+        // classic reveal remain dormant until the next process launch.
+        sApolloNativeHideBarsOnScrollPreferenceEnabled =
+            ApolloNativeHideBarsOnScrollPreferenceEnabled();
         ApolloForEachVisibleTabBarController(^(UITabBarController *tbc) {
             ApolloCancelIdleRevealTimer(tbc);
             ApolloFinishAnimatedTabBarReveal(tbc);
