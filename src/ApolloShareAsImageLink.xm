@@ -506,54 +506,23 @@ static BOOL ApolloShareLinkAlreadyHasLinkSource(NSArray *items) {
 
 #pragma mark - Copy Link support
 
-// Apollo's custom Copy Link activity receives the rewritten share URL, but
-// performs its own internal copy operation. Cache the rewritten URL during
-// activity preparation, then replace the clipboard after Apollo finishes.
-static char kApolloCopyURLActivityURLKey;
-
+// Apollo's "Copy Link" share-sheet action is its own UIActivity subclass, and it
+// does NOT read the share sheet's activity items. Apollo constructs it up front as
+// `CopyURLActivity(url:)` and hands it over in `applicationActivities`; its
+// -canPerformWithActivityItems: is a bare `return YES` and -performActivity just
+// does `UIPasteboard.general.url = self.url` off that stored Swift URL property.
+//
+// So the UIActivityViewController hook above — which rewrites the *items* — never
+// reaches it: the sheet's preview and every system destination showed the selected
+// host while Copy Link still pasted the stock reddit.com link (issue #967).
+//
+// That stored property is a Swift `Foundation.URL` value laid out inline in the
+// instance, not an NSURL pointer, so reading it from ObjC is not safe across iOS
+// releases. Instead let Apollo perform its own copy and then correct the
+// pasteboard: the pasteboard is the one place the final value is observable no
+// matter how Apollo produced it, and correcting it needs no knowledge of the
+// activity's internals.
 %hook _TtC6Apollo15CopyURLActivity
-
-- (BOOL)canPerformWithActivityItems:(NSArray *)activityItems {
-    if (sShareLinkHost == ShareLinkHostDefault) return %orig;
-
-    NSURL *rewrittenURL = nil;
-
-    if ([activityItems isKindOfClass:[NSArray class]]) {
-        for (id item in activityItems) {
-            if ([item isKindOfClass:[NSURL class]]) {
-                NSURL *originalURL = (NSURL *)item;
-                NSURL *candidate = ApolloShareLinkRewriteURLForCurrentHost(originalURL);
-                if (candidate != originalURL) {
-                    rewrittenURL = candidate;
-                    break;
-                }
-            }
-
-            if ([item isKindOfClass:[NSString class]]) {
-                NSURL *originalURL = [NSURL URLWithString:(NSString *)item];
-                NSURL *candidate = ApolloShareLinkRewriteURLForCurrentHost(originalURL);
-                if (candidate != originalURL) {
-                    rewrittenURL = candidate;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (rewrittenURL) {
-        objc_setAssociatedObject(self,
-                                 &kApolloCopyURLActivityURLKey,
-                                 rewrittenURL,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else {
-        objc_setAssociatedObject(self,
-                                 &kApolloCopyURLActivityURLKey,
-                                 nil,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-
-    return %orig;
-}
 
 - (void)performActivity {
     if (sShareLinkHost == ShareLinkHostDefault) {
@@ -561,22 +530,26 @@ static char kApolloCopyURLActivityURLKey;
         return;
     }
 
-    NSURL *rewrittenURL =
-        objc_getAssociatedObject(self, &kApolloCopyURLActivityURLKey);
+    %orig; // Apollo copies its own URL (and shows its "Copied!" toast).
 
-    if (![rewrittenURL isKindOfClass:[NSURL class]]) {
-        ApolloLog(@"[ShareLink] CopyURLActivity had no cached URL; using stock behavior");
-        %orig;
+    UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+    NSURL *copied = pasteboard.URL;
+    if (![copied isKindOfClass:[NSURL class]]) {
+        ApolloLog(@"[ShareLink] CopyURLActivity: pasteboard holds no URL — leaving it alone");
         return;
     }
 
-    // Preserve Apollo's normal Copy Link behavior, then correct the final
-    // pasteboard value using the URL captured from the rewritten share items.
-    %orig;
-    [UIPasteboard generalPasteboard].URL = rewrittenURL;
+    NSURL *rewritten = ApolloShareLinkRewriteURLForCurrentHost(copied);
+    if (rewritten == copied) {
+        // Not a Reddit web host (Apollo also uses this activity for e.g. YouTube
+        // links), so the selected share host does not apply — leave it as copied.
+        ApolloLog(@"[ShareLink] CopyURLActivity: copied host %@ is not a Reddit host — unchanged",
+                  copied.host ?: @"(none)");
+        return;
+    }
 
-    ApolloLog(@"[ShareLink] CopyURLActivity replaced copied URL=%@",
-              rewrittenURL.absoluteString);
+    pasteboard.URL = rewritten;
+    ApolloLog(@"[ShareLink] CopyURLActivity rewrote copied URL to %@", rewritten.absoluteString);
 }
 
 %end
