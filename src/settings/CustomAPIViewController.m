@@ -260,7 +260,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     sClassicTabBarScrollBehavior = NO;
     [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyAutoHideTabBarShowOnIdle];
     [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyClassicTabBarScrollBehavior];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloTabBarScrollBehaviorChangedNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTabBarScrollBehaviorChangedNotification object:nil];
 }
 
 - (void)setPreferredGIFFallbackFormat:(NSInteger)format {
@@ -1456,9 +1456,9 @@ typedef NS_ENUM(NSInteger, Tag) {
             BOOL hideBarsOnScroll = [weakSelf apollo_nativeHideBarsOnScrollEnabled];
             BOOL enabled = supported && hideBarsOnScroll;
             UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_TabBarIdle"
-                                                                 label:@"Tab Bar Re-Expands When Idle"
+                                                                label:@"Tab Bar Re-Expands When Idle"
                                                                 detail:hideBarsOnScroll
-                                                                    ? @"Re-expands after scrolling has been idle for 30 seconds."
+                                                                    ? @"Re-expands after 30 seconds idle or when scrolling toward the top. Retains the two-gesture collapse."
                                                                     : @"Turn on Hide Bars on Scroll in General settings to use this option."
                                                                     on:supported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle]
                                                                enabled:enabled
@@ -1476,7 +1476,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_ClassicTabBarScroll"
                                                                  label:@"Classic Tab Bar Scroll Behavior"
                                                                 detail:hideBarsOnScroll
-                                                                    ? @"Expands as soon as you scroll back toward the top, then hides again on the next downward scroll."
+                                                                    ? @"Hide and expand the tab bar with one scroll gesture."
                                                                     : @"Turn on Hide Bars on Scroll in General settings to use this option."
                                                                     on:supported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyClassicTabBarScrollBehavior]
                                                                enabled:enabled
@@ -3596,7 +3596,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         sender.on = NO;
         sAutoHideTabBarShowOnIdle = NO;
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyAutoHideTabBarShowOnIdle];
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloTabBarScrollBehaviorChangedNotification" object:nil];
+        [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTabBarScrollBehaviorChangedNotification object:nil];
         return;
     }
     if (![self apollo_nativeHideBarsOnScrollEnabled]) {
@@ -3608,7 +3608,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
     sAutoHideTabBarShowOnIdle = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sAutoHideTabBarShowOnIdle forKey:UDKeyAutoHideTabBarShowOnIdle];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloTabBarScrollBehaviorChangedNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTabBarScrollBehaviorChangedNotification object:nil];
 }
 
 - (void)classicTabBarScrollBehaviorSwitchToggled:(UISwitch *)sender {
@@ -3631,7 +3631,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                             forKey:UDKeyClassicTabBarScrollBehavior];
     // Turning the mode off must also end a reveal already in flight. Reuse the
     // module's reconciliation notification; it leaves the native policy armed.
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloTabBarScrollBehaviorChangedNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTabBarScrollBehaviorChangedNotification object:nil];
 }
 
 - (void)iPadTabBarBottomSwitchToggled:(UISwitch *)sender {

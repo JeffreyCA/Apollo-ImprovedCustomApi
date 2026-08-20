@@ -132,6 +132,9 @@ extern BOOL sCommunityHighlights;
 // Reddit's REST API exposes. See ApolloSubredditHighlights.xm (ApolloHLWebFetch).
 extern BOOL sCommunityHighlightsWeb;
 extern BOOL sAutoHideTabBarShowOnIdle;
+// Posted after either Liquid Glass tab-bar scroll preference changes so the
+// runtime can cancel in-flight work and reconcile the native policy.
+extern NSString *const ApolloTabBarScrollBehaviorChangedNotification;
 // Opt-in classic bidirectional Liquid Glass tab-bar behavior. See
 // ApolloAutoHideTabBar.xm and UDKeyClassicTabBarScrollBehavior.
 extern BOOL sClassicTabBarScrollBehavior;

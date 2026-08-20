@@ -21,13 +21,13 @@
 //   nav bar stays put (true Liquid Glass feel; native API only minimizes the
 //   tab bar). When the toggle is OFF we restore .never (raw value 1).
 //
-//   Mode B ("Tab Bar Re-Expands When Idle") keeps the same native interactive
-//   behavior and adds only a longer idle expansion. "Classic Tab Bar Scroll
-//   Behavior" additionally restores Apollo's old bidirectional response on
-//   iOS 27: the first motion back toward the top expands the pill immediately.
-//   Both reveals drive UIKit's floating visual provider directly while leaving
-//   .onScrollDown installed, so expansion morphs instead of snapping and the
-//   very next downward gesture remains enrolled for collapse.
+//   Mode B ("Tab Bar Re-Expands When Idle") preserves its established legacy
+//   semantics: a deliberate reverse scroll expands before the top, and the
+//   first following collapse gesture re-arms the native policy so the second
+//   collapses. "Classic Tab Bar Scroll Behavior" opts into the normalized
+//   one-gesture response: reverse motion expands and the very next downward
+//   gesture collapses. Both expansion paths use UIKit's floating visual
+//   provider so iOS 27 morphs smoothly instead of snapping.
 //
 // iOS <26 (legacy mirror):
 //   Apollo's hide-on-swipe hides the bottom UITabBar but never restores it.
@@ -53,8 +53,9 @@ typedef NS_ENUM(NSInteger, ApolloTabBarMinimizeBehavior) {
 
 static char kApolloRequestedHidesBarsOnSwipeKey;
 static char kApolloTabBarRuntimeStateKey;
+static char kApolloTabBarScrollRuntimeStateKey;
+static char kApolloAutoHidePanObserverAttachedKey;
 
-static NSString *const ApolloTabBarScrollBehaviorChangedNotification = @"ApolloTabBarScrollBehaviorChangedNotification";
 static const NSTimeInterval ApolloIdleRevealDelaySeconds = 30.0;
 static const NSTimeInterval ApolloIdleRevealRescheduleInterval = 0.25;
 // UIKit's native collapse settles quickly; use the same compact cadence for
@@ -62,6 +63,9 @@ static const NSTimeInterval ApolloIdleRevealRescheduleInterval = 0.25;
 static const NSTimeInterval ApolloAnimatedRevealDurationSeconds = 0.18;
 static const NSTimeInterval ApolloIdleRevealTransientRetrySeconds = 0.12;
 static const NSInteger ApolloIdleRevealMaxTransientRetries = 8;
+static const CGFloat ApolloLegacyUpwardRevealDistanceThreshold = 120.0;
+static const NSTimeInterval ApolloLegacyRevealHoldDelaySeconds = 0.24;
+static NSUInteger sApolloScrollGestureToken = 0;
 // Process-wide prerequisite cache. This must mirror Apollo's persisted
 // preference, not the most recent UINavigationController setter argument:
 // individual navigation contexts can temporarily request NO during lifecycle
@@ -74,6 +78,10 @@ static BOOL ApolloNativeHideBarsOnScrollPreferenceEnabled(void) {
 
 @class ApolloTabBarRevealAnimator;
 
+@interface UIScrollView (ApolloAutoHidePan)
+- (void)_apolloAutoHideTabBarPanChanged:(UIPanGestureRecognizer *)pan;
+@end
+
 // One controller-owned mutable state object replaces the former collection of
 // boxed associated values. In particular, scroll-frame timer resets now mutate
 // primitive fields without allocating an NSNumber on every content-offset
@@ -85,6 +93,10 @@ static BOOL ApolloNativeHideBarsOnScrollPreferenceEnabled(void) {
 @property (nonatomic, assign) NSTimeInterval idleRevealTimerScheduledAt;
 @property (nonatomic, assign) NSInteger idleRevealGeneration;
 @property (nonatomic, strong) ApolloTabBarRevealAnimator *revealAnimator;
+@property (nonatomic, assign) BOOL legacyIdleRevealActive;
+@property (nonatomic, assign) BOOL legacyIdleRearmAfterGesture;
+@property (nonatomic, assign) NSUInteger legacyIdleRevealGestureToken;
+@property (nonatomic, assign) NSInteger legacyIdleRevealGeneration;
 @end
 
 @implementation ApolloTabBarRuntimeState
@@ -98,6 +110,29 @@ static ApolloTabBarRuntimeState *ApolloRuntimeState(UITabBarController *tbc,
     if (!state && create) {
         state = [ApolloTabBarRuntimeState new];
         objc_setAssociatedObject(tbc, &kApolloTabBarRuntimeStateKey, state,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return state;
+}
+
+// Per-list primitives keep the legacy idle-only gesture semantics without
+// bringing back NSNumber allocation on every content-offset update.
+@interface ApolloTabBarScrollRuntimeState : NSObject
+@property (nonatomic, assign) NSUInteger gestureToken;
+@property (nonatomic, assign) CGFloat upwardRevealDistance;
+@end
+
+@implementation ApolloTabBarScrollRuntimeState
+@end
+
+static ApolloTabBarScrollRuntimeState *ApolloScrollRuntimeState(UIScrollView *scrollView,
+                                                                 BOOL create) {
+    if (!scrollView) return nil;
+    ApolloTabBarScrollRuntimeState *state =
+        objc_getAssociatedObject(scrollView, &kApolloTabBarScrollRuntimeStateKey);
+    if (!state && create) {
+        state = [ApolloTabBarScrollRuntimeState new];
+        objc_setAssociatedObject(scrollView, &kApolloTabBarScrollRuntimeStateKey, state,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     return state;
@@ -501,6 +536,91 @@ static BOOL ApolloReverseAnimatedTabBarRevealTowardCollapsed(UITabBarController 
     return YES;
 }
 
+static BOOL ApolloLegacyIdleRevealIsActive(UITabBarController *tbc) {
+    return ApolloRuntimeState(tbc, NO).legacyIdleRevealActive;
+}
+
+static void ApolloClearLegacyIdleRevealState(UITabBarController *tbc) {
+    ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, NO);
+    if (!state) return;
+    state.legacyIdleRevealGeneration += 1;
+    state.legacyIdleRevealActive = NO;
+    state.legacyIdleRearmAfterGesture = NO;
+    state.legacyIdleRevealGestureToken = 0;
+}
+
+// Idle-only mode historically leaves the native behavior at .never after an
+// expansion. The first subsequent finger gesture merely restores
+// .onScrollDown; UIKit enrolls the following gesture, producing the legacy
+// two-gesture collapse that the separate Classic toggle was added to replace.
+// Apply that hold only after our provider animation reaches its expanded
+// target, otherwise changing behavior up front would bring back iOS 27's snap.
+static void ApolloApplyLegacyIdleRevealHold(UITabBarController *tbc,
+                                            NSInteger generation,
+                                            NSInteger attempt) {
+    __weak UITabBarController *weakTBC = tbc;
+    NSTimeInterval delay = attempt == 0 ? ApolloLegacyRevealHoldDelaySeconds : 0.05;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+        (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UITabBarController *strongTBC = weakTBC;
+        ApolloTabBarRuntimeState *state = ApolloRuntimeState(strongTBC, NO);
+        if (!strongTBC || !state ||
+            UIApplication.sharedApplication.applicationState != UIApplicationStateActive ||
+            !sAutoHideTabBarShowOnIdle || sClassicTabBarScrollBehavior ||
+            !ApolloTabBarControllerWantsNativeMinimize(strongTBC) ||
+            !state.legacyIdleRevealActive ||
+            state.legacyIdleRevealGeneration != generation) return;
+
+        BOOL morphKnown = NO;
+        NSInteger morphTarget = ApolloTabBarVisualMorphTarget(strongTBC.tabBar, &morphKnown);
+        if (morphKnown && morphTarget == 0) {
+            ApolloApplyMinimizeBehavior(strongTBC, ApolloTabBarMinimizeBehaviorNever);
+            ApolloLog(@"[AutoHideTabBarFix] Legacy idle-only reveal hold armed generation=%ld",
+                      (long)generation);
+            return;
+        }
+        // A delayed main-runloop/display-link frame can leave the stored target
+        // briefly at 2 even though our reveal animator is still driving toward
+        // 0. Never abandon the legacy hold while that animation is alive.
+        BOOL revealAnimationActive = state.revealAnimator != nil;
+        if ((revealAnimationActive || !morphKnown || morphTarget == 1) && attempt < 6) {
+            ApolloApplyLegacyIdleRevealHold(strongTBC, generation, attempt + 1);
+            return;
+        }
+
+        // The bar returned to its minimized target before the hold could be
+        // installed. Abandon this reveal rather than applying .never late and
+        // expanding against a newer downward gesture.
+        ApolloClearLegacyIdleRevealState(strongTBC);
+    });
+}
+
+static ApolloTabBarRevealResult ApolloStartLegacyIdleReveal(UITabBarController *tbc,
+                                                             NSString *reason,
+                                                             NSUInteger gestureToken) {
+    ApolloTabBarRevealResult result = ApolloStartAnimatedTabBarReveal(tbc, reason);
+    if (result == ApolloTabBarRevealResultTransient ||
+        result == ApolloTabBarRevealResultAlreadyExpanded) return result;
+
+    ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, YES);
+    state.legacyIdleRevealGeneration += 1;
+    NSInteger generation = state.legacyIdleRevealGeneration;
+    state.legacyIdleRevealActive = YES;
+    state.legacyIdleRearmAfterGesture = NO;
+    state.legacyIdleRevealGestureToken = gestureToken;
+
+    if (result == ApolloTabBarRevealResultUnsupported) {
+        // Preserve the established idle-only behavior if a future provider
+        // layout defeats the animation bridge. This is intentionally limited
+        // to the legacy mode; Classic mode always fails open to native UIKit.
+        ApolloApplyMinimizeBehavior(tbc, ApolloTabBarMinimizeBehaviorNever);
+        return ApolloTabBarRevealResultStarted;
+    }
+
+    ApolloApplyLegacyIdleRevealHold(tbc, generation, 0);
+    return result;
+}
+
 static void ApolloCancelIdleRevealTimer(UITabBarController *tbc) {
     ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, NO);
     if (!state) return;
@@ -516,6 +636,7 @@ static void ApolloReapplyNativeMinimizeBehavior(UITabBarController *tbc, NSStrin
     BOOL anyWantsMinimize = ApolloTabBarControllerWantsNativeMinimize(tbc);
     ApolloCancelIdleRevealTimer(tbc);
     ApolloFinishAnimatedTabBarReveal(tbc);
+    ApolloClearLegacyIdleRevealState(tbc);
 
     ApolloTabBarMinimizeBehavior behavior = anyWantsMinimize
         ? ApolloTabBarMinimizeBehaviorOnScrollDown
@@ -530,6 +651,7 @@ static void ApolloReconcileNativeMinimizeBehaviorAfterActivation(UITabBarControl
     if (!tbc || !ApolloSupportsNativeTabBarMinimize()) return;
 
     BOOL anyWantsMinimize = ApolloTabBarControllerWantsNativeMinimize(tbc);
+    ApolloClearLegacyIdleRevealState(tbc);
     ApolloTabBarMinimizeBehavior behavior = anyWantsMinimize
         ? ApolloTabBarMinimizeBehaviorOnScrollDown
         : ApolloTabBarMinimizeBehaviorNever;
@@ -784,8 +906,9 @@ static void ApolloRetryTransientIdleReveal(UITabBarController *tbc,
             !ApolloTabBarControllerWantsNativeMinimize(strongTBC) ||
             ApolloRuntimeState(strongTBC, NO).idleRevealGeneration != generation) return;
 
-        ApolloTabBarRevealResult result =
-            ApolloStartAnimatedTabBarReveal(strongTBC, @"idle transient retry");
+        ApolloTabBarRevealResult result = sClassicTabBarScrollBehavior
+            ? ApolloStartAnimatedTabBarReveal(strongTBC, @"idle transient retry")
+            : ApolloStartLegacyIdleReveal(strongTBC, @"idle transient retry", 0);
         if (result == ApolloTabBarRevealResultTransient) {
             ApolloRetryTransientIdleReveal(strongTBC, generation, attempt + 1);
         }
@@ -838,10 +961,12 @@ static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc) {
         if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
         if (!sAutoHideTabBarShowOnIdle || !ApolloTabBarControllerWantsNativeMinimize(strongTBC)) return;
         NSInteger fireGeneration = strongState.idleRevealGeneration;
-        // Keep .onScrollDown armed while the provider performs its own morph.
-        // This is what makes the first post-idle downward gesture collapse;
-        // the old .never -> delayed .onScrollDown pulse missed that gesture.
-        ApolloTabBarRevealResult result = ApolloStartAnimatedTabBarReveal(strongTBC, @"idle");
+        // Classic mode keeps .onScrollDown armed so the first post-idle gesture
+        // collapses. Idle-only mode deliberately restores its historical
+        // .never hold, so the first gesture re-arms and the second collapses.
+        ApolloTabBarRevealResult result = sClassicTabBarScrollBehavior
+            ? ApolloStartAnimatedTabBarReveal(strongTBC, @"idle")
+            : ApolloStartLegacyIdleReveal(strongTBC, @"idle", 0);
         if (result == ApolloTabBarRevealResultTransient) {
             ApolloRetryTransientIdleReveal(strongTBC, fireGeneration, 0);
             return;
@@ -873,6 +998,44 @@ static UITabBarController *ApolloTabBarControllerForScrollView(UIScrollView *scr
         }
     }
     return nil;
+}
+
+static BOOL ApolloLegacyIdleScrollViewParticipates(UIScrollView *scrollView) {
+    return [scrollView isKindOfClass:UITableView.class] ||
+           [scrollView isKindOfClass:UICollectionView.class];
+}
+
+static void ApolloEnsureLegacyIdlePanObserver(UIScrollView *scrollView) {
+    if (!scrollView || !sAutoHideTabBarShowOnIdle || sClassicTabBarScrollBehavior ||
+        !ApolloSupportsNativeTabBarMinimize() ||
+        !ApolloLegacyIdleScrollViewParticipates(scrollView)) return;
+
+    UIPanGestureRecognizer *pan = scrollView.panGestureRecognizer;
+    if (!pan || objc_getAssociatedObject(pan, &kApolloAutoHidePanObserverAttachedKey)) return;
+    objc_setAssociatedObject(pan, &kApolloAutoHidePanObserverAttachedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [pan addTarget:scrollView action:@selector(_apolloAutoHideTabBarPanChanged:)];
+
+    // ASTableView may first reach us after its recognizer has already begun.
+    // Stamp that live gesture so a reveal it starts is not mistaken for the
+    // next gesture and prematurely re-armed at its own completion.
+    if ((pan.state == UIGestureRecognizerStateBegan ||
+         pan.state == UIGestureRecognizerStateChanged) &&
+        (scrollView.tracking || scrollView.dragging)) {
+        ApolloTabBarScrollRuntimeState *state = ApolloScrollRuntimeState(scrollView, YES);
+        state.gestureToken = ++sApolloScrollGestureToken;
+        state.upwardRevealDistance = 0.0;
+
+        // If an idle-only reveal was already holding .never when this
+        // recognizer appeared, this live gesture is the consumed re-arm
+        // gesture. The newly attached target will receive its end transition.
+        UITabBarController *tbc = ApolloTabBarControllerForScrollView(scrollView);
+        ApolloTabBarRuntimeState *tabState = ApolloRuntimeState(tbc, NO);
+        if (tabState.legacyIdleRevealActive &&
+            state.gestureToken != tabState.legacyIdleRevealGestureToken) {
+            tabState.legacyIdleRearmAfterGesture = YES;
+        }
+    }
 }
 
 static void ApolloVisitTabBarControllers(UIViewController *vc, NSMutableSet<UITabBarController *> *seen, void (^block)(UITabBarController *tbc)) {
@@ -1010,24 +1173,30 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
         // real settings change before Apollo's notification reaches every nav.
         sApolloNativeHideBarsOnScrollPreferenceEnabled =
             ApolloNativeHideBarsOnScrollPreferenceEnabled();
-        if (value != sApolloNativeHideBarsOnScrollPreferenceEnabled) {
+        BOOL effectiveValue = sApolloNativeHideBarsOnScrollPreferenceEnabled;
+        if (value != effectiveValue) {
             ApolloLog(@"[AutoHideTabBarFix] Ignoring controller-local hidesBarsOnSwipe=%d for global prerequisite; preference=%d controller=%@",
-                      value, sApolloNativeHideBarsOnScrollPreferenceEnabled,
+                      value, effectiveValue,
                       NSStringFromClass([self class]));
         }
         // Suppress Apollo's nav-bar hide-on-swipe; the native API only
         // collapses the tab bar so we want the nav bar to stay visible.
-        ApolloStoreRequestedHidesBarsOnSwipe(self, value);
+        ApolloStoreRequestedHidesBarsOnSwipe(self, effectiveValue);
         %orig(NO);
         UITabBarController *tbc = ApolloLocateTabBarController(self);
         if (tbc) {
-            ApolloTabBarMinimizeBehavior behavior = value
+            ApolloTabBarMinimizeBehavior behavior = effectiveValue
                 ? ApolloTabBarMinimizeBehaviorOnScrollDown
                 : ApolloTabBarMinimizeBehaviorNever;
-            ApolloApplyMinimizeBehavior(tbc, behavior);
-            if (!value) {
+            // Repeated Apollo configuration must not break idle-only mode's
+            // intentional .never hold before its consumed re-arm gesture.
+            if (!effectiveValue || !ApolloLegacyIdleRevealIsActive(tbc)) {
+                ApolloApplyMinimizeBehavior(tbc, behavior);
+            }
+            if (!effectiveValue) {
                 ApolloCancelIdleRevealTimer(tbc);
                 ApolloFinishAnimatedTabBarReveal(tbc);
+                ApolloClearLegacyIdleRevealState(tbc);
             }
         }
         return;
@@ -1066,6 +1235,40 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
     %orig;
     if (self.window) {
         ApolloApplyScrollEdgeEffectStyle(self);
+        ApolloEnsureLegacyIdlePanObserver(self);
+    }
+}
+
+%new
+- (void)_apolloAutoHideTabBarPanChanged:(UIPanGestureRecognizer *)pan {
+    if (!sAutoHideTabBarShowOnIdle || sClassicTabBarScrollBehavior) return;
+
+    ApolloTabBarScrollRuntimeState *scrollState = ApolloScrollRuntimeState(self, YES);
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        scrollState.gestureToken = ++sApolloScrollGestureToken;
+        scrollState.upwardRevealDistance = 0.0;
+
+        UITabBarController *tbc = ApolloTabBarControllerForScrollView(self);
+        ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, NO);
+        if (state.legacyIdleRevealActive &&
+            scrollState.gestureToken != state.legacyIdleRevealGestureToken) {
+            // Preserve the old two-gesture collapse deterministically: leave
+            // .never installed for this whole first gesture and restore
+            // .onScrollDown only after it ends. UIKit can then enroll the next
+            // gesture from its beginning.
+            state.legacyIdleRearmAfterGesture = YES;
+        }
+    } else if (pan.state == UIGestureRecognizerStateEnded ||
+               pan.state == UIGestureRecognizerStateCancelled ||
+               pan.state == UIGestureRecognizerStateFailed) {
+        scrollState.upwardRevealDistance = 0.0;
+        UITabBarController *tbc = ApolloTabBarControllerForScrollView(self);
+        ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, NO);
+        if (state.legacyIdleRevealActive && state.legacyIdleRearmAfterGesture) {
+            ApolloClearLegacyIdleRevealState(tbc);
+            ApolloApplyMinimizeBehavior(tbc, ApolloTabBarMinimizeBehaviorOnScrollDown);
+            ApolloLog(@"[AutoHideTabBarFix] Legacy idle-only reveal re-armed after consumed gesture");
+        }
     }
 }
 
@@ -1078,8 +1281,7 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
         return;
     }
 
-    BOOL mainList = [self isKindOfClass:UITableView.class] ||
-                    [self isKindOfClass:UICollectionView.class];
+    BOOL mainList = ApolloLegacyIdleScrollViewParticipates(self);
     BOOL userDriven = self.tracking || self.dragging;
     // Classic mode only consumes vertical list gestures. Avoid walking the
     // responder/controller hierarchy for every unrelated scroll view when the
@@ -1087,6 +1289,12 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
     if (!sAutoHideTabBarShowOnIdle && (!mainList || !userDriven)) {
         %orig(contentOffset);
         return;
+    }
+
+    if (sAutoHideTabBarShowOnIdle && !sClassicTabBarScrollBehavior) {
+        // Attach against the live recognizer as well as didMoveToWindow;
+        // AsyncDisplayKit can replace its table view recognizer after mounting.
+        ApolloEnsureLegacyIdlePanObserver(self);
     }
 
     CGPoint oldOffset = self.contentOffset;
@@ -1106,6 +1314,34 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
                 // tracking and asking UIKit to settle it opposite the user's
                 // new direction while native scrolling begins collapsing.
                 ApolloReverseAnimatedTabBarRevealTowardCollapsed(tbc);
+            } else if (sAutoHideTabBarShowOnIdle && !sClassicTabBarScrollBehavior &&
+                       mainList && userDriven) {
+                ApolloTabBarScrollRuntimeState *scrollState =
+                    ApolloScrollRuntimeState(self, YES);
+                ApolloTabBarRuntimeState *state = ApolloRuntimeState(tbc, YES);
+                if (userDrivenTowardBottom) {
+                    scrollState.upwardRevealDistance = 0.0;
+                } else if (userDrivenTowardTop && !state.legacyIdleRevealActive) {
+                    BOOL morphKnown = NO;
+                    NSInteger morphTarget = ApolloTabBarVisualMorphTarget(tbc.tabBar,
+                                                                          &morphKnown);
+                    if (!morphKnown || morphTarget != 0) {
+                        scrollState.upwardRevealDistance += fabs(deltaY);
+                        if (scrollState.upwardRevealDistance >=
+                            ApolloLegacyUpwardRevealDistanceThreshold) {
+                            scrollState.upwardRevealDistance = 0.0;
+                            if (scrollState.gestureToken == 0) {
+                                scrollState.gestureToken = ++sApolloScrollGestureToken;
+                            }
+                            ApolloCancelIdleRevealTimer(tbc);
+                            ApolloStartLegacyIdleReveal(tbc,
+                                @"legacy idle-only upward scroll",
+                                scrollState.gestureToken);
+                        }
+                    } else {
+                        scrollState.upwardRevealDistance = 0.0;
+                    }
+                }
             }
             shouldScheduleIdleReveal = sAutoHideTabBarShowOnIdle;
         }
@@ -1150,7 +1386,6 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
         sApolloNativeHideBarsOnScrollPreferenceEnabled =
             ApolloNativeHideBarsOnScrollPreferenceEnabled();
         ApolloForEachVisibleTabBarController(^(UITabBarController *tbc) {
-            ApolloCancelIdleRevealTimer(tbc);
             ApolloReapplyNativeMinimizeBehavior(tbc, @"idleModeChanged");
         });
     }];
@@ -1181,6 +1416,7 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
         ApolloForEachVisibleTabBarController(^(UITabBarController *tbc) {
             ApolloCancelIdleRevealTimer(tbc);
             ApolloFinishAnimatedTabBarReveal(tbc);
+            ApolloClearLegacyIdleRevealState(tbc);
         });
     }];
     [center addObserverForName:UIApplicationDidBecomeActiveNotification
