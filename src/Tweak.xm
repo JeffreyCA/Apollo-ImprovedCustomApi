@@ -3602,6 +3602,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,
+                                    UDKeyClassicTabBarScrollBehavior: @NO,
                                     UDKeyTabBarCollapseSide: @0,
                                     UDKeyKeepSearchBarInPlace: @NO,
                                     UDKeyLGTitleGapCentering: @YES,
@@ -3856,6 +3857,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
+    sClassicTabBarScrollBehavior = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyClassicTabBarScrollBehavior];
     sTabBarCollapseSide = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyTabBarCollapseSide];
     if (sTabBarCollapseSide != 0 && sTabBarCollapseSide != 1) sTabBarCollapseSide = 0;
     sKeepSearchBarInPlace = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];

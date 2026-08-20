@@ -56,6 +56,7 @@ BOOL sSubredditShowDisplayName = YES;
 BOOL sCommunityHighlights = NO;
 BOOL sCommunityHighlightsWeb = NO;
 BOOL sAutoHideTabBarShowOnIdle = NO;
+BOOL sClassicTabBarScrollBehavior = NO;
 NSInteger sTabBarCollapseSide = 0;   // 0 = Left (system default), 1 = Right (UDKeyTabBarCollapseSide)
 BOOL sIPadTabBarBottom = NO;   // opt-in (default OFF via registerDefaults, UDKeyIPadTabBarBottom); iPad-gated in the module
 BOOL sKeepSearchBarInPlace = NO;

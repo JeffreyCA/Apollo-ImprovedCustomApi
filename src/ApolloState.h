@@ -132,6 +132,9 @@ extern BOOL sCommunityHighlights;
 // Reddit's REST API exposes. See ApolloSubredditHighlights.xm (ApolloHLWebFetch).
 extern BOOL sCommunityHighlightsWeb;
 extern BOOL sAutoHideTabBarShowOnIdle;
+// Opt-in classic bidirectional Liquid Glass tab-bar behavior. See
+// ApolloAutoHideTabBar.xm and UDKeyClassicTabBarScrollBehavior.
+extern BOOL sClassicTabBarScrollBehavior;
 // Which side the iOS 26 minimized (Liquid Glass) tab bar pill docks on:
 // 0 = Left (system default), 1 = Right. Read live at layout time so a change
 // applies without relaunch. Default 0 via registerDefaults

@@ -188,6 +188,10 @@ static NSString *const UDKeySubredditShowDisplayName = @"SubredditShowDisplayNam
 static NSString *const UDKeyCommunityHighlights = @"CommunityHighlights";
 static NSString *const UDKeyCommunityHighlightsWeb = @"CommunityHighlightsWeb";
 static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdle";
+// Liquid Glass only. Restores Apollo's classic bidirectional hide-bars feel:
+// scrolling down minimizes the tab bar, and reversing toward the top expands
+// it immediately instead of waiting to reach the scroll edge. Default NO.
+static NSString *const UDKeyClassicTabBarScrollBehavior = @"ClassicTabBarScrollBehavior";
 // Which side the iOS 26 minimized (Liquid Glass) tab bar pill docks on when
 // "Hide Bars on Scroll" collapses it: 0 = Left (system default), 1 = Right.
 // Only meaningful while the native tabBarMinimizeBehavior path is active
