@@ -155,6 +155,10 @@ static UIImage *ApolloRootSettingsArtworkAtStandardSize(UIImage *artwork) {
     }];
 }
 
+// Matches UIKit's inset-grouped spacing between two adjacent groups, which is
+// what Apollo's own sections use; see the first-section note in -viewWillAppear:.
+static const CGFloat kApolloRootFirstSectionTopPadding = 18.0;
+
 static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     if ([view isKindOfClass:UITableView.class]) return (UITableView *)view;
     for (UIView *subview in view.subviews) {
@@ -174,36 +178,46 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     ApolloSettingsSearchAttach((UIViewController *)self);
     ApolloRemoveLegacySettingsExportButton((UIViewController *)self);
 
-    // Apollo predates navigation-item search on this screen and leaves its old
-    // first-section breathing room in place. With a pinned, always-visible
-    // search bar that becomes a conspicuous empty band, so trim only the modern
-    // extra padding and leave the grouped section's own inset intact.
-    UITableView *tableView = ApolloRootSettingsTableInView(((UIViewController *)self).view);
-    if (tableView) {
-        if (@available(iOS 15.0, *)) tableView.sectionHeaderTopPadding = 0.0;
-        UIEdgeInsets inset = tableView.contentInset;
-        inset.top -= 24.0;
-        tableView.contentInset = inset;
-        UIEdgeInsets indicatorInsets = tableView.verticalScrollIndicatorInsets;
-        indicatorInsets.top -= 24.0;
-        tableView.verticalScrollIndicatorInsets = indicatorInsets;
-
-        // Apollo 1.15.11's two-row About group is rendered below as Wallpapers,
-        // About, and Apollo Ultra. The native destinations retain their
-        // original handlers while no Apollo-owned cell is remapped.
-        ApolloLog(@"[Settings] Wallpapers row installed in native About group");
-    }
+    // Apollo 1.15.11's two-row About group is rendered below as Wallpapers,
+    // About, and Apollo Ultra. The native destinations retain their original
+    // handlers while no Apollo-owned cell is remapped.
+    ApolloLog(@"[Settings] Wallpapers row installed in native About group");
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     ApolloRemoveLegacySettingsExportButton((UIViewController *)self);
+
+    // Apollo's Settings root takes all of its group spacing from the headers of
+    // sections AFTER the first: section 0's header measures 0pt, so the first
+    // card butts straight against the navigation bar — and against the search
+    // field once the bar is on screen (issue #756). Give the table the
+    // first-section top padding it never had.
+    //
+    // A spacer rather than extra contentInset, because Apollo's own
+    // scroll-to-top compares contentOffset against safeAreaInsets.top: added
+    // inset would leave a tab double-tap resting short of the real top with the
+    // search bar half collapsed. A header is plain content, so that arithmetic
+    // is untouched. It goes in here rather than -viewDidLoad because Apollo
+    // clears the header again before the first appearance; re-checking on every
+    // appearance also repairs it if that ever happens later.
+    UITableView *tableView = ApolloRootSettingsTableInView(((UIViewController *)self).view);
+    if (tableView && !tableView.tableHeaderView) {
+        UIView *spacer = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, CGRectGetWidth(tableView.bounds),
+                                                                  kApolloRootFirstSectionTopPadding)];
+        spacer.backgroundColor = [UIColor clearColor];
+        spacer.userInteractionEnabled = NO;
+        tableView.tableHeaderView = spacer;
+    }
 }
 
 // Capture the live SettingsVC instance for the About > Tip Jar fallback path.
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     sApolloLastSettingsVC = (UIViewController *)self;
+    // The search bar is attached pinned so it's on screen the moment Settings
+    // opens; from here on it scrolls away and reveals like a stock iOS one.
+    ApolloSettingsSearchEnableScrollAway((UIViewController *)self);
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {

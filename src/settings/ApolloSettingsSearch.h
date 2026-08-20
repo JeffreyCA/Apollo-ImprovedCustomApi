@@ -15,4 +15,10 @@ __BEGIN_DECLS
 // item. Idempotent per VC. Called from the SettingsViewController hook.
 void ApolloSettingsSearchAttach(UIViewController *settingsVC);
 
+// Hand the attached search bar over to the system's scroll-away behavior. The
+// bar is attached pinned so it's visible the moment Settings opens; this is
+// called from the first -viewDidAppear: (once per VC) so it then collapses and
+// reveals with the list the way a stock iOS search bar does.
+void ApolloSettingsSearchEnableScrollAway(UIViewController *settingsVC);
+
 __END_DECLS
