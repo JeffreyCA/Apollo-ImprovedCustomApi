@@ -62,6 +62,8 @@ static void (*orig_ApolloSubredditHeaderSetFrame)(id self, SEL _cmd, CGRect fram
 static const CGFloat ApolloSubredditIndexSlotHeight = 14.0;
 static const CGFloat ApolloSubredditIndexTouchWidth = 56.0;
 static const CGFloat ApolloSubredditIndexGestureWidth = 34.0;
+static const CGFloat ApolloSubredditIndexGlyphWidth = 30.0;
+static const CGFloat ApolloSubredditIndexGlyphRightInset = 10.0;
 static const CGFloat ApolloSubredditIndexRightInset = 38.0;
 static const CGFloat ApolloSubredditStarHitWidth = 60.0;
 static const CGFloat ApolloSubredditRowBalancedLeadingMargin = 18.0;
@@ -887,11 +889,11 @@ static void ApolloSubredditIndexRemoveStarProxyFromCell(UITableViewCell *cell) {
         for (NSString *title in self.titles) {
             UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
             label.text = title;
-            label.textAlignment = NSTextAlignmentRight;
+            label.textAlignment = NSTextAlignmentCenter;
             label.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
             label.adjustsFontSizeToFitWidth = YES;
             label.minimumScaleFactor = 0.65;
-            label.layer.anchorPoint = CGPointMake(1.0, 0.5);
+            label.layer.anchorPoint = CGPointMake(0.5, 0.5);
             [self addSubview:label];
             [labels addObject:label];
         }
@@ -922,8 +924,8 @@ static void ApolloSubredditIndexRemoveStarProxyFromCell(UITableViewCell *cell) {
 
     [self.labels enumerateObjectsUsingBlock:^(UILabel *label, NSUInteger idx, BOOL *stop) {
         CGFloat centerY = topInset + (slotHeight * idx) + (slotHeight / 2.0);
-        label.bounds = CGRectMake(0.0, 0.0, 30.0, labelHeight);
-        label.center = CGPointMake(CGRectGetMaxX(self.bounds) - 2.0, centerY);
+        label.bounds = CGRectMake(0.0, 0.0, ApolloSubredditIndexGlyphWidth, labelHeight);
+        label.center = CGPointMake(CGRectGetMaxX(self.bounds) - ApolloSubredditIndexGlyphRightInset, centerY);
     }];
 }
 
