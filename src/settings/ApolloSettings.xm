@@ -605,6 +605,42 @@ static void ApolloPresentFeatureRequestsChooser(UIViewController *aboutVC,
 
 %end
 
+// Apollo's SceneDelegate owns the "tap the selected tab to go back to the top"
+// behavior: it walks to the tab's table and scrolls it to -safeAreaInsets.top.
+// That measurement predates this screen having a navigation-item search bar, so
+// with the bar scrolled away it lands one search-bar short of the real top and
+// the field stays hidden. Restore the bar to the palette before Apollo measures
+// (so its own arithmetic carries the field along) and hand it back to
+// scroll-away once the scroll has settled.
+%hook _TtC6Apollo13SceneDelegate
+
+- (BOOL)tabBarController:(UITabBarController *)tabBarController shouldSelectViewController:(UIViewController *)viewController {
+    // Only when Settings itself is what's on screen: a re-tap from a pushed
+    // screen pops back without scrolling, so there is nothing to compensate for
+    // (and the next tap, with the root on top, gets the full treatment).
+    UIViewController *settingsVC = nil;
+    if (tabBarController.selectedViewController == viewController &&
+        [viewController isKindOfClass:UINavigationController.class]) {
+        UIViewController *top = ((UINavigationController *)viewController).topViewController;
+        if ([top isKindOfClass:objc_getClass("_TtC6Apollo22SettingsViewController")]) settingsVC = top;
+    }
+
+    ApolloSettingsSearchPrepareForScrollToTop(settingsVC);
+    BOOL result = %orig;
+    if (settingsVC) {
+        // After Apollo's animated scroll, so the bar isn't handed back to
+        // scroll-away while the table is still moving toward the top. Weak, so
+        // a Settings screen torn down in the meantime isn't kept alive for it.
+        __weak UIViewController *weakSettingsVC = settingsVC;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloSettingsSearchFinishScrollToTop(weakSettingsVC);
+        });
+    }
+    return result;
+}
+
+%end
+
 %group ApolloSafariBrowserLogging
 
 @interface ApolloSafariViewController : UIViewController

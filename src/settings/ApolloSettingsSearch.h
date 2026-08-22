@@ -21,4 +21,12 @@ void ApolloSettingsSearchAttach(UIViewController *settingsVC);
 // reveals with the list the way a stock iOS search bar does.
 void ApolloSettingsSearchEnableScrollAway(UIViewController *settingsVC);
 
+// Tapping the already-selected Settings tab makes Apollo scroll its table to
+// -safeAreaInsets.top, which with a scrolled-away search bar stops short of the
+// real top and leaves the field hidden. Call Prepare before Apollo measures, so
+// the bar is back in the navigation palette and its safe area includes the
+// field, and Finish once the scroll has settled to resume scroll-away.
+void ApolloSettingsSearchPrepareForScrollToTop(UIViewController *settingsVC);
+void ApolloSettingsSearchFinishScrollToTop(UIViewController *settingsVC);
+
 __END_DECLS

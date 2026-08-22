@@ -596,7 +596,153 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
 
 #pragma mark - Attach
 
+#pragma mark - Pull to search
+
+// A deliberate downward pull on the settings list opens search outright, rather
+// than only revealing the field the way the system does.
+//
+// This coexists with the native reveal rather than replacing it. UIKit spends
+// the first part of a downward drag expanding the search bar back into the
+// navigation palette, and grows adjustedContentInset.top by exactly what it
+// expands — so the overscroll below stays at zero for that whole stretch and
+// only starts counting once the field is fully on screen. Keep pulling from
+// there and search opens. Overscroll is read off the table's own pan
+// recognizer, so Apollo's scroll delegate is untouched.
+static const CGFloat kPullActivateThreshold = 62.0;
+static const CGFloat kPullRevealStart = 6.0;
+
+@interface ApolloSettingsSearchPullToActivate : NSObject
+@property (nonatomic, weak) UISearchController *searchController;
+@property (nonatomic, weak) UIScrollView *scrollView;
+@property (nonatomic, strong) UIView *affordance;
+@property (nonatomic, strong) UIImageView *glassIcon;
+@property (nonatomic, strong) UILabel *caption;
+@property (nonatomic, strong) UIImpactFeedbackGenerator *haptic;
+@property (nonatomic) BOOL armed;
+@end
+
+@implementation ApolloSettingsSearchPullToActivate
+
+- (void)installAffordanceInContainer:(UIView *)container {
+    UIView *host = [[UIView alloc] init];
+    host.translatesAutoresizingMaskIntoConstraints = NO;
+    host.userInteractionEnabled = NO;
+    host.alpha = 0.0;
+
+    UIImageView *glass = [[UIImageView alloc] initWithImage:
+        [UIImage systemImageNamed:@"magnifyingglass"
+                withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:20.0
+                                                                                  weight:UIImageSymbolWeightSemibold]]];
+    glass.translatesAutoresizingMaskIntoConstraints = NO;
+    glass.tintColor = [UIColor secondaryLabelColor];
+    [host addSubview:glass];
+
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+    label.textColor = [UIColor secondaryLabelColor];
+    label.text = @"Pull to search";
+    [host addSubview:label];
+
+    [container addSubview:host];
+    // Anchored to the safe area, which tracks the navigation palette: while the
+    // system is still expanding the search bar the affordance rides down with
+    // it, then sits in the overscroll gap the pull opens underneath the field.
+    UILayoutGuide *safe = container.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [host.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6.0],
+        [host.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [host.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [glass.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
+        [glass.topAnchor constraintEqualToAnchor:host.topAnchor],
+        [label.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
+        [label.topAnchor constraintEqualToAnchor:glass.bottomAnchor constant:6.0],
+        [label.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
+    ]];
+    self.affordance = host;
+    self.glassIcon = glass;
+    self.caption = label;
+    self.haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+}
+
+- (void)resetAffordance {
+    self.armed = NO;
+    self.caption.text = @"Pull to search";
+    self.caption.textColor = [UIColor secondaryLabelColor];
+    self.glassIcon.tintColor = [UIColor secondaryLabelColor];
+    self.affordance.alpha = 0.0;
+    self.glassIcon.transform = CGAffineTransformMakeScale(0.6, 0.6);
+}
+
+- (void)renderOverscroll:(CGFloat)overscroll {
+    CGFloat progress = 0.0;
+    if (overscroll > kPullRevealStart) {
+        progress = (overscroll - kPullRevealStart) / (kPullActivateThreshold - kPullRevealStart);
+        progress = MAX(0.0, MIN(1.0, progress));
+    }
+    self.affordance.alpha = progress;
+    CGFloat scale = 0.6 + 0.4 * progress;
+    self.glassIcon.transform = CGAffineTransformMakeScale(scale, scale);
+
+    BOOL armed = overscroll >= kPullActivateThreshold;
+    if (armed != self.armed) {
+        self.armed = armed;
+        self.caption.text = armed ? @"Release to search" : @"Pull to search";
+        UIColor *accent = [self.searchController.searchResultsUpdater
+                              respondsToSelector:@selector(apollo_themeAccentColor)]
+            ? [(id)self.searchController.searchResultsUpdater apollo_themeAccentColor] : nil;
+        UIColor *tint = armed ? (accent ?: [UIColor systemBlueColor]) : [UIColor secondaryLabelColor];
+        [UIView animateWithDuration:0.15 animations:^{
+            self.glassIcon.tintColor = tint;
+            self.caption.textColor = tint;
+        }];
+        if (armed) {
+            [self.haptic impactOccurred];
+            [self.haptic prepare];
+        }
+    }
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    UIScrollView *sv = self.scrollView;
+    UISearchController *sc = self.searchController;
+    if (!sv || !sc) return;
+    if (sc.active) {
+        [self resetAffordance];
+        return;
+    }
+
+    CGFloat overscroll = -(sv.contentOffset.y + sv.adjustedContentInset.top);
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan:
+            [self resetAffordance];
+            [self.haptic prepare];
+            break;
+        case UIGestureRecognizerStateChanged:
+            [self renderOverscroll:overscroll];
+            break;
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            BOOL shouldActivate = pan.state == UIGestureRecognizerStateEnded && self.armed && !sc.active;
+            [UIView animateWithDuration:0.2 animations:^{ [self resetAffordance]; }];
+            if (shouldActivate) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    sc.active = YES;
+                    [sc.searchBar becomeFirstResponder];
+                });
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+@end
+
 static char kApolloSettingsSearchAttachedKey;
+static char kApolloSettingsSearchPullKey;
 
 void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
     if (!settingsVC || objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
@@ -622,10 +768,15 @@ void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
 
     objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey, searchController, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // No bespoke pull-to-search affordance: with hidesSearchBarWhenScrolling the
-    // system already reveals the bar on a scroll back to the top, and a custom
-    // overscroll gesture fights that reveal (it auto-activated search on a hard
-    // pull). It only ever existed because the bar was pinned and never moved.
+    UITableView *rootTable = ApolloSearchTableInViewController(settingsVC);
+    if (rootTable) {
+        ApolloSettingsSearchPullToActivate *pull = [[ApolloSettingsSearchPullToActivate alloc] init];
+        pull.searchController = searchController;
+        pull.scrollView = rootTable;
+        [pull installAffordanceInContainer:settingsVC.view];
+        [rootTable.panGestureRecognizer addTarget:pull action:@selector(handlePan:)];
+        objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchPullKey, pull, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 
     ApolloLog(@"[SettingsSearch] attached to %@", settingsVC);
 }
@@ -645,4 +796,28 @@ void ApolloSettingsSearchEnableScrollAway(UIViewController *settingsVC) {
 
     settingsVC.navigationItem.hidesSearchBarWhenScrolling = YES;
     ApolloLog(@"[SettingsSearch] scroll-away enabled");
+}
+
+// Tapping an already-selected tab makes Apollo scroll that tab's table to
+// -safeAreaInsets.top (SceneDelegate's tabBarController:shouldSelectViewController:).
+// With the search bar scrolled away that measures the navigation bar alone, so
+// the list lands one search-bar short of the real top and the field stays
+// hidden — the entry point vanishes for a tap that was meant to bring the user
+// home. Put the bar back in the palette *before* Apollo measures, so its own
+// arithmetic carries the field along, then hand it back to scroll-away once the
+// scroll has settled.
+void ApolloSettingsSearchPrepareForScrollToTop(UIViewController *settingsVC) {
+    if (!settingsVC || !objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
+    // Still pinned (before the first -viewDidAppear:): nothing has scrolled away.
+    if (!objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchScrollAwayKey)) return;
+
+    settingsVC.navigationItem.hidesSearchBarWhenScrolling = NO;
+    [settingsVC.view.window layoutIfNeeded];
+}
+
+void ApolloSettingsSearchFinishScrollToTop(UIViewController *settingsVC) {
+    if (!settingsVC || !objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
+    if (!objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchScrollAwayKey)) return;
+
+    settingsVC.navigationItem.hidesSearchBarWhenScrolling = YES;
 }
