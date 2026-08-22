@@ -6,7 +6,7 @@
 #import "ApolloThemeRuntime.h"
 #import "UserDefaultConstants.h"
 
-// MARK: - Tab Bar Collapse Side (Left / Right / Off)
+// MARK: - Tab Bar Hide Style (Left / Right / Fade / Down / Off)
 //
 // On iOS 26 (Liquid Glass), Apollo's native "Hide Bars on Scroll" toggle is
 // rerouted by ApolloAutoHideTabBar.xm into UITabBarController's native
@@ -16,8 +16,10 @@
 // (RE: iOS26-Runtime-Headers + UIKitCore decompile; no Placement or Alignment
 // selector exists on any tab bar class). This module adds a side preference by
 // mirroring the minimized pill's frame across the tab bar's midline in a
-// post-layout pass, and re-surfaces the choice on Apollo's own Settings >
-// General > "Hide Bars on Scroll" row as a Left / Right / Off menu.
+// post-layout pass. Fade and Down instead keep native minimization disabled and
+// let ApolloAutoHideTabBar.xm animate the full bar. The choice is
+// surfaced on Apollo's own Settings > General > "Hide Bars on Scroll" row as
+// a Left / Right / Fade / Down / Off menu.
 //
 // The native row (RE via Hopper, Apollo 1.15.11):
 //   - Eureka SwitchRow, NO tag, title "Hide Bars on Scroll", built in
@@ -41,41 +43,28 @@
 @end
 
 static NSString *const kApolloHideBarsRowTitle = @"Hide Bars on Scroll";
-// Apollo's own defaults key + change notification (RE'd, see header comment).
-static NSString *const kApolloNativeHideBarsKey = @"HideBarsOnScroll";
 static NSString *const kApolloHideBarsChangedNote = @"com.christianselig.HideBarsOnSwipeChanged";
+static const NSInteger ApolloTabBarHideMenuModeOff = ApolloTabBarHideStyleDown + 1;
 
-static char kCollapseSideNativeSwitchKey;   // cell -> its original Eureka UISwitch
-static char kCollapseSideButtonKey;         // cell -> our menu button
+static char kTabBarHideStyleNativeSwitchKey;   // cell -> its original Eureka UISwitch
+static char kTabBarHideStyleButtonKey;         // cell -> our menu button
 
-// MARK: Capability + state helpers
-
-// Same gate as ApolloAutoHideTabBar.xm: the pill only exists on the native
-// minimize path (Liquid Glass + iOS 26 SDK API present).
-static BOOL CollapseSideSupported(void) {
-    static BOOL supported = NO;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        supported = IsLiquidGlass() &&
-            [UITabBarController instancesRespondToSelector:NSSelectorFromString(@"setTabBarMinimizeBehavior:")];
-    });
-    return supported;
+static BOOL TabBarHideStyleNativeHideBarsOn(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNativeHideBarsOnScroll];
 }
 
-static BOOL CollapseSideNativeHideBarsOn(void) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kApolloNativeHideBarsKey];
+// Off maps to Apollo's native toggle; the styles use the legacy persisted key.
+static NSInteger TabBarHideStyleCurrentMenuMode(void) {
+    if (!TabBarHideStyleNativeHideBarsOn()) return ApolloTabBarHideMenuModeOff;
+    return sTabBarHideStyle;
 }
 
-// 0 = Left, 1 = Right, 2 = Off — the three menu states (Off == native toggle off).
-static NSInteger CollapseSideCurrentMode(void) {
-    if (!CollapseSideNativeHideBarsOn()) return 2;
-    return (sTabBarCollapseSide == 1) ? 1 : 0;
-}
-
-static NSString *CollapseSideModeTitle(NSInteger mode) {
+static NSString *TabBarHideStyleMenuTitle(NSInteger mode) {
     switch (mode) {
-        case 0: return @"Left";
-        case 1: return @"Right";
+        case ApolloTabBarHideStyleLeft: return @"Left";
+        case ApolloTabBarHideStyleRight: return @"Right";
+        case ApolloTabBarHideStyleFade: return @"Fade";
+        case ApolloTabBarHideStyleDown: return @"Down";
         default: return @"Off";
     }
 }
@@ -83,7 +72,7 @@ static NSString *CollapseSideModeTitle(NSInteger mode) {
 // MARK: Runtime pill mirroring
 
 // Find the tab bar's visual provider (private ivar; name stable across 26.x).
-static id CollapseSideVisualProvider(UITabBar *tabBar) {
+static id TabBarHideStyleVisualProvider(UITabBar *tabBar) {
     if (!tabBar) return nil;
     Ivar ivar = class_getInstanceVariable([tabBar class], "_visualProvider");
     if (!ivar) return nil;
@@ -93,14 +82,14 @@ static id CollapseSideVisualProvider(UITabBar *tabBar) {
 // Morph target: 0 = expanded, 2 = minimized pill (RE: -[UITabBar _isMinimized]
 // returns visualProvider.currentMorphTarget == 2 — but that UITabBar accessor
 // is Photos-app-gated, so read the provider directly).
-static NSInteger CollapseSideProviderMorphTarget(id provider) {
+static NSInteger TabBarHideStyleProviderMorphTarget(id provider) {
     if (!provider) return 0;
     SEL sel = NSSelectorFromString(@"currentMorphTarget");
     if (![provider respondsToSelector:sel]) return 0;
     return ((NSInteger (*)(id, SEL))objc_msgSend)(provider, sel);
 }
 
-static UIView *CollapseSideProviderIvarView(id provider, const char *name) {
+static UIView *TabBarHideStyleProviderIvarView(id provider, const char *name) {
     if (!provider) return nil;
     Ivar ivar = class_getInstanceVariable([provider class], name);
     if (!ivar) return nil;
@@ -128,25 +117,26 @@ static UIView *CollapseSideProviderIvarView(id provider, const char *name) {
 // same provider pass with the identical leading-edge rect while morphed
 // (currentMorphTarget != 0); re-register it with the mirrored pill frame so
 // the glass effect follows the pill.
-static void CollapseSideApplyMirror(UITabBar *tabBar) {
-    if (!CollapseSideSupported()) return;
-    id provider = CollapseSideVisualProvider(tabBar);
+static void TabBarHideStyleApplyMirror(UITabBar *tabBar) {
+    if (!ApolloSupportsNativeTabBarScrollBehavior() ||
+        ApolloTabBarHideStyleUsesCustomPresentation(sTabBarHideStyle)) return;
+    id provider = TabBarHideStyleVisualProvider(tabBar);
     if (!provider) return;
-    UIView *collapsePlatter = CollapseSideProviderIvarView(provider, "collapsePlatterView");
+    UIView *collapsePlatter = TabBarHideStyleProviderIvarView(provider, "collapsePlatterView");
     if (!collapsePlatter || !collapsePlatter.superview) return;
 
     CGFloat width = collapsePlatter.superview.bounds.size.width;
     if (width <= 0.0) return;
     CGPoint center = collapsePlatter.center;
     BOOL onRight = center.x > width * 0.5;
-    BOOL wantRight = (sTabBarCollapseSide == 1);
+    BOOL wantRight = (sTabBarHideStyle == ApolloTabBarHideStyleRight);
     if (onRight == wantRight) return;   // already on the chosen side
     center.x = width - center.x;
     collapsePlatter.center = center;
 
     // UIKit only registers the pocket rect while morphed (currentMorphTarget
     // != 0); match that gate when re-registering the mirrored rect.
-    if (CollapseSideProviderMorphTarget(provider) != 0) {
+    if (TabBarHideStyleProviderMorphTarget(provider) != 0) {
         id pocket = nil;
         Ivar pocketIvar = class_getInstanceVariable([provider class], "scrollPocketInteraction");
         if (pocketIvar) pocket = object_getIvar(provider, pocketIvar);
@@ -161,14 +151,14 @@ static void CollapseSideApplyMirror(UITabBar *tabBar) {
 
 - (void)layoutSubviews {
     %orig;
-    CollapseSideApplyMirror(self);
+    TabBarHideStyleApplyMirror(self);
 }
 
 %end
 
 // MARK: Live re-apply on setting change
 
-static void CollapseSideRelayoutVisibleTabBars(void) {
+static void TabBarHideStyleRelayoutVisibleTabBars(void) {
     for (UIWindow *window in ApolloAllWindows()) {
         if (window.hidden || window.alpha <= 0.0) continue;
         NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
@@ -187,11 +177,13 @@ static void CollapseSideRelayoutVisibleTabBars(void) {
 
 // MARK: Settings row (native Settings > General > Other > "Hide Bars on Scroll")
 
-static void CollapseSideSetSide(NSInteger side) {
-    side = (side == 1) ? 1 : 0;
-    if (sTabBarCollapseSide != side) {
-        sTabBarCollapseSide = side;
-        [[NSUserDefaults standardUserDefaults] setInteger:side forKey:UDKeyTabBarCollapseSide];
+static void TabBarHideStyleSet(ApolloTabBarHideStyle style) {
+    style = (ApolloTabBarHideStyle)MIN(ApolloTabBarHideStyleDown,
+                                      MAX(ApolloTabBarHideStyleLeft, style));
+    if (sTabBarHideStyle != style) {
+        sTabBarHideStyle = style;
+        [[NSUserDefaults standardUserDefaults] setInteger:style
+                                                   forKey:UDKeyTabBarCollapseSide];
     }
 }
 
@@ -199,53 +191,59 @@ static void CollapseSideSetSide(NSInteger side) {
 // value and Apollo's onChange (defaults write + HideBarsOnSwipeChanged post)
 // both run. Falls back to replaying the onChange side effects directly when
 // the switch is gone (screen dismissed mid-menu).
-static void CollapseSideSetNativeHideBars(UISwitch *nativeSwitch, BOOL on) {
-    if (CollapseSideNativeHideBarsOn() == on) return;
+static void TabBarHideStyleSetNativeHideBars(UISwitch *nativeSwitch, BOOL on) {
+    if (TabBarHideStyleNativeHideBarsOn() == on) return;
     if (nativeSwitch) {
         [nativeSwitch setOn:on animated:NO];
         [nativeSwitch sendActionsForControlEvents:UIControlEventValueChanged];
         // Eureka's onChange ran Apollo's setBool + notification post here.
-        if (CollapseSideNativeHideBarsOn() == on) return;
-        ApolloLog(@"[CollapseSide] Native switch flip didn't persist, falling back to direct write");
+        if (TabBarHideStyleNativeHideBarsOn() == on) return;
+        ApolloLog(@"[TabBarHideStyle] Native switch flip didn't persist, falling back to direct write");
     }
-    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kApolloNativeHideBarsKey];
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:UDKeyNativeHideBarsOnScroll];
     [[NSNotificationCenter defaultCenter] postNotificationName:kApolloHideBarsChangedNote object:nil];
 }
 
-static void CollapseSideRefreshRowControl(UITableViewCell *cell);
+static void TabBarHideStyleRefreshRowControl(UITableViewCell *cell);
 
-// Apply a picked mode (0 = Left, 1 = Right, 2 = Off) through Apollo's own
-// toggle plumbing, then refresh the tab bar and the row's control.
-static void CollapseSideApplyModeSelection(NSInteger mode, UITableViewCell *cell) {
-    UISwitch *nativeSwitch = cell ? objc_getAssociatedObject(cell, &kCollapseSideNativeSwitchKey) : nil;
-    if (mode == 2) {
-        CollapseSideSetNativeHideBars(nativeSwitch, NO);
+// Apply through Apollo's own toggle plumbing, then refresh the tab bar and row.
+static void TabBarHideStyleApplyModeSelection(NSInteger mode, UITableViewCell *cell) {
+    UISwitch *nativeSwitch = cell ? objc_getAssociatedObject(cell, &kTabBarHideStyleNativeSwitchKey) : nil;
+    if (mode == ApolloTabBarHideMenuModeOff) {
+        TabBarHideStyleSetNativeHideBars(nativeSwitch, NO);
     } else {
-        CollapseSideSetSide(mode);
-        CollapseSideSetNativeHideBars(nativeSwitch, YES);
+        TabBarHideStyleSet((ApolloTabBarHideStyle)mode);
+        TabBarHideStyleSetNativeHideBars(nativeSwitch, YES);
     }
-    CollapseSideRelayoutVisibleTabBars();
-    if (cell) CollapseSideRefreshRowControl(cell);
+    // Changing Left/Right/Fade/Down while the native setting remains ON does not
+    // fire Apollo's native switch callback. Reconcile the runtime explicitly.
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:ApolloTabBarScrollBehaviorChangedNotification object:nil];
+    TabBarHideStyleRelayoutVisibleTabBars();
+    if (cell) TabBarHideStyleRefreshRowControl(cell);
 }
 
-static UIMenu *CollapseSideBuildMenu(UITableViewCell *cell) {
-    NSInteger current = CollapseSideCurrentMode();
+static UIMenu *TabBarHideStyleBuildMenu(UITableViewCell *cell) {
+    NSInteger current = TabBarHideStyleCurrentMenuMode();
     __weak UITableViewCell *weakCell = cell;
 
     UIAction *(^makeAction)(NSInteger) = ^UIAction *(NSInteger mode) {
-        UIAction *action = [UIAction actionWithTitle:CollapseSideModeTitle(mode)
+        UIAction *action = [UIAction actionWithTitle:TabBarHideStyleMenuTitle(mode)
                                                image:nil
                                           identifier:nil
                                              handler:^(__unused UIAction *act) {
-            CollapseSideApplyModeSelection(mode, weakCell);
+            TabBarHideStyleApplyModeSelection(mode, weakCell);
         }];
         action.state = (current == mode) ? UIMenuElementStateOn : UIMenuElementStateOff;
         return action;
     };
 
-    // "Collapse Tab Bar" section: where the pill docks, or not at all.
-    return [UIMenu menuWithTitle:@"Collapse Tab Bar"
-                        children:@[makeAction(0), makeAction(1), makeAction(2)]];
+    return [UIMenu menuWithTitle:@"Hide Tab Bar"
+                        children:@[makeAction(ApolloTabBarHideStyleLeft),
+                                   makeAction(ApolloTabBarHideStyleRight),
+                                   makeAction(ApolloTabBarHideStyleFade),
+                                   makeAction(ApolloTabBarHideStyleDown),
+                                   makeAction(ApolloTabBarHideMenuModeOff)]];
 }
 
 // Rebuild the accessory button's title + size. The title is a single
@@ -255,14 +253,14 @@ static UIMenu *CollapseSideBuildMenu(UITableViewCell *cell) {
 // wrapping "Right" onto two lines at larger text sizes. Measuring the themed
 // font and pinning keeps the measurement authoritative; the willDisplay
 // re-adopt refreshes it whenever the row re-themes.
-static void CollapseSideRefreshRowControl(UITableViewCell *cell) {
-    UIButton *button = objc_getAssociatedObject(cell, &kCollapseSideButtonKey);
+static void TabBarHideStyleRefreshRowControl(UITableViewCell *cell) {
+    UIButton *button = objc_getAssociatedObject(cell, &kTabBarHideStyleButtonKey);
     if (!button) return;
 
     UIFont *font = cell.detailTextLabel.font ?: cell.textLabel.font
         ?: [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     UIColor *color = cell.detailTextLabel.textColor ?: [UIColor secondaryLabelColor];
-    NSString *title = CollapseSideModeTitle(CollapseSideCurrentMode());
+    NSString *title = TabBarHideStyleMenuTitle(TabBarHideStyleCurrentMenuMode());
 
     NSMutableAttributedString *label = [[NSMutableAttributedString alloc]
         initWithString:title
@@ -290,38 +288,38 @@ static void CollapseSideRefreshRowControl(UITableViewCell *cell) {
                                       context:nil].size;
     button.bounds = CGRectMake(0.0, 0.0, ceil(size.width) + 4.0, MAX(ceil(size.height) + 8.0, 34.0));
 
-    button.menu = CollapseSideBuildMenu(cell);
+    button.menu = TabBarHideStyleBuildMenu(cell);
     button.showsMenuAsPrimaryAction = YES;
 }
 
-// Replace the identified cell's UISwitch accessory with the Left/Right/Off
+// Replace the identified cell's UISwitch accessory with the Left/Right/Fade/Down/Off
 // menu button. The original switch is retained on the cell (it is Eureka's
 // value binding) and driven programmatically from the menu actions.
-static void CollapseSideAdoptCell(UITableViewCell *cell) {
-    if (!CollapseSideSupported()) return;
+static void TabBarHideStyleAdoptCell(UITableViewCell *cell) {
+    if (!ApolloSupportsNativeTabBarScrollBehavior()) return;
 
     UISwitch *nativeSwitch = nil;
     if ([cell.accessoryView isKindOfClass:[UISwitch class]]) {
         nativeSwitch = (UISwitch *)cell.accessoryView;
-        objc_setAssociatedObject(cell, &kCollapseSideNativeSwitchKey, nativeSwitch,
+        objc_setAssociatedObject(cell, &kTabBarHideStyleNativeSwitchKey, nativeSwitch,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } else {
-        nativeSwitch = objc_getAssociatedObject(cell, &kCollapseSideNativeSwitchKey);
+        nativeSwitch = objc_getAssociatedObject(cell, &kTabBarHideStyleNativeSwitchKey);
     }
     if (!nativeSwitch) return;   // unexpected shape — leave the native row alone
 
-    UIButton *button = objc_getAssociatedObject(cell, &kCollapseSideButtonKey);
+    UIButton *button = objc_getAssociatedObject(cell, &kTabBarHideStyleButtonKey);
     if (!button) {
         // Custom type: attributed titles render literally (no system re-tint).
         button = [UIButton buttonWithType:UIButtonTypeCustom];
-        objc_setAssociatedObject(cell, &kCollapseSideButtonKey, button,
+        objc_setAssociatedObject(cell, &kTabBarHideStyleButtonKey, button,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    CollapseSideRefreshRowControl(cell);
+    TabBarHideStyleRefreshRowControl(cell);
     if (cell.accessoryView != button) cell.accessoryView = button;
 }
 
-static BOOL CollapseSideCellMatches(UITableViewCell *cell) {
+static BOOL TabBarHideStyleCellMatches(UITableViewCell *cell) {
     NSString *text = cell.textLabel.text;
     return [text isKindOfClass:[NSString class]] &&
            [[text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]
@@ -332,7 +330,7 @@ static BOOL CollapseSideCellMatches(UITableViewCell *cell) {
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = %orig;
-    if (CollapseSideCellMatches(cell)) CollapseSideAdoptCell(cell);
+    if (TabBarHideStyleCellMatches(cell)) TabBarHideStyleAdoptCell(cell);
     return cell;
 }
 
@@ -340,13 +338,13 @@ static BOOL CollapseSideCellMatches(UITableViewCell *cell) {
 // (or Eureka's own update pass) restored the switch accessory, re-adopt here.
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
     %orig;
-    if (CollapseSideCellMatches(cell)) CollapseSideAdoptCell(cell);
+    if (TabBarHideStyleCellMatches(cell)) TabBarHideStyleAdoptCell(cell);
 }
 
 %end
 
 %ctor {
     %init(SettingsGeneralViewController=objc_getClass("_TtC6Apollo29SettingsGeneralViewController"));
-    ApolloLog(@"[CollapseSide] hook installed (supported=%d side=%ld)",
-              CollapseSideSupported(), (long)sTabBarCollapseSide);
+    ApolloLog(@"[TabBarHideStyle] hook installed (supported=%d style=%ld)",
+              ApolloSupportsNativeTabBarScrollBehavior(), (long)sTabBarHideStyle);
 }

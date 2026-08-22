@@ -58,7 +58,7 @@ BOOL sCommunityHighlightsWeb = NO;
 BOOL sAutoHideTabBarShowOnIdle = NO;
 NSString *const ApolloTabBarScrollBehaviorChangedNotification = @"ApolloTabBarScrollBehaviorChangedNotification";
 BOOL sClassicTabBarScrollBehavior = NO;
-NSInteger sTabBarCollapseSide = 0;   // 0 = Left (system default), 1 = Right (UDKeyTabBarCollapseSide)
+ApolloTabBarHideStyle sTabBarHideStyle = ApolloTabBarHideStyleLeft;
 BOOL sIPadTabBarBottom = NO;   // opt-in (default OFF via registerDefaults, UDKeyIPadTabBarBottom); iPad-gated in the module
 BOOL sKeepSearchBarInPlace = NO;
 BOOL sLGTitleGapCentering = YES;   // effective default ON via registerDefaults (UDKeyLGTitleGapCentering)

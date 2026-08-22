@@ -192,12 +192,14 @@ static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdl
 // scrolling down minimizes the tab bar, and reversing toward the top expands
 // it immediately instead of waiting to reach the scroll edge. Default NO.
 static NSString *const UDKeyClassicTabBarScrollBehavior = @"ClassicTabBarScrollBehavior";
-// Which side the iOS 26 minimized (Liquid Glass) tab bar pill docks on when
-// "Hide Bars on Scroll" collapses it: 0 = Left (system default), 1 = Right.
-// Only meaningful while the native tabBarMinimizeBehavior path is active
-// (Liquid Glass); the pre-26 hide-bars path has no pill. The Left/Right/Off
-// choice is surfaced on Apollo's native Settings > General > "Hide Bars on
-// Scroll" row (Off = the native toggle off). See ApolloTabBarCollapseSide.xm.
+// Apollo's native Settings > General preference, consumed by the Liquid Glass
+// tab-bar compatibility layer as its source of truth.
+static NSString *const UDKeyNativeHideBarsOnScroll = @"HideBarsOnScroll";
+// Liquid Glass "Hide Bars on Scroll" presentation: 0 = collapsed pill on the
+// Left (system default), 1 = collapsed pill on the Right, 2 = fade the full tab
+// bar out, 3 = slide the full tab bar down. Left/Right/Fade/Down/Off is surfaced
+// on Apollo's native Settings > General row (Off = the native toggle).
+// See ApolloTabBarHideStyle.xm and ApolloAutoHideTabBar.xm.
 static NSString *const UDKeyTabBarCollapseSide = @"TabBarCollapseSide";
 // When ON, focusing the main feed / subreddit search keeps the nav bar and the search
 // field in place (results populate the feed below the field) instead of Apollo's stock

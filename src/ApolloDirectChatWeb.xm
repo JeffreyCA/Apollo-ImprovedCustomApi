@@ -1679,9 +1679,9 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         // hide-on-scroll may have left behind before handing the bar back.
         [tabBar.layer removeAnimationForKey:ApolloTabBarSlideDownAnimationKey];
         [tabBar.layer removeAnimationForKey:ApolloTabBarSlideUpAnimationKey];
-        tabBar.transform = CGAffineTransformIdentity;
-        tabBar.alpha = 1.0;
         tabBar.hidden = NO;
+        ApolloRestoreHideOnScrollPresentation(tabBarController,
+                                              @"direct chat exit");
     }
 
     [tabBarController.view setNeedsLayout];

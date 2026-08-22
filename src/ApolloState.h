@@ -1,8 +1,25 @@
 #import <Foundation/Foundation.h>
 
 @class UIScrollView;
+@class UITabBar;
+@class UITabBarController;
 @class UINavigationItem;
 @class UIViewController;
+
+// Persisted through the legacy UDKeyTabBarCollapseSide key so existing
+// Left/Right preferences and settings backups remain compatible.
+typedef NS_ENUM(NSInteger, ApolloTabBarHideStyle) {
+    ApolloTabBarHideStyleLeft = 0,
+    ApolloTabBarHideStyleRight = 1,
+    ApolloTabBarHideStyleFade = 2,
+    ApolloTabBarHideStyleDown = 3,
+};
+
+static inline BOOL ApolloTabBarHideStyleUsesCustomPresentation(
+    ApolloTabBarHideStyle style) {
+    return style == ApolloTabBarHideStyleFade ||
+           style == ApolloTabBarHideStyleDown;
+}
 
 extern NSString *sRedditClientId;
 extern NSString *sRedditClientSecret;
@@ -138,11 +155,22 @@ extern NSString *const ApolloTabBarScrollBehaviorChangedNotification;
 // Opt-in classic bidirectional Liquid Glass tab-bar behavior. See
 // ApolloAutoHideTabBar.xm and UDKeyClassicTabBarScrollBehavior.
 extern BOOL sClassicTabBarScrollBehavior;
-// Which side the iOS 26 minimized (Liquid Glass) tab bar pill docks on:
-// 0 = Left (system default), 1 = Right. Read live at layout time so a change
-// applies without relaunch. Default 0 via registerDefaults
-// (UDKeyTabBarCollapseSide). See ApolloTabBarCollapseSide.xm.
-extern NSInteger sTabBarCollapseSide;
+// Read live so a change applies without relaunch. Default Left via
+// registerDefaults. The old key name is retained only for compatibility.
+extern ApolloTabBarHideStyle sTabBarHideStyle;
+#ifdef __cplusplus
+extern "C" {
+#endif
+BOOL ApolloSupportsNativeTabBarScrollBehavior(void);
+#ifdef __cplusplus
+}
+#endif
+// Explicit presentation ownership shared with list geometry and other tab-bar
+// owners. Never infer presentation ownership from alpha/transform or the
+// global style alone.
+BOOL ApolloTabBarIsHideOnScrollPresentationOwned(UITabBar *tabBar);
+void ApolloRestoreHideOnScrollPresentation(UITabBarController *tabBarController,
+                                           NSString *reason);
 // iPad + Liquid Glass only. When ON, docks the iOS 26 floating tab bar at the
 // bottom (classic) instead of the top-center pill. Opt-in; default OFF via
 // registerDefaults. Temporary stopgap for issue #387. See ApolloIPadTabBarBottom.xm.

@@ -33,6 +33,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloListLayoutSupport.h"
+#import "ApolloState.h"
 
 @interface ASTableView : UITableView
 @end
@@ -102,7 +103,12 @@ ApolloListBottomGeometry ApolloListBottomGeometryForController(UIViewController 
     UITabBarController *tabs = controller.tabBarController;
     UITabBar *tabBar = tabs.tabBar;
     geometry.safeBottom = view.safeAreaInsets.bottom;
-    if (!tabs || !tabBar || tabBar.hidden || tabBar.alpha < 0.01 || !tabBar.superview) {
+    // Fade and Down change presentation only; keep normal Liquid Glass
+    // geometry stable while this feature owns the hidden presentation so list
+    // content does not jump. Other alpha-zero states remain truly absent.
+    BOOL presentationOnlyHide = ApolloTabBarIsHideOnScrollPresentationOwned(tabBar);
+    if (!tabs || !tabBar || tabBar.hidden ||
+        (tabBar.alpha < 0.01 && !presentationOnlyHide) || !tabBar.superview) {
         return geometry;
     }
 
@@ -142,6 +148,8 @@ ApolloListBottomGeometry ApolloListBottomGeometryForController(UIViewController 
         if (tabs.isTabBarHidden) return geometry;
     }
 
+    // Fade changes opacity and Down moves only the rendered sublayers, so the
+    // tab bar's own coordinate space always describes its canonical geometry.
     CGRect tabFrame = [view convertRect:tabBar.bounds fromView:tabBar];
     if (!CGRectIsNull(tabFrame) && !CGRectIsInfinite(tabFrame)) {
         geometry.tabBarOverlap = MAX(0.0, CGRectGetMaxY(view.bounds) - CGRectGetMinY(tabFrame));
