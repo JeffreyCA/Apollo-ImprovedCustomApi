@@ -73,7 +73,10 @@ static const NSTimeInterval kSuppressSeconds = 1.5;
 // Hard cap so a pathological launch cannot flood the cross-launch buffer.
 static const NSUInteger kMaxLines = 80;
 
-static __unsafe_unretained UITableView *sTrackedTable = nil;   // never messaged when stale
+// Compared by pointer only, never messaged, and cleared the moment the window
+// closes — so it cannot outlive the controller and cannot be matched by some
+// later table that happens to land on the same address.
+static __unsafe_unretained UITableView *sTrackedTable = nil;
 static BOOL sWindowOpen = NO;
 static NSTimeInterval sWindowOpenedAt = 0;
 static NSUInteger sLinesWritten = 0;
@@ -85,6 +88,11 @@ static CGFloat sLastSampledOffset = CGFLOAT_MAX;
 // to cover the list's first layout passes, never ordinary use of the screen.
 static NSTimeInterval sSuppressUntil = 0;
 static NSUInteger sSuppressedPasses = 0;
+// backtrace_symbols() does a dladdr per frame, so a trace costs about a
+// millisecond. Capping them keeps the recorder from adding measurable work to
+// the very launch it is timing — and keeps one launch from evicting the rest of
+// the shared cross-launch buffer.
+static NSUInteger sTracesWritten = 0;
 // The first list controller of the process, kept weakly so the simulator
 // bridge can re-arm against it even while it sits under a pushed feed.
 static __weak UIViewController *sListController = nil;
@@ -204,6 +212,8 @@ static void ApolloSLDSnapshot(UITableView *table, NSString *reason, BOOL force) 
     if (!sWindowOpen || !table || table != sTrackedTable) return;
     if (!force && ApolloSLDElapsedMs() > kWindowSeconds * 1000.0) {
         sWindowOpen = NO;
+        sTrackedTable = nil;
+        sSuppressUntil = 0;
         return;
     }
 
@@ -251,7 +261,11 @@ static void ApolloSLDSnapshot(UITableView *table, NSString *reason, BOOL force) 
 // Abbreviated caller trace for the geometry setters: enough to tell Apollo's
 // own code, UIKit's layout machinery and the tweak apart without pulling in a
 // full symbolicated backtrace on every call.
+static const NSUInteger kMaxTraces = 12;
+
 static NSString *ApolloSLDCallers(void) {
+    if (sTracesWritten >= kMaxTraces) return @"(trace capped)";
+    sTracesWritten++;
     NSArray<NSString *> *symbols = [NSThread callStackSymbols];
     NSMutableArray<NSString *> *kept = [NSMutableArray array];
     // callStackSymbols format: "<n><pad><image><pad><addr> <symbol> + <offset>".
@@ -284,6 +298,7 @@ static void ApolloSLDOpenWindow(UITableView *table, NSString *reason) {
     sLastSnapshot = nil;
     sFirstContentTop = CGFLOAT_MAX;
     sLastSampledOffset = CGFLOAT_MAX;
+    sTracesWritten = 0;
     sSuppressUntil = CACurrentMediaTime() + kSuppressSeconds;
     sSuppressedPasses = 0;
     ApolloSLDLog(@"window open (%@) table=%p uptime=%.0fms",
@@ -315,6 +330,13 @@ static void ApolloSLDOpenWindow(UITableView *table, NSString *reason) {
                    dispatch_get_main_queue(), ^{
         if (!sWindowOpen) return;
         sWindowOpen = NO;
+        // Drop every hot-path trigger together. After this the global hooks are
+        // a single BOOL test, the layoutSubviews guard can never match again
+        // (so a table allocated at this address later cannot be mistaken for
+        // the list's), and the list controller's layout hooks stop resolving
+        // ivars. The recorder and the fix are done for the life of the process.
+        sTrackedTable = nil;
+        sSuppressUntil = 0;
         CGFloat delta = (sFirstContentTop == CGFLOAT_MAX) ? 0.0 : (sLastContentTop - sFirstContentTop);
         // Positive settle == the content ended HIGHER than it started, which is
         // the direction measured off the reporter's recording. Written straight
@@ -357,23 +379,31 @@ static UITableView *ApolloSLDTableForController(id controller) {
     ApolloSLDOpenWindow(ApolloSLDTableForController(self), @"viewDidLoad");
 }
 
+// Every hook below tests sWindowOpen BEFORE resolving the table: the ivar walk
+// takes the runtime lock, and viewWillLayoutSubviews/viewDidLayoutSubviews run
+// on this screen for the life of the process. Once the window has closed these
+// are a static BOOL load and a return.
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    if (!sWindowOpen) return;
     ApolloSLDSnapshot(ApolloSLDTableForController(self), @"viewWillAppear", NO);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    if (!sWindowOpen) return;
     ApolloSLDSnapshot(ApolloSLDTableForController(self), @"viewDidAppear", NO);
 }
 
 - (void)viewWillLayoutSubviews {
     %orig;
+    if (!sWindowOpen) return;
     ApolloSLDSnapshot(ApolloSLDTableForController(self), @"vcWillLayout", NO);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
+    if (!sWindowOpen) return;
     ApolloSLDSnapshot(ApolloSLDTableForController(self), @"vcDidLayout", NO);
 }
 
