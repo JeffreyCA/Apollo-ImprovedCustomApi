@@ -16,10 +16,9 @@
 // (RE: iOS26-Runtime-Headers + UIKitCore decompile; no Placement or Alignment
 // selector exists on any tab bar class). This module adds a side preference by
 // mirroring the minimized pill's frame across the tab bar's midline in a
-// post-layout pass. Fade and Down instead keep native minimization disabled and
-// let ApolloAutoHideTabBar.xm animate the full bar. The choice is
-// surfaced on Apollo's own Settings > General > "Hide Bars on Scroll" row as
-// a Left / Right / Fade / Down / Off menu.
+// post-layout pass. The custom styles instead keep native minimization disabled
+// and let ApolloAutoHideTabBar.xm animate the full bar. The choice is surfaced
+// on Apollo's own Settings > General > "Hide Bars on Scroll" row.
 //
 // The native row (RE via Hopper, Apollo 1.15.11):
 //   - Eureka SwitchRow, NO tag, title "Hide Bars on Scroll", built in
@@ -206,6 +205,13 @@ static void TabBarHideStyleSetNativeHideBars(UISwitch *nativeSwitch, BOOL on) {
 
 static void TabBarHideStyleRefreshRowControl(UITableViewCell *cell);
 
+static UITableView *TabBarHideStyleContainingTableView(UITableViewCell *cell) {
+    for (UIView *view = cell.superview; view; view = view.superview) {
+        if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
+    }
+    return nil;
+}
+
 // Apply through Apollo's own toggle plumbing, then refresh the tab bar and row.
 static void TabBarHideStyleApplyModeSelection(NSInteger mode, UITableViewCell *cell) {
     UISwitch *nativeSwitch = cell ? objc_getAssociatedObject(cell, &kTabBarHideStyleNativeSwitchKey) : nil;
@@ -215,12 +221,31 @@ static void TabBarHideStyleApplyModeSelection(NSInteger mode, UITableViewCell *c
         TabBarHideStyleSet((ApolloTabBarHideStyle)mode);
         TabBarHideStyleSetNativeHideBars(nativeSwitch, YES);
     }
-    // Changing Left/Right/Fade/Down while the native setting remains ON does not
+    // Changing styles while the native setting remains ON does not
     // fire Apollo's native switch callback. Reconcile the runtime explicitly.
     [[NSNotificationCenter defaultCenter]
         postNotificationName:ApolloTabBarScrollBehaviorChangedNotification object:nil];
     TabBarHideStyleRelayoutVisibleTabBars();
-    if (cell) TabBarHideStyleRefreshRowControl(cell);
+    if (cell) {
+        // Replacing UIButton.menu from inside its still-presented action can
+        // strand the accessory (or its Eureka cell) in the highlighted state.
+        // Let UIKit finish dismissing the menu before rebuilding it and clear
+        // any table selection left by a tap on the row around the accessory.
+        __weak UITableViewCell *weakCell = cell;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UITableViewCell *strongCell = weakCell;
+            if (!strongCell) return;
+            TabBarHideStyleRefreshRowControl(strongCell);
+            UIButton *button = objc_getAssociatedObject(
+                strongCell, &kTabBarHideStyleButtonKey);
+            button.highlighted = NO;
+            [strongCell setHighlighted:NO animated:NO];
+            [strongCell setSelected:NO animated:NO];
+            UITableView *tableView = TabBarHideStyleContainingTableView(strongCell);
+            NSIndexPath *indexPath = [tableView indexPathForCell:strongCell];
+            if (indexPath) [tableView deselectRowAtIndexPath:indexPath animated:NO];
+        });
+    }
 }
 
 static UIMenu *TabBarHideStyleBuildMenu(UITableViewCell *cell) {
@@ -292,8 +317,8 @@ static void TabBarHideStyleRefreshRowControl(UITableViewCell *cell) {
     button.showsMenuAsPrimaryAction = YES;
 }
 
-// Replace the identified cell's UISwitch accessory with the Left/Right/Fade/Down/Off
-// menu button. The original switch is retained on the cell (it is Eureka's
+// Replace the identified cell's UISwitch accessory with the style menu button.
+// The original switch is retained on the cell (it is Eureka's
 // value binding) and driven programmatically from the menu actions.
 static void TabBarHideStyleAdoptCell(UITableViewCell *cell) {
     if (!ApolloSupportsNativeTabBarScrollBehavior()) return;

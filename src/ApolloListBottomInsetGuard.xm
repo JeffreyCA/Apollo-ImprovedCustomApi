@@ -103,7 +103,7 @@ ApolloListBottomGeometry ApolloListBottomGeometryForController(UIViewController 
     UITabBarController *tabs = controller.tabBarController;
     UITabBar *tabBar = tabs.tabBar;
     geometry.safeBottom = view.safeAreaInsets.bottom;
-    // Fade and Down change presentation only; keep normal Liquid Glass
+    // Custom hide styles change presentation only; keep normal Liquid Glass
     // geometry stable while this feature owns the hidden presentation so list
     // content does not jump. Other alpha-zero states remain truly absent.
     BOOL presentationOnlyHide = ApolloTabBarIsHideOnScrollPresentationOwned(tabBar);

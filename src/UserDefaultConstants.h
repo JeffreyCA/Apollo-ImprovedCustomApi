@@ -197,8 +197,8 @@ static NSString *const UDKeyClassicTabBarScrollBehavior = @"ClassicTabBarScrollB
 static NSString *const UDKeyNativeHideBarsOnScroll = @"HideBarsOnScroll";
 // Liquid Glass "Hide Bars on Scroll" presentation: 0 = collapsed pill on the
 // Left (system default), 1 = collapsed pill on the Right, 2 = fade the full tab
-// bar out, 3 = slide the full tab bar down. Left/Right/Fade/Down/Off is surfaced
-// on Apollo's native Settings > General row (Off = the native toggle).
+// bar out, 3 = sink the full tab bar down while fading. The styles plus Off are
+// surfaced on Apollo's native Settings > General row (Off = the native toggle).
 // See ApolloTabBarHideStyle.xm and ApolloAutoHideTabBar.xm.
 static NSString *const UDKeyTabBarCollapseSide = @"TabBarCollapseSide";
 // When ON, focusing the main feed / subreddit search keeps the nav bar and the search
