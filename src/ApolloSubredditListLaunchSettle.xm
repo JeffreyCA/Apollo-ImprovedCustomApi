@@ -88,6 +88,7 @@ static CGFloat sLastSampledOffset = CGFLOAT_MAX;
 // to cover the list's first layout passes, never ordinary use of the screen.
 static NSTimeInterval sSuppressUntil = 0;
 static NSUInteger sSuppressedPasses = 0;
+static NSUInteger sSuppressedHeaderPasses = 0;
 // backtrace_symbols() does a dladdr per frame, so a trace costs about a
 // millisecond. Capping them keeps the recorder from adding measurable work to
 // the very launch it is timing — and keeps one launch from evicting the rest of
@@ -301,6 +302,7 @@ static void ApolloSLDOpenWindow(UITableView *table, NSString *reason) {
     sTracesWritten = 0;
     sSuppressUntil = CACurrentMediaTime() + kSuppressSeconds;
     sSuppressedPasses = 0;
+    sSuppressedHeaderPasses = 0;
     ApolloSLDLog(@"window open (%@) table=%p uptime=%.0fms",
                  reason, table, NSProcessInfo.processInfo.systemUptime * 1000.0);
     ApolloSLDSnapshot(table, @"open", YES);
@@ -342,8 +344,10 @@ static void ApolloSLDOpenWindow(UITableView *table, NSString *reason) {
         // the direction measured off the reporter's recording. Written straight
         // through so the summary survives even when the line cap was reached.
         ApolloSLDWrite([NSString stringWithFormat:
-            @"window closed: contentTop %.1f -> %.1f (settle %.1fpt) lines=%lu",
-            sFirstContentTop, sLastContentTop, -delta, (unsigned long)sLinesWritten]);
+            @"window closed: contentTop %.1f -> %.1f (settle %.1fpt) suppressed=%lu/%luhdr lines=%lu",
+            sFirstContentTop, sLastContentTop, -delta,
+            (unsigned long)sSuppressedPasses, (unsigned long)sSuppressedHeaderPasses,
+            (unsigned long)sLinesWritten]);
     });
 }
 
@@ -361,6 +365,29 @@ static UITableView *ApolloSLDTableForController(id controller) {
         cls = class_getSuperclass(cls);
     }
     return nil;
+}
+
+// Section header views are DIRECT subviews of the table, and their own
+// -layoutSubviews runs during the parent's subtree walk — i.e. AFTER the
+// table's -layoutSubviews returns, and therefore outside the suppression the
+// table hook applies to itself. A header that UIKit recreated moments earlier
+// (a reloadData is enough) still has its label at the old frame, so laying it
+// out inside the inherited animation glides the label diagonally into place:
+// exactly the "FAVORITES slides in" the reporter saw once the cells stopped
+// moving. Give the headers the same treatment their table already gets.
+static BOOL ApolloSLDShouldSuppressHeaderLayout(UIView *header) {
+    if (!sTrackedTable || header.superview != sTrackedTable) return NO;
+    if (sSuppressUntil <= 0 || CACurrentMediaTime() >= sSuppressUntil) return NO;
+    return [UIView inheritedAnimationDuration] > 0.0;
+}
+
+static void ApolloSLDNoteHeaderSuppressed(UIView *header) {
+    sSuppressedHeaderPasses++;
+    if (sSuppressedHeaderPasses != 1) return;
+    ApolloSLDLog(@"+%.0fms SUPPRESSED animated header layout (%@ inherited=%.2fs frame=%@) via %@",
+                 ApolloSLDElapsedMs(), NSStringFromClass(header.class),
+                 [UIView inheritedAnimationDuration], ApolloSLDRect(header.frame),
+                 ApolloSLDCallers());
 }
 
 %group ApolloSubredditListLaunchSettle
@@ -446,8 +473,12 @@ static UITableView *ApolloSLDTableForController(id controller) {
             // One line per launch is enough to tell a fixed launch from an
             // untouched one; further passes in the same window are silent.
             if (sSuppressedPasses == 1) {
-                ApolloSLDLog(@"+%.0fms SUPPRESSED animated launch layout (inherited=%.2fs, offsetY %.1f -> %.1f)",
-                             ApolloSLDElapsedMs(), inherited, before, self.contentOffset.y);
+                // The trace here names whoever opened the animation this layout
+                // pass is inheriting — the one thing the recorder could not
+                // answer from the first round of logs.
+                ApolloSLDLog(@"+%.0fms SUPPRESSED animated launch layout (inherited=%.2fs, offsetY %.1f -> %.1f) via %@",
+                             ApolloSLDElapsedMs(), inherited, before, self.contentOffset.y,
+                             ApolloSLDCallers());
             }
             ApolloSLDSnapshot(self, @"layout(suppressed)", NO);
             return;
@@ -516,6 +547,35 @@ static UITableView *ApolloSLDTableForController(id controller) {
     ApolloSLDLog(@"+%.0fms reloadData contentHeight %.0f -> %.0f anim(%@) via %@",
                  ApolloSLDElapsedMs(), before, self.contentSize.height,
                  ApolloSLDAnimationContext(), ApolloSLDCallers());
+}
+
+%end
+
+// Apollo vends its own section header for this list; UIKit supplies the plain
+// one when Apollo does not. Both are direct subviews of the table, so the same
+// one-pointer guard covers them.
+%hook UITableViewHeaderFooterView
+
+- (void)layoutSubviews {
+    if (!ApolloSLDShouldSuppressHeaderLayout((UIView *)self)) { %orig; return; }
+    ApolloSLDNoteHeaderSuppressed((UIView *)self);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [UIView performWithoutAnimation:^{ %orig; }];
+    [CATransaction commit];
+}
+
+%end
+
+%hook _TtC6Apollo31RecreatedTableSectionHeaderView
+
+- (void)layoutSubviews {
+    if (!ApolloSLDShouldSuppressHeaderLayout((UIView *)self)) { %orig; return; }
+    ApolloSLDNoteHeaderSuppressed((UIView *)self);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [UIView performWithoutAnimation:^{ %orig; }];
+    [CATransaction commit];
 }
 
 %end
