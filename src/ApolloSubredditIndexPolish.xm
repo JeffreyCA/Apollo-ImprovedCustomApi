@@ -66,6 +66,7 @@ static const CGFloat ApolloSubredditIndexGlyphWidth = 30.0;
 static const CGFloat ApolloSubredditIndexGlyphRightInset = 10.0;
 static const CGFloat ApolloSubredditIndexRightInset = 38.0;
 static const CGFloat ApolloSubredditStarHitWidth = 60.0;
+static const CGFloat ApolloSubredditStarHitTrailingInset = 8.0;
 static const CGFloat ApolloSubredditRowBalancedLeadingMargin = 18.0;
 static const CGFloat ApolloSubredditRowIconTextGap = 12.0;
 static const CGFloat ApolloSubredditRowStandardIconTextTrim = 2.0;
@@ -740,15 +741,16 @@ static CGRect ApolloSubredditIndexProxyFrameForCell(UITableViewCell *cell, UICon
     CGFloat cellWidth = CGRectGetWidth(cell.bounds);
     CGFloat cellHeight = CGRectGetHeight(cell.bounds);
     CGFloat width = MIN(ApolloSubredditStarHitWidth, MAX(cellWidth, 0.0));
+    CGFloat visibleWidth = MAX(width - MIN(ApolloSubredditStarHitTrailingInset, width), 0.0);
 
     if (!nativeControl) {
-        return CGRectMake(MAX(cellWidth - width, 0.0), 0.0, width, cellHeight);
+        return CGRectMake(MAX(cellWidth - width, 0.0), 0.0, visibleWidth, cellHeight);
     }
 
     CGRect nativeFrame = [cell convertRect:nativeControl.bounds fromView:nativeControl];
     CGFloat minX = CGRectGetMidX(nativeFrame) - (width / 2.0);
     minX = MIN(MAX(minX, 0.0), MAX(cellWidth - width, 0.0));
-    return CGRectMake(minX, 0.0, width, cellHeight);
+    return CGRectMake(minX, 0.0, visibleWidth, cellHeight);
 }
 
 static void ApolloSubredditIndexRemoveStarProxyFromCell(UITableViewCell *cell) {
