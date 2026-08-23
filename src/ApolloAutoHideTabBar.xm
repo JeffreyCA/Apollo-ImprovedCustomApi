@@ -1582,6 +1582,16 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 //            can mirror nav-bar visibility onto the tab bar.
 %hook UINavigationController
 
+- (void)pushViewController:(UIViewController *)viewController animated:(BOOL)animated {
+    if (ApolloSupportsNativeTabBarScrollBehavior()) {
+        UITabBarController *tbc = ApolloLocateTabBarController(self);
+        if (tbc && ApolloTabBarIsHideOnScrollPresentationOwned(tbc.tabBar)) {
+            ApolloRestoreHideOnScrollPresentation(tbc, @"navigation push");
+        }
+    }
+    %orig(viewController, animated);
+}
+
 - (void)setHidesBarsOnSwipe:(BOOL)value {
     if (ApolloSupportsNativeTabBarScrollBehavior()) {
         // Apollo usually applies its app-wide preference to each navigation
