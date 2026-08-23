@@ -1446,16 +1446,12 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             BOOL supported = ApolloSupportsNativeTabBarScrollBehavior();
             BOOL hideBarsOnScroll = [weakSelf apollo_nativeHideBarsOnScrollEnabled];
-            BOOL customMode =
-                ApolloTabBarHideStyleUsesCustomPresentation(sTabBarHideStyle);
             BOOL enabled = supported && hideBarsOnScroll;
             UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_TabBarIdle"
                                                                 label:@"Tab Bar Re-Expands When Idle"
                                                                 detail:!hideBarsOnScroll
                                                                     ? @"Turn on Hide Bars on Scroll in General settings to use this option."
-                                                                    : customMode
-                                                                        ? @"Reappears after 30 seconds idle or when scrolling toward the top."
-                                                                        : @"Re-expands after 30 seconds idle or when scrolling toward the top. Retains the two-gesture collapse."
+                                                                    : @"Re-expands after 30 seconds idle or when scrolling toward the top. Retains the two-gesture collapse."
                                                                     on:supported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle]
                                                                enabled:enabled
                                                                 action:@selector(autoHideTabBarShowOnIdleSwitchToggled:)];
@@ -1468,16 +1464,12 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             BOOL supported = ApolloSupportsNativeTabBarScrollBehavior();
             BOOL hideBarsOnScroll = [weakSelf apollo_nativeHideBarsOnScrollEnabled];
-            BOOL customMode =
-                ApolloTabBarHideStyleUsesCustomPresentation(sTabBarHideStyle);
-            BOOL enabled = supported && hideBarsOnScroll && !customMode;
+            BOOL enabled = supported && hideBarsOnScroll;
             UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_ClassicTabBarScroll"
                                                                  label:@"Classic Tab Bar Scroll Behavior"
                                                                 detail:!hideBarsOnScroll
                                                                     ? @"Turn on Hide Bars on Scroll in General settings to use this option."
-                                                                    : customMode
-                                                                        ? @"Custom hide styles already use one gesture in either direction."
-                                                                        : @"Hide and expand the tab bar with one scroll gesture."
+                                                                    : @"Hide and expand the tab bar with one scroll gesture."
                                                                     on:supported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyClassicTabBarScrollBehavior]
                                                                enabled:enabled
                                                                 action:@selector(classicTabBarScrollBehaviorSwitchToggled:)];
