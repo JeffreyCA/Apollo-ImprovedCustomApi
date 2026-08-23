@@ -187,10 +187,13 @@ static NSString *const UDKeySubredditShowDisplayName = @"SubredditShowDisplayNam
 // master NO = Off.
 static NSString *const UDKeyCommunityHighlights = @"CommunityHighlights";
 static NSString *const UDKeyCommunityHighlightsWeb = @"CommunityHighlightsWeb";
+// Internal idle-re-expansion component shared by both selectable Scroll
+// Behavior modes. Always YES where native tab-bar behavior is supported; the
+// old key remains for preferences/backup compatibility.
 static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdle";
-// Liquid Glass only. Restores Apollo's classic bidirectional hide-bars feel:
-// scrolling down minimizes the tab bar, and reversing toward the top expands
-// it immediately instead of waiting to reach the scroll edge. Default NO.
+// Liquid Glass only. Selects Classic rather than Two-Gesture behavior. Classic
+// restores Apollo's bidirectional feel: scrolling down minimizes the tab bar,
+// and reversing toward the top expands it immediately. Default NO.
 static NSString *const UDKeyClassicTabBarScrollBehavior = @"ClassicTabBarScrollBehavior";
 // Apollo's native Settings > General preference, consumed by the Liquid Glass
 // tab-bar compatibility layer as its source of truth.

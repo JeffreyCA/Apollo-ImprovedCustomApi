@@ -3601,7 +3601,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeySubredditShowDisplayName: @YES,
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
-                                    UDKeyAutoHideTabBarShowOnIdle: @NO,
+                                    UDKeyAutoHideTabBarShowOnIdle: @YES,
                                     UDKeyClassicTabBarScrollBehavior: @NO,
                                     UDKeyTabBarCollapseSide: @0,
                                     UDKeyKeepSearchBarInPlace: @NO,
@@ -3858,6 +3858,13 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
     sClassicTabBarScrollBehavior = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyClassicTabBarScrollBehavior];
+    if (ApolloSupportsNativeTabBarScrollBehavior() && !sAutoHideTabBarShowOnIdle) {
+        // Idle re-expansion is now bundled into both selectable scroll modes.
+        // Normalize older/restored independent-switch state on supported OSes.
+        sAutoHideTabBarShowOnIdle = YES;
+        [standardDefaults setBool:YES forKey:UDKeyAutoHideTabBarShowOnIdle];
+        ApolloLog(@"[AutoHideTabBarFix] Migrated scroll behavior to include idle re-expansion");
+    }
     NSInteger storedTabBarHideStyle =
         [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyTabBarCollapseSide];
     if (storedTabBarHideStyle < ApolloTabBarHideStyleLeft ||

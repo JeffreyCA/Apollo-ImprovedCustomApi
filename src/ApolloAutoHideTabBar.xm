@@ -18,13 +18,13 @@
 //   reveal. A scoped guard prevents bottom rubber-banding from expanding them.
 //   Fade/Down animate the full bar while the nav bar stays visible.
 //
-//   Mode B ("Tab Bar Re-Expands When Idle") preserves its established legacy
-//   semantics: a deliberate reverse scroll expands before the top, and the
-//   first following collapse gesture is consumed so the second collapses.
-//   "Classic Tab Bar Scroll Behavior" opts into the normalized
+//   Two-Gesture preserves the established legacy semantics: a deliberate
+//   reverse scroll expands before the top, and the first following collapse
+//   gesture is consumed so the second collapses. Classic uses the normalized
 //   one-gesture response: reverse motion expands and the very next downward
-//   gesture collapses. Both expansion paths use UIKit's floating visual
-//   provider so iOS 27 morphs smoothly instead of snapping.
+//   gesture collapses. Both modes re-expand after 30 seconds idle and use
+//   UIKit's floating visual provider so iOS 27 morphs smoothly instead of
+//   snapping.
 //
 // iOS <26 (legacy mirror):
 //   Apollo's hide-on-swipe hides the bottom UITabBar but never restores it.
@@ -51,6 +51,7 @@ static char kApolloNativeBottomGuardInteractionKey;
 
 static void ApolloPrepareNativeScrollAwayBottomGuard(UITabBarController *tbc);
 static void ApolloRefreshNativeScrollAwayBottomGuard(UITabBarController *tbc);
+static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc);
 
 static const NSTimeInterval ApolloIdleRevealDelaySeconds = 30.0;
 static const NSTimeInterval ApolloIdleRevealRescheduleInterval = 0.25;
@@ -1928,6 +1929,10 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
             ApolloNativeHideBarsOnScrollPreferenceEnabled();
         ApolloForEachVisibleTabBarController(^(UITabBarController *tbc) {
             ApolloReapplyNativeMinimizeBehavior(tbc, @"idleModeChanged");
+            // Reapply cancels the previous timer/gesture state. A real mode
+            // change must immediately re-arm the idle guarantee so a tab bar
+            // that is already collapsed cannot remain there indefinitely.
+            ApolloScheduleIdleRevealTimer(tbc);
         });
     }];
 
