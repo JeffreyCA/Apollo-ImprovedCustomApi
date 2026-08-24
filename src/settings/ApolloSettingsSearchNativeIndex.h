@@ -225,6 +225,7 @@ static NSArray<NSArray *> *ApolloSettingsSearchNativeRows(void) {
             @[@"Margaret", @"App Icon → Sekrit Icons", @"App Icon", @NO],
             @[@"ApolloBook Pro", @"App Icon → Sekrit Icons", @"App Icon", @NO],
             @[@"Beans", @"App Icon → Sekrit Icons", @"App Icon", @NO],
+            @[@"Icons Drop Test", @"App Icon → Sekrit Icons", @"App Icon", @NO],
             @[@"Lock with Passcode", @"Passcode", @"Passcode", @NO],
             @[@"Require Passcode", @"Passcode", @"Passcode", @NO],
             @[@"Add Keyword", @"Filters & Blocks → FILTERED KEYWORDS", @"Filters & Blocks", @NO],
