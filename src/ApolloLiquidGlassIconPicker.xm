@@ -1039,7 +1039,7 @@ static NSInteger LGStandardPackIconCount(LGStandardPack pack) {
         case LGStandardPackApolloOriginals: return 32;
         case LGStandardPackCommunity:       return 19;
         case LGStandardPackUltra:           return 80;
-        case LGStandardPackSekrit:          return 21;
+        case LGStandardPackSekrit:          return 22;
         case LGStandardPackCount:           return 0;
     }
 }
@@ -2690,6 +2690,106 @@ static void LGInstallAppearanceMenu(UIViewController *controller, UIView *hostVi
 
 static const NSInteger kLGUltraLowBatteryRow = 63;
 static const NSInteger kLGUltraPaletteRow = 70;
+static const NSInteger kLGNativeSekritSection = 4;
+static const NSInteger kLGNativeSekritIconCount = 21;
+static NSString *const kLGEAPIconID = @"eap";
+static char kLGEAPRowAppendedKey;
+
+// Only append to Apollo's known 21-row Sekrit list; a future native row wins.
+static BOOL LGShouldAppendEAPRow(NSInteger section, NSInteger nativeRowCount) {
+    if (section != kLGNativeSekritSection || nativeRowCount != kLGNativeSekritIconCount) return NO;
+    NSDictionary *alternates = NSBundle.mainBundle.infoDictionary[@"CFBundleIcons"][@"CFBundleAlternateIcons"];
+    return alternates[kLGEAPIconID] != nil;
+}
+
+static void LGRememberEAPAppendDecision(id controller, NSInteger section, NSInteger nativeRowCount) {
+    if (section != kLGNativeSekritSection) return;
+    objc_setAssociatedObject(controller, &kLGEAPRowAppendedKey,
+                             @(LGShouldAppendEAPRow(section, nativeRowCount)),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static BOOL LGIsAppendedEAPRow(id controller, NSInteger section, NSInteger row) {
+    return section == kLGNativeSekritSection &&
+        [objc_getAssociatedObject(controller, &kLGEAPRowAppendedKey) boolValue] &&
+        row == kLGNativeSekritIconCount;
+}
+
+static void LGSetApolloCellNativeCheckmark(UITableViewCell *cell, BOOL selected) {
+    if (!cell) return;
+    cell.accessoryView = nil;
+    cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    Ivar ivar = class_getInstanceVariable([cell class], "apolloAccessoryType");
+    if (ivar) {
+        uint8_t *field = (uint8_t *)(__bridge void *)cell + ivar_getOffset(ivar);
+        *field = selected ? 0 : 2;
+    }
+}
+
+static UIImage *LGNormalizedEAPThumbnail(void) {
+    static UIImage *thumbnail;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        UIImage *source = LGStandardIconPreview(kLGEAPIconID);
+        if (!source) return;
+
+        // Render onto the native 76-point canvas so the raw icon is not cropped.
+        CGSize size = CGSizeMake(76.0, 76.0);
+        UIGraphicsBeginImageContextWithOptions(size, NO, UIScreen.mainScreen.scale);
+        CGRect bounds = (CGRect){ CGPointZero, size };
+        [[UIBezierPath bezierPathWithRoundedRect:bounds cornerRadius:17.0] addClip];
+        [source drawInRect:bounds];
+        thumbnail = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+    });
+    return thumbnail;
+}
+
+static UITableViewCell *LGConfigureEAPCell(UITableViewCell *cell) {
+    cell.textLabel.text = @"Icons Drop Test";
+    cell.detailTextLabel.text = @"EverythingApplePro";
+    cell.imageView.image = LGNormalizedEAPThumbnail();
+    cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
+    cell.imageView.clipsToBounds = NO;
+    BOOL selected = [UIApplication.sharedApplication.alternateIconName isEqualToString:kLGEAPIconID];
+    LGSetApolloCellNativeCheckmark(cell, selected);
+    cell.accessibilityLabel = @"Icons Drop Test, EverythingApplePro";
+    return cell;
+}
+
+static UITableViewCell *LGCreateEAPCell(void) {
+    Class cellClass = NSClassFromString(@"Apollo.ApolloSubtitleTableViewCell");
+    if (!cellClass) cellClass = NSClassFromString(@"_TtC6Apollo27ApolloSubtitleTableViewCell");
+    UITableViewCell *cell = [[cellClass ?: UITableViewCell.class alloc]
+        initWithStyle:UITableViewCellStyleSubtitle
+       reuseIdentifier:@"ApolloEAPIconCell"];
+    return LGConfigureEAPCell(cell);
+}
+
+static void LGSetNativeIconCellCheckmark(UITableViewCell *cell, BOOL selected);
+
+// A tweak-owned cell avoids dequeuing twice for one index path, which UIKit rejects.
+@interface LGAddedSekritIconCell : UITableViewCell
+@end
+
+@implementation LGAddedSekritIconCell
+
+- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
+    [super setHighlighted:highlighted animated:animated];
+    self.selectedBackgroundView = nil;
+    LGSetPressAnimationHighlighted(self, LGNativeIconCellPressAnimation(self), highlighted);
+    NSNumber *selected = objc_getAssociatedObject(self, &kLGNativeIconCellSelectedKey);
+    if (selected) LGSetNativeIconCellCheckmark(self, selected.boolValue);
+}
+
+- (void)prepareForReuse {
+    LGPressAnimationBox *box = objc_getAssociatedObject(self, &kLGNativeIconCellPressAnimationKey);
+    if (box) LGResetPressAnimation(self, &box->_state);
+    self.selectedBackgroundView = nil;
+    [super prepareForReuse];
+}
+
+@end
 
 static UIImage *LGNormalizedUltraThumbnail(NSString *baseName) {
     static NSMutableDictionary<NSString *, UIImage *> *cache;
@@ -2735,8 +2835,6 @@ static void LGFixLegacyUltraPreview(UITableViewCell *cell, NSInteger row) {
     UIImage *thumbnail = baseName ? LGNormalizedUltraThumbnail(baseName) : nil;
     if (thumbnail) cell.imageView.image = thumbnail;
 }
-
-static void LGSetNativeIconCellCheckmark(UITableViewCell *cell, BOOL selected);
 
 static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
                                                 UIColor *cardBackgroundColor,
@@ -2796,6 +2894,40 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 - (UIColor *)lg_pageBackgroundColor {
     UITableView *liveSource = ApolloThemeSourceTableIsStale(_sourceTable) ? nil : _sourceTable;
     return LGThemedPageBackgroundColor(liveSource);
+}
+
+- (NSInteger)lg_nativeRowCountForTableView:(UITableView *)tableView {
+    id source = _sourceController;
+    if (!source) return 0;
+    LGSetForwardedNativeSection(source, _nativeSection);
+    NSInteger count = ((NSInteger (*)(id, SEL, UITableView *, NSInteger))objc_msgSend)(
+        source, @selector(tableView:numberOfRowsInSection:), tableView, 0);
+    LGSetForwardedNativeSection(source, NSNotFound);
+    return count;
+}
+
+- (BOOL)lg_shouldAppendEAPForNativeCount:(NSInteger)nativeCount {
+    return _pack == LGStandardPackSekrit &&
+        LGShouldAppendEAPRow(_nativeSection, nativeCount);
+}
+
+- (BOOL)lg_isEAPRow:(NSInteger)row tableView:(UITableView *)tableView {
+    NSInteger nativeCount = [self lg_nativeRowCountForTableView:tableView];
+    return [self lg_shouldAppendEAPForNativeCount:nativeCount] && row == nativeCount;
+}
+
+- (void)lg_styleEAPCell:(UITableViewCell *)cell
+              tableView:(UITableView *)tableView
+            atIndexPath:(NSIndexPath *)indexPath {
+    [self apollo_applyPrimaryTextColorToCell:cell];
+    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.tintColor = ApolloThemeAccentColor() ?: tableView.tintColor;
+    cell.selectedBackgroundView = nil;
+    NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
+    LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
+                                        indexPath.row == 0, indexPath.row == rowCount - 1);
+    LGSetNativeIconCellCheckmark(cell,
+        LGStandardPackRowIsActive(LGStandardPackSekrit, indexPath.row));
 }
 
 - (void)lg_reassertVisibleNativeRows {
@@ -2911,16 +3043,23 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    id source = _sourceController;
-    if (!source) return 0;
-    LGSetForwardedNativeSection(source, _nativeSection);
-    NSInteger count = ((NSInteger (*)(id, SEL, UITableView *, NSInteger))objc_msgSend)(
-        source, @selector(tableView:numberOfRowsInSection:), tableView, 0);
-    LGSetForwardedNativeSection(source, NSNotFound);
-    return count;
+    NSInteger nativeCount = [self lg_nativeRowCountForTableView:tableView];
+    return nativeCount + ([self lg_shouldAppendEAPForNativeCount:nativeCount] ? 1 : 0);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if ([self lg_isEAPRow:indexPath.row tableView:tableView]) {
+        static NSString *const reuseID = @"LGAddedSekritIconCell";
+        LGAddedSekritIconCell *cell = (LGAddedSekritIconCell *)
+            [tableView dequeueReusableCellWithIdentifier:reuseID];
+        if (!cell) {
+            cell = [[LGAddedSekritIconCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                                reuseIdentifier:reuseID];
+        }
+        LGConfigureEAPCell(cell);
+        [self lg_styleEAPCell:cell tableView:tableView atIndexPath:indexPath];
+        return cell;
+    }
     id source = _sourceController;
     if (!source) return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     LGSetForwardedNativeSection(source, _nativeSection);
@@ -2943,6 +3082,13 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
                                       forRowAtIndexPath:(NSIndexPath *)indexPath {
     id source = _sourceController;
     if (!source) return;
+
+    if ([self lg_isEAPRow:indexPath.row tableView:tableView]) {
+        [self apollo_applyPrimaryTextColorToCell:cell];
+        [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath];
+        [self lg_styleEAPCell:cell tableView:tableView atIndexPath:indexPath];
+        return;
+    }
 
     // Let the tweak-owned settings base apply its native theme first. Our
     // source-controller bridge and persisted selection state must be the last
@@ -2995,6 +3141,16 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     id source = _sourceController;
     if (!source) return UITableViewAutomaticDimension;
+    if ([self lg_isEAPRow:indexPath.row tableView:tableView]) {
+        NSInteger nativeCount = [self lg_nativeRowCountForTableView:tableView];
+        if (nativeCount <= 0) return 104.0;
+        NSIndexPath *templatePath = [NSIndexPath indexPathForRow:nativeCount - 1 inSection:0];
+        LGSetForwardedNativeSection(source, _nativeSection);
+        CGFloat height = ((CGFloat (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(
+            source, @selector(tableView:heightForRowAtIndexPath:), tableView, templatePath);
+        LGSetForwardedNativeSection(source, NSNotFound);
+        return height;
+    }
     LGSetForwardedNativeSection(source, _nativeSection);
     CGFloat height = ((CGFloat (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(
         source, @selector(tableView:heightForRowAtIndexPath:), tableView, indexPath);
@@ -3027,6 +3183,23 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
         __weak LGNativeIconPackViewController *weakSelf = self;
         LGPerformNativeIconSelectionWithFeedback(tableView, ^{
             [weakSelf lg_reassertVisibleNativeRows];
+        });
+        return;
+    }
+
+    if ([self lg_isEAPRow:indexPath.row tableView:tableView]) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        __weak UITableView *weakTable = tableView;
+        NSInteger row = indexPath.row;
+        LGPerformNativeIconSelectionWithFeedback(tableView, ^{
+            UITableView *strongTable = weakTable;
+            if (!strongTable) return;
+            LGApplyAlternateIcon(strongTable, kLGEAPIconID, ^(BOOL success) {
+                if (!success) return;
+                LGClearPersistedActiveIconID();
+                LGPersistActiveStandardPackRow(LGStandardPackSekrit, row);
+                [strongTable reloadData];
+            });
         });
         return;
     }
@@ -3519,7 +3692,9 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         if (section == LGStandardPacksSectionIndex()) return LGCardRowCount(LGStandardPackCount, columnCount);
         return %orig(tableView, LGRemapSectionToOriginal(section));
     }
-    return %orig;
+    NSInteger nativeCount = %orig;
+    LGRememberEAPAppendDecision(self, section, nativeCount);
+    return nativeCount + (LGShouldAppendEAPRow(section, nativeCount) ? 1 : 0);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -3623,6 +3798,9 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         if (r.section == 0 && r.row == 0) LGCorrectDefaultRowCheckmark(cell);
         return cell;
     }
+    if (LGIsAppendedEAPRow(self, indexPath.section, indexPath.row)) {
+        return LGCreateEAPCell();
+    }
     return %orig;
 }
 
@@ -3645,6 +3823,14 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         // again here so whichever pass is authoritative for final rendering
         // still ends up right.
         if (r.section == 0 && r.row == 0) LGCorrectDefaultRowCheckmark(cell);
+        return;
+    }
+    NSInteger nativeCount = kLGNativeSekritIconCount;
+    if (LGIsAppendedEAPRow(self, indexPath.section, indexPath.row)) {
+        NSIndexPath *templatePath = [NSIndexPath indexPathForRow:nativeCount - 1
+                                                       inSection:indexPath.section];
+        %orig(tableView, cell, templatePath);
+        LGConfigureEAPCell(cell);
         return;
     }
     %orig;
@@ -3686,6 +3872,12 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         NSIndexPath *r = LGRemapIndexPathToOriginal(indexPath);
         LG_REMAP_SCOPE(tableView, r.section, indexPath.section);
         return %orig(tableView, r);
+    }
+    NSInteger nativeCount = kLGNativeSekritIconCount;
+    if (LGIsAppendedEAPRow(self, indexPath.section, indexPath.row)) {
+        NSIndexPath *templatePath = [NSIndexPath indexPathForRow:nativeCount - 1
+                                                       inSection:indexPath.section];
+        return %orig(tableView, templatePath);
     }
     return %orig;
 }
@@ -3753,6 +3945,14 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         }
         LG_REMAP_SCOPE(tableView, r.section, indexPath.section);
         %orig(tableView, r);
+        return;
+    }
+    if (LGIsAppendedEAPRow(self, indexPath.section, indexPath.row)) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        __weak UITableView *weakTable = tableView;
+        LGApplyAlternateIconSerialized(tableView, kLGEAPIconID, ^(BOOL success) {
+            if (success) [weakTable reloadData];
+        });
         return;
     }
     %orig;
