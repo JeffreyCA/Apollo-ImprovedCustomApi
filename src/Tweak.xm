@@ -3562,6 +3562,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyDevvitFeedWidgets: @YES,
                                     UDKeyFloatingPostTabs: @NO,
                                     UDKeyFloatingPostTabsMagnet: @YES,
+                                    UDKeyFloatingPostTabsPreview: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0,
                                     UDKeyUnmuteFeedVideos: @0,
@@ -3693,6 +3694,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sDevvitFeedWidgets = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets];
     sFloatingPostTabs = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabs];
     sFloatingPostTabsMagnet = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabsMagnet];
+    sFloatingPostTabsPreview = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabsPreview];
     sPreferredGIFFallbackFormat = ([[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sReadPostMaxCount = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyReadPostMaxCount];
     sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];

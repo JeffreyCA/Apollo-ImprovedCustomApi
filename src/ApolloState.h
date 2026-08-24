@@ -40,6 +40,9 @@ extern BOOL sFloatingPostTabs;
 // moves the pile, tap fans it apart). Default on; only consulted while the
 // master toggle is on.
 extern BOOL sFloatingPostTabsMagnet;
+// Sub-toggle: hold a bubble for a peek-and-pop snapshot preview (release
+// opens, slide away cancels). Default on; consulted while the master is on.
+extern BOOL sFloatingPostTabsPreview;
 extern NSInteger sPreferredGIFFallbackFormat;
 
 extern NSInteger sReadPostMaxCount;

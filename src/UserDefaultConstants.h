@@ -570,6 +570,11 @@ static NSString *const UDKeyFloatingPostTabs = @"FloatingPostTabs";
 // pile (tap fans it apart). Default ON; only consulted while the master
 // toggle is on. Turning it off fans existing piles out.
 static NSString *const UDKeyFloatingPostTabsMagnet = @"FloatingPostTabsMagnet";
+// Sub-toggle: holding a bubble pops a snapshot preview card with
+// peek-and-pop semantics (release opens the post, slide away first to
+// cancel). Default ON; only consulted while the master toggle is on. Off =
+// long-press does nothing (bubbles only tap and drag).
+static NSString *const UDKeyFloatingPostTabsPreview = @"FloatingPostTabsPreview";
 // Persisted open tabs (array of dicts: linkKey/permalink/title/subreddit +
 // dock state), rewritten on every tab mutation so bubbles survive relaunch.
 // Deliberately NOT registered with a default — absent means "no tabs".

@@ -6,8 +6,8 @@
 // navigation: browse anywhere, tap the bubble, and you're back on that post —
 // EXACTLY where you left it, because the tab retains the live
 // CommentsViewController and pops/pushes it back rather than reloading the
-// thread. Feature master toggle (default OFF) + Magnetic Stacking sub-toggle
-// live in Settings → Posts & Feeds → Floating Tabs.
+// thread. Feature master toggle (default OFF) + Magnetic Stacking and Hold
+// to Preview sub-toggles live in Settings → Posts & Feeds → Floating Tabs.
 //
 // Interaction model (all standard iOS gestures, PiP/chat-heads conventions):
 //   - Drag: bubble follows the finger; on release it snaps to the nearest
@@ -22,13 +22,16 @@
 //     collapsed comments, everything survives. Cold tabs (restored after a
 //     relaunch, or after a memory-pressure drop) reopen via Apollo's own URL
 //     router instead.
-//   - Long-press: a standard context menu with a snapshot preview of the post
-//     as you last saw it, plus Open Post / Fan Out (stacks) / Close Tab. This
-//     is deliberately how "preview" and "close" coexist without inventing a
-//     conflicting gesture: preview is the menu's preview, close is a menu row.
-//   - Close, the gestural way: while any bubble is being dragged an ✕ target
-//     fades in bottom-center (the Messenger convention); dropping the bubble
-//     on it closes that tab (dropping a pile closes the whole pile).
+//   - Long-press ("Hold to Preview", toggleable): a snapshot card of the post
+//     as you last saw it pops in while the finger stays down — 3D-Touch
+//     peek-and-pop semantics: RELEASE to open the post, SLIDE AWAY first to
+//     cancel (the card visibly deflates while in the cancel zone). No menu:
+//     opening is the release, closing is the ✕ drag below, so a menu would
+//     only duplicate gestures that already exist.
+//   - Close: while any bubble is being dragged an ✕ target fades in
+//     bottom-center (the Messenger convention); dropping the bubble on it
+//     closes that tab (dropping a pile closes the whole pile). VoiceOver gets
+//     Open/Close/Fan-out as accessibility custom actions instead.
 //   - Magnetic Stacking (toggle, default ON): releasing a bubble within the
 //     magnet radius of another clicks them together into a pile with a haptic
 //     (the hovered target swells while dragging as the "will attach" hint).
@@ -78,6 +81,11 @@ static const CGFloat kFTCloseHitRadius = 64.0;      // drop-to-close capture dis
 static const CGFloat kFTFlingVelocityThreshold = 250.0;  // below this a release stays put (same as PiP)
 static const CGFloat kFTTuckVelocityThreshold = 300.0;   // outward fling speed that tucks (same as PiP)
 static const NSInteger kFTMaxTabs = 3;
+// Hold-to-preview (peek-and-pop): finger travel from the press point beyond
+// this radius flips the pending action from "release opens" to "cancelled"
+// (sliding back inside re-arms it). Roomy enough that the natural hold jitter
+// never cancels, small enough that a deliberate slide-away clearly does.
+static const CGFloat kFTPreviewCancelRadius = 80.0;
 
 // Deceleration projection (WWDC18 formula) with PiP's deliberately fast rate:
 // a real fling still tosses the bubble, a casual release stays put.
@@ -269,22 +277,20 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 // status-bar scroll-to-top tap only searches the KEY window's scroll views, so
 // a full-screen overlay that steals key silently breaks scroll-to-top (the
 // hard-won ApolloPiPWindow lesson).
+// (Historical note: an earlier revision used UIContextMenuInteraction for the
+// long-press. iOS 26 hosts the menu UI inside THIS window, where the
+// passthrough hitTest made the visible menu untouchable — taps fell through
+// to Apollo behind it. The hold-to-preview card below is tweak-drawn and
+// display-only, so the passthrough filter stays simple: bubbles and nothing
+// else.)
 @interface ApolloFloatingTabsWindow : UIWindow
 @property (nonatomic, strong) NSHashTable<UIView *> *interactiveViews;
-// While a bubble's context menu is presented, UIKit hosts the menu UI
-// (platter, actions, dimming/dismiss catcher) in THIS window — none of it a
-// descendant of a bubble. Passthrough filtering would make the visible menu
-// untouchable (every tap would fall through to Apollo BEHIND it, sim-verified
-// zombie-menu bug), so for the menu's lifetime the window behaves as a normal
-// window and lets the menu own every touch, including outside-taps to dismiss.
-@property (nonatomic, assign) BOOL contextMenuOwnsTouches;
 @end
 
 @implementation ApolloFloatingTabsWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     if (!hit) return nil;
-    if (self.contextMenuOwnsTouches) return hit;
     for (UIView *candidate in self.interactiveViews) {
         if (!candidate.hidden && (hit == candidate || [hit isDescendantOfView:candidate])) return hit;
     }
@@ -317,7 +323,7 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 // MARK: - Controller
 // =============================================================================
 
-@interface ApolloFloatingTabsController : NSObject <UIContextMenuInteractionDelegate, UIGestureRecognizerDelegate>
+@interface ApolloFloatingTabsController : NSObject <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) NSMutableArray<ApolloFloatingTab *> *tabs;
 @property (nonatomic, strong) NSMapTable<ApolloFloatingTab *, ApolloFloatingBubbleView *> *bubbles; // strong->strong
 @property (nonatomic, strong) ApolloFloatingTabsWindow *window;
@@ -328,8 +334,15 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 @property (nonatomic, strong) NSArray<ApolloFloatingTab *> *dragGroup;  // grabbed first
 @property (nonatomic, strong) ApolloFloatingTab *magnetCandidate;
 @property (nonatomic, assign) BOOL closeHovering;
-@property (nonatomic, assign) BOOL contextMenuActive;
 @property (nonatomic, assign) BOOL openInFlight;
+// Hold-to-preview state (one preview at a time; finger is down for its whole
+// lifetime, so all of this is torn down on the gesture's end/cancel)
+@property (nonatomic, strong) ApolloFloatingTab *previewTab;
+@property (nonatomic, strong) UIView *previewDim;
+@property (nonatomic, strong) UIView *previewCard;
+@property (nonatomic, strong) UILabel *previewFooter;
+@property (nonatomic, assign) CGPoint previewPressStart;
+@property (nonatomic, assign) BOOL previewCommitArmed;
 // Icon pipeline
 @property (nonatomic, strong) NSCache<NSString *, UIImage *> *iconCache;         // lowercased subreddit -> image
 @property (nonatomic, strong) NSMutableSet<NSString *> *iconFetchesInFlight;
@@ -350,6 +363,10 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 - (void)beginDragForTab:(ApolloFloatingTab *)tab;
 - (void)updateDragWithGrabbedCenter:(CGPoint)center;
 - (void)endDragAtCenter:(CGPoint)center velocity:(CGPoint)velocity;
+// Shared hold-to-preview pipeline (long-press handler + sim debug bridge)
+- (void)beginPreviewForTab:(ApolloFloatingTab *)tab atPoint:(CGPoint)point;
+- (void)updatePreviewWithLocation:(CGPoint)location;
+- (void)endPreviewCommitting:(BOOL)commit;
 @end
 
 static ApolloFloatingTabsController *sFTController = nil;
@@ -377,18 +394,7 @@ static ApolloFloatingTabsController *sFTController = nil;
                                              selector:@selector(handleMemoryWarning)
                                                  name:UIApplicationDidReceiveMemoryWarningNotification
                                                object:nil];
-    // Failsafe: if a context menu is torn down without willEnd (backgrounding
-    // mid-menu), the window must not stay in menu-owns-touches mode — that
-    // would block every passthrough touch behind an invisible menu.
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(handleDidEnterBackground)
-                                                 name:UIApplicationDidEnterBackgroundNotification
-                                               object:nil];
     return self;
-}
-
-- (void)handleDidEnterBackground {
-    [self setContextMenuPresented:NO];
 }
 
 // Snapshots are disposable previews; the retained VCs are the feature and are
@@ -544,8 +550,14 @@ static ApolloFloatingTabsController *sFTController = nil;
     tap.delegate = self;
     [bubble addGestureRecognizer:tap];
 
-    UIContextMenuInteraction *contextMenu = [[UIContextMenuInteraction alloc] initWithDelegate:self];
-    [bubble addInteraction:contextMenu];
+    // Hold-to-preview: a still press pops the snapshot card; moving early
+    // fails this recognizer (default allowable movement) and the pan drags
+    // instead, so drag vs preview disambiguate exactly like chat heads.
+    UILongPressGestureRecognizer *press =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+    press.minimumPressDuration = 0.35;
+    press.delegate = self;
+    [bubble addGestureRecognizer:press];
 
     [self.rootViewController.view addSubview:bubble];
     [self.window.interactiveViews addObject:bubble];
@@ -771,6 +783,7 @@ static ApolloFloatingTabsController *sFTController = nil;
     for (ApolloFloatingTab *tab in self.tabs) {
         [[self bubbleForTab:tab] updateTuckAppearance];
         [[self bubbleForTab:tab] refreshAccessibility];
+        [self refreshAccessibilityActionsForTab:tab];
     }
     if (animated) {
         [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.3
@@ -778,6 +791,37 @@ static ApolloFloatingTabsController *sFTController = nil;
     } else {
         apply();
     }
+}
+
+// VoiceOver can't drag onto the ✕ or hold-and-slide, so every gesture gets a
+// custom-action equivalent on the bubble itself.
+- (void)refreshAccessibilityActionsForTab:(ApolloFloatingTab *)tab {
+    ApolloFloatingBubbleView *bubble = [self bubbleForTab:tab];
+    if (!bubble) return;
+    __weak __typeof(self) weakSelf = self;
+    NSString *linkKey = tab.linkKey;
+    NSMutableArray<UIAccessibilityCustomAction *> *actions = [NSMutableArray array];
+    [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:@"Open Post"
+                                                           actionHandler:^BOOL(UIAccessibilityCustomAction *action) {
+        ApolloFloatingTab *live = [weakSelf tabForLinkKey:linkKey];
+        if (live) [weakSelf openTab:live];
+        return live != nil;
+    }]];
+    if (tab.stackID) {
+        [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:@"Fan Out Stack"
+                                                               actionHandler:^BOOL(UIAccessibilityCustomAction *action) {
+            ApolloFloatingTab *live = [weakSelf tabForLinkKey:linkKey];
+            if (live.stackID) [weakSelf fanOutStack:live.stackID];
+            return live.stackID == nil;
+        }]];
+    }
+    [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:@"Close Tab"
+                                                           actionHandler:^BOOL(UIAccessibilityCustomAction *action) {
+        ApolloFloatingTab *live = [weakSelf tabForLinkKey:linkKey];
+        if (live) [weakSelf closeTabs:@[live] animated:YES];
+        return live != nil;
+    }]];
+    bubble.accessibilityCustomActions = actions;
 }
 
 // =============================================================================
@@ -1082,8 +1126,13 @@ static ApolloFloatingTabsController *sFTController = nil;
 // =============================================================================
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
-    // Never fight an open context menu (its own gestures own the bubble).
-    return !self.contextMenuActive;
+    // While a preview is up the finger belongs to the long-press; while a
+    // drag is live the finger belongs to the pan. Neither may start under
+    // the other.
+    if ([gestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]]) {
+        return sFloatingPostTabsPreview && self.dragGroup.count == 0;
+    }
+    return self.previewTab == nil;
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
@@ -1248,119 +1297,206 @@ static ApolloFloatingTabsController *sFTController = nil;
 }
 
 // =============================================================================
-// MARK: Context menu (long-press: preview + actions)
+// MARK: Hold to Preview (peek-and-pop)
 // =============================================================================
+// A still press pops a snapshot card of the post as last seen. The finger
+// stays down for the card's whole life: RELEASING while armed opens the post
+// (the "pop"), sliding beyond kFTPreviewCancelRadius first disarms it — the
+// card deflates and dims so the pending cancel is visible — and sliding back
+// re-arms. All tweak-drawn and display-only, so the passthrough window needs
+// no special casing (unlike the UIContextMenuInteraction attempt this
+// replaced — see the window's historical note).
 
-- (UIContextMenuConfiguration *)contextMenuInteraction:(UIContextMenuInteraction *)interaction
-                        configurationForMenuAtLocation:(CGPoint)location {
-    ApolloFloatingTab *tab = [self tabForBubble:interaction.view];
-    if (!tab) return nil;
-    __weak __typeof(self) weakSelf = self;
-
-    UIContextMenuContentPreviewProvider previewProvider = nil;
-    UIImage *snapshot = tab.snapshot;
-    if (snapshot) {
-        previewProvider = ^UIViewController *{
-            UIViewController *previewVC = [[UIViewController alloc] init];
-            UIImageView *imageView = [[UIImageView alloc] initWithImage:snapshot];
-            imageView.contentMode = UIViewContentModeScaleAspectFill;
-            imageView.clipsToBounds = YES;
-            previewVC.view = imageView;
-            previewVC.preferredContentSize = snapshot.size;
-            return previewVC;
-        };
-    }
-
-    return [UIContextMenuConfiguration configurationWithIdentifier:tab.linkKey
-                                                   previewProvider:previewProvider
-                                                    actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggested) {
-        ApolloFloatingTab *liveTab = [weakSelf tabForLinkKey:tab.linkKey];
-        if (!liveTab) return nil;
-        NSMutableArray<UIMenuElement *> *actions = [NSMutableArray array];
-
-        [actions addObject:[UIAction actionWithTitle:@"Open Post"
-                                               image:[UIImage systemImageNamed:@"arrow.up.right.square"]
-                                          identifier:nil
-                                             handler:^(UIAction *action) {
-            [weakSelf openTab:liveTab];
-        }]];
-        if (liveTab.stackID) {
-            [actions addObject:[UIAction actionWithTitle:@"Fan Out Stack"
-                                                   image:[UIImage systemImageNamed:@"rectangle.stack"]
-                                              identifier:nil
-                                                 handler:^(UIAction *action) {
-                [weakSelf fanOutStack:liveTab.stackID];
-            }]];
+- (void)handleLongPress:(UILongPressGestureRecognizer *)press {
+    UIView *container = self.rootViewController.view;
+    switch (press.state) {
+        case UIGestureRecognizerStateBegan: {
+            ApolloFloatingTab *tab = [self tabForBubble:press.view];
+            if (!tab || self.previewTab) return;
+            [self beginPreviewForTab:tab atPoint:[press locationInView:container]];
+            break;
         }
-        UIAction *closeAction = [UIAction actionWithTitle:@"Close Tab"
-                                                    image:[UIImage systemImageNamed:@"xmark"]
-                                               identifier:nil
-                                                  handler:^(UIAction *action) {
-            [weakSelf closeTabs:@[liveTab] animated:YES];
-        }];
-        closeAction.attributes = UIMenuElementAttributesDestructive;
-        [actions addObject:closeAction];
-
-        // Menu title = the post, so piles are self-describing per bubble.
-        NSString *title = liveTab.title ?: @"";
-        if (title.length > 64) title = [[title substringToIndex:63] stringByAppendingString:@"…"];
-        return [UIMenu menuWithTitle:title children:actions];
-    }];
-}
-
-// Circular highlight/dismiss shape instead of the default square.
-- (UITargetedPreview *)targetedPreviewForBubbleOfInteraction:(UIContextMenuInteraction *)interaction {
-    UIView *bubble = interaction.view;
-    if (!bubble.window) return nil;
-    UIPreviewParameters *params = [[UIPreviewParameters alloc] init];
-    params.visiblePath = [UIBezierPath bezierPathWithOvalInRect:bubble.bounds];
-    params.backgroundColor = [UIColor clearColor];
-    return [[UITargetedPreview alloc] initWithView:bubble parameters:params];
-}
-
-- (UITargetedPreview *)contextMenuInteraction:(UIContextMenuInteraction *)interaction
-    previewForHighlightingMenuWithConfiguration:(UIContextMenuConfiguration *)configuration {
-    return [self targetedPreviewForBubbleOfInteraction:interaction];
-}
-
-- (UITargetedPreview *)contextMenuInteraction:(UIContextMenuInteraction *)interaction
-    previewForDismissingMenuWithConfiguration:(UIContextMenuConfiguration *)configuration {
-    return [self targetedPreviewForBubbleOfInteraction:interaction];
-}
-
-- (void)setContextMenuPresented:(BOOL)presented {
-    self.contextMenuActive = presented;
-    self.window.contextMenuOwnsTouches = presented;
-}
-
-- (void)contextMenuInteraction:(UIContextMenuInteraction *)interaction
-    willDisplayMenuForConfiguration:(UIContextMenuConfiguration *)configuration
-                          animator:(id<UIContextMenuInteractionAnimating>)animator {
-    [self setContextMenuPresented:YES];
-}
-
-- (void)contextMenuInteraction:(UIContextMenuInteraction *)interaction
-       willEndForConfiguration:(UIContextMenuConfiguration *)configuration
-                      animator:(id<UIContextMenuInteractionAnimating>)animator {
-    __weak __typeof(self) weakSelf = self;
-    if (animator) {
-        [animator addCompletion:^{ [weakSelf setContextMenuPresented:NO]; }];
-    } else {
-        [self setContextMenuPresented:NO];
+        case UIGestureRecognizerStateChanged:
+            if (self.previewTab) [self updatePreviewWithLocation:[press locationInView:container]];
+            break;
+        case UIGestureRecognizerStateEnded:
+            if (self.previewTab) [self endPreviewCommitting:self.previewCommitArmed];
+            break;
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed:
+            if (self.previewTab) [self endPreviewCommitting:NO];
+            break;
+        default:
+            break;
     }
 }
 
-// Tapping the preview commits = open the post.
-- (void)contextMenuInteraction:(UIContextMenuInteraction *)interaction
-    willPerformPreviewActionForMenuWithConfiguration:(UIContextMenuConfiguration *)configuration
-                                            animator:(id<UIContextMenuInteractionCommitAnimating>)animator {
-    NSString *linkKey = (NSString *)configuration.identifier;
-    __weak __typeof(self) weakSelf = self;
-    animator.preferredCommitStyle = UIContextMenuInteractionCommitStyleDismiss;
-    [animator addCompletion:^{
-        ApolloFloatingTab *tab = [weakSelf tabForLinkKey:linkKey];
-        if (tab) [weakSelf openTab:tab];
-    }];
+- (void)beginPreviewForTab:(ApolloFloatingTab *)tab atPoint:(CGPoint)point {
+    UIView *container = self.rootViewController.view;
+    CGRect bounds = container.bounds;
+    self.previewTab = tab;
+    self.previewPressStart = point;
+    self.previewCommitArmed = YES;
+
+    // Dim layer (display-only; the window's passthrough filter never returns
+    // it, so a second finger can't get trapped on it either).
+    UIView *dim = [[UIView alloc] initWithFrame:bounds];
+    dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
+    dim.userInteractionEnabled = NO;
+    dim.alpha = 0;
+    [container addSubview:dim];
+    self.previewDim = dim;
+
+    // Card: the snapshot when we have one, otherwise icon + title placeholder.
+    UIEdgeInsets insets = container.safeAreaInsets;
+    CGFloat cardWidth = MIN(bounds.size.width - 56.0, 340.0);
+    CGFloat maxHeight = bounds.size.height - insets.top - insets.bottom - 180.0;
+    UIImage *snapshot = tab.snapshot;
+    CGFloat aspect = snapshot ? (snapshot.size.height / MAX(1.0, snapshot.size.width)) : 1.1;
+    CGFloat cardHeight = MIN(cardWidth * aspect, maxHeight);
+
+    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(0, 0, cardWidth, cardHeight)];
+    card.layer.cornerRadius = 18.0;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.4;
+    card.layer.shadowRadius = 22.0;
+    card.layer.shadowOffset = CGSizeMake(0, 10);
+    card.userInteractionEnabled = NO;
+
+    UIView *content = [[UIView alloc] initWithFrame:card.bounds];
+    content.layer.cornerRadius = 18.0;
+    content.layer.cornerCurve = kCACornerCurveContinuous;
+    content.clipsToBounds = YES;
+    content.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    [card addSubview:content];
+
+    if (snapshot) {
+        UIImageView *imageView = [[UIImageView alloc] initWithImage:snapshot];
+        imageView.frame = content.bounds;
+        imageView.contentMode = UIViewContentModeScaleAspectFill;
+        [content addSubview:imageView];
+    } else {
+        // Cold tab: no snapshot to show — icon + title placeholder card.
+        ApolloFloatingBubbleView *bubble = [self bubbleForTab:tab];
+        UIImageView *icon = [[UIImageView alloc] initWithImage:bubble.iconView.image];
+        icon.frame = CGRectMake((cardWidth - 72) / 2.0, cardHeight * 0.22, 72, 72);
+        icon.layer.cornerRadius = 36;
+        icon.clipsToBounds = YES;
+        icon.contentMode = UIViewContentModeScaleAspectFill;
+        [content addSubview:icon];
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(20, CGRectGetMaxY(icon.frame) + 16,
+                                                                   cardWidth - 40, cardHeight * 0.5)];
+        title.text = tab.title;
+        title.numberOfLines = 0;
+        title.textAlignment = NSTextAlignmentCenter;
+        title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+        title.textColor = [UIColor labelColor];
+        [title sizeToFit];
+        title.frame = CGRectMake(20, CGRectGetMaxY(icon.frame) + 16, cardWidth - 40, title.frame.size.height);
+        [content addSubview:title];
+    }
+
+    card.center = CGPointMake(bounds.size.width / 2.0, bounds.size.height / 2.0 - 24.0);
+    [container addSubview:card];
+    self.previewCard = card;
+
+    // Footer under the card: post title + the gesture contract.
+    NSString *titleText = tab.title ?: @"";
+    if (titleText.length > 90) titleText = [[titleText substringToIndex:89] stringByAppendingString:@"…"];
+    UILabel *footer = [[UILabel alloc] init];
+    NSMutableAttributedString *footerText = [[NSMutableAttributedString alloc] initWithString:titleText
+        attributes:@{ NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold],
+                      NSForegroundColorAttributeName: [UIColor whiteColor] }];
+    [footerText appendAttributedString:[[NSAttributedString alloc] initWithString:@"\nRelease to open — slide away to cancel"
+        attributes:@{ NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightRegular],
+                      NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.7] }]];
+    footer.attributedText = footerText;
+    footer.numberOfLines = 3;
+    footer.textAlignment = NSTextAlignmentCenter;
+    footer.userInteractionEnabled = NO;
+    footer.layer.shadowColor = [UIColor blackColor].CGColor;
+    footer.layer.shadowOpacity = 0.8;
+    footer.layer.shadowRadius = 4.0;
+    footer.layer.shadowOffset = CGSizeZero;
+    CGSize footerSize = [footer sizeThatFits:CGSizeMake(cardWidth, 100)];
+    footer.frame = CGRectMake((bounds.size.width - cardWidth) / 2.0, CGRectGetMaxY(card.frame) + 14.0,
+                              cardWidth, footerSize.height);
+    footer.alpha = 0;
+    [container addSubview:footer];
+    self.previewFooter = footer;
+
+    ApolloFTHapticImpact(UIImpactFeedbackStyleMedium);
+    card.transform = CGAffineTransformMakeScale(0.55, 0.55);
+    card.alpha = 0;
+    [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.4
+                        options:UIViewAnimationOptionAllowUserInteraction animations:^{
+        card.transform = CGAffineTransformIdentity;
+        card.alpha = 1.0;
+        dim.alpha = 1.0;
+        footer.alpha = 1.0;
+    } completion:nil];
+}
+
+- (void)updatePreviewWithLocation:(CGPoint)location {
+    CGFloat dx = location.x - self.previewPressStart.x;
+    CGFloat dy = location.y - self.previewPressStart.y;
+    BOOL armed = sqrt(dx * dx + dy * dy) <= kFTPreviewCancelRadius;
+    if (armed == self.previewCommitArmed) return;
+    self.previewCommitArmed = armed;
+    ApolloFTHapticImpact(UIImpactFeedbackStyleLight);
+    UIView *card = self.previewCard;
+    UIView *dim = self.previewDim;
+    UILabel *footer = self.previewFooter;
+    [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+        card.transform = armed ? CGAffineTransformIdentity : CGAffineTransformMakeScale(0.9, 0.9);
+        card.alpha = armed ? 1.0 : 0.55;
+        dim.alpha = armed ? 1.0 : 0.5;
+        footer.alpha = armed ? 1.0 : 0.35;
+    } completion:nil];
+}
+
+- (void)endPreviewCommitting:(BOOL)commit {
+    ApolloFloatingTab *tab = self.previewTab;
+    UIView *card = self.previewCard;
+    UIView *dim = self.previewDim;
+    UILabel *footer = self.previewFooter;
+    ApolloFloatingBubbleView *bubble = tab ? [self bubbleForTab:tab] : nil;
+    self.previewTab = nil;
+    self.previewCard = nil;
+    self.previewDim = nil;
+    self.previewFooter = nil;
+    if (!card) return;
+
+    if (commit && tab) {
+        // Pop: the card swells slightly as it hands off to the real screen.
+        ApolloFTHapticImpact(UIImpactFeedbackStyleMedium);
+        [UIView animateWithDuration:0.18 animations:^{
+            card.transform = CGAffineTransformMakeScale(1.06, 1.06);
+            card.alpha = 0;
+            dim.alpha = 0;
+            footer.alpha = 0;
+        } completion:^(BOOL finished) {
+            [card removeFromSuperview];
+            [dim removeFromSuperview];
+            [footer removeFromSuperview];
+        }];
+        [self openTab:tab];
+    } else {
+        // Cancel: the card shrinks back into its bubble.
+        CGPoint target = bubble ? bubble.center : self.previewPressStart;
+        [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+            card.center = target;
+            card.transform = CGAffineTransformMakeScale(0.05, 0.05);
+            card.alpha = 0;
+            dim.alpha = 0;
+            footer.alpha = 0;
+        } completion:^(BOOL finished) {
+            [card removeFromSuperview];
+            [dim removeFromSuperview];
+            [footer removeFromSuperview];
+        }];
+    }
 }
 
 // =============================================================================
@@ -1550,7 +1686,7 @@ static void ApolloFTPresentTabsFullAlert(id vc) {
         if (![host isKindOfClass:[UIViewController class]] || !host.viewLoaded || !host.view.window) return;
         UIAlertController *alert = [UIAlertController
             alertControllerWithTitle:@"Floating Tabs Full"
-                             message:@"You can keep up to 3 posts in floating tabs. Close one first — drag a bubble onto the ✕, or long-press it and choose Close Tab."
+                             message:@"You can keep up to 3 posts in floating tabs. Close one first — drag a bubble onto the ✕ that appears while dragging."
                       preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *presenter = host.presentedViewController ?: host;
@@ -1695,6 +1831,21 @@ void ApolloFloatingTabsDebugCommand(NSString *payload) {
         [controller beginDragForTab:tab];
         [controller updateDragWithGrabbedCenter:center];
         [controller endDragAtCenter:center velocity:velocity];
+        return;
+    }
+    if ([command isEqualToString:@"preview"] && parts.count >= 3) {
+        // floattab preview <idx> commit|cancel — runs the REAL peek pipeline:
+        // begin at the bubble, slide (cancel path only), then release.
+        BOOL commit = [parts[2] isEqualToString:@"commit"];
+        CGPoint start = [controller bubbleForTab:tab].center;
+        [controller beginPreviewForTab:tab atPoint:start];
+        if (!commit) {
+            [controller updatePreviewWithLocation:CGPointMake(start.x - 120, start.y)];
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [controller endPreviewCommitting:controller.previewCommitArmed];
+        });
         return;
     }
     ApolloLog(@"[FloatingTabs][debug] unknown command: %@", payload);

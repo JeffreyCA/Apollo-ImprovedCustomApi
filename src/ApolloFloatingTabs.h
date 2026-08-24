@@ -23,7 +23,7 @@ void ApolloFloatingTabsMagnetSettingChanged(void);
 #if APOLLO_SIM_BUILD
 // Headless sim driver for the "floattab ..." debug-bridge command
 // (ApolloSimDebugTap.xm): keep / tap N / close N / release N cx cy vx vy /
-// state. Never compiled into device builds.
+// preview N commit|cancel / state. Never compiled into device builds.
 void ApolloFloatingTabsDebugCommand(NSString *payload);
 #endif
 

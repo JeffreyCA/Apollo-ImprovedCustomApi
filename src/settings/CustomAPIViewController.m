@@ -1437,9 +1437,16 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsMagnetSwitchToggled:sender]; }];
     magnet.visible = ^BOOL { return sFloatingPostTabs; };
 
+    ApolloSettingsRow *preview =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabsPreview"
+                                     title:@"Hold to Preview"
+                                      isOn:^BOOL { return sFloatingPostTabsPreview; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsPreviewSwitchToggled:sender]; }];
+    preview.visible = ^BOOL { return sFloatingPostTabs; };
+
     return [ApolloSettingsSection sectionWithTitle:@"Floating Tabs"
-                                            footer:@"Keep up to 3 posts open as floating bubbles, chat-heads style. In a post, open the top-right ••• menu and choose Keep in Floating Tab. Drag a bubble anywhere (it snaps to the screen edges), flick it past the edge to tuck it into a slim handle, and tap it to jump back to the post exactly where you left off. Long-press a bubble for a preview and options, or drag it onto the ✕ that appears while dragging to close it. Magnetic Stacking snaps bubbles into a pile when you drop one on another — drag the pile to move it together, tap it to fan the bubbles back out."
-                                              rows:@[ floatingTabs, magnet ]];
+                                            footer:@"Keep up to 3 posts open as floating bubbles, chat-heads style. In a post, open the top-right ••• menu and choose Keep in Floating Tab. Drag a bubble anywhere (it snaps to the screen edges), flick it past the edge to tuck it into a slim handle, and tap it to jump back to the post exactly where you left off. To close one, drag it onto the ✕ that appears while dragging. Hold to Preview shows a card of the post while you keep your finger down — release to open it, or slide away first to cancel. Magnetic Stacking snaps bubbles into a pile when you drop one on another — drag the pile to move it together, tap it to fan the bubbles back out."
+                                              rows:@[ floatingTabs, magnet, preview ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -3640,6 +3647,12 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabsMagnet forKey:UDKeyFloatingPostTabsMagnet];
     // Turning the magnet off fans existing piles apart.
     ApolloFloatingTabsMagnetSettingChanged();
+}
+
+- (void)floatingPostTabsPreviewSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabsPreview = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabsPreview forKey:UDKeyFloatingPostTabsPreview];
+    // Read live at gesture time — nothing to tear down.
 }
 
 - (void)devvitPostsSwitchToggled:(UISwitch *)sender {
