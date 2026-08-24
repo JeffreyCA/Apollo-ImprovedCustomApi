@@ -2174,14 +2174,113 @@ static const char kARCompletion = '\0';
 
 %end
 
+// Apollo force-unwraps BOTH halves of its trending-subreddits load, inside
+// SearchViewController.viewDidLoad:
+//
+//     NSDictionary(contentsOfFile: Bundle.main.path(forResource: "trending-subreddits",
+//                                                   ofType: "plist")!)!
+//
+// and `-[NSBundle pathForResource:ofType:]` is implemented on top of
+// `-[NSBundle URLForResource:withExtension:]`, so the URL the hook below returns
+// IS the path Apollo force-unwraps. Handing back a URL whose file we never
+// verified turns a silent write failure into a hard launch crash: issue #964 was
+// an EXC_BREAKPOINT (`brk #1`) on the nil-dictionary arm, on every launch, once
+// the temp file stopped being writable. Nothing below may return a URL whose
+// file does not read back as a dictionary.
+
+// Today's key, built exactly the way Apollo builds it: Calendar.current's
+// year/month/day joined with "-", in ASCII digits (Swift's Int.description).
+// A fixed-format NSDateFormatter picks up the same calendar, so the year VALUE
+// agrees — but it renders digits in the current locale's numbering system
+// (Arabic-Indic, Devanagari) and `yyyy` zero-pads to four, so a Japanese-calendar
+// era year 8 comes out "0008" where Apollo writes "8". Either way the key
+// silently stops matching the one Apollo looks up.
+static NSString *ApolloTrendingTodayKey(void) {
+    NSDateComponents *components =
+        [[NSCalendar currentCalendar] components:(NSCalendarUnitYear |
+                                                  NSCalendarUnitMonth |
+                                                  NSCalendarUnitDay)
+                                        fromDate:[NSDate date]];
+    return [NSString stringWithFormat:@"%ld-%ld-%ld",
+                                      (long)components.year,
+                                      (long)components.month,
+                                      (long)components.day];
+}
+
+// Write the rewritten table somewhere Apollo can read it back, or return nil so
+// the caller falls through to Apollo's own bundled resource. NSTemporaryDirectory()
+// is neither guaranteed to exist nor to be writable — iOS purges it, and under
+// LiveContainer the guest's tmp/ is synthesised — so try a tweak-owned Caches
+// directory we create ourselves first, and read the result back through the same
+// API Apollo uses before handing the path over.
+static NSURL *ApolloWriteTrendingPlist(NSDictionary *table) {
+    if (table.count == 0) return nil;
+
+    // Serialise binary rather than letting -[NSDictionary writeToFile:] emit XML.
+    // Apollo's bundled table is 44KB of binary plist but round-trips to ~100KB of
+    // XML, and this is the launch path — the verifying read below would be
+    // re-parsing that XML on every single launch.
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:table
+                                                              format:NSPropertyListBinaryFormat_v1_0
+                                                             options:0
+                                                               error:NULL];
+    if (data.length == 0) return nil;
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *directories = [NSMutableArray array];
+    NSString *caches = [NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES) firstObject];
+    if (caches.length > 0) {
+        [directories addObject:[caches stringByAppendingPathComponent:@"ApolloReborn"]];
+    }
+    NSString *temporaryDirectory = NSTemporaryDirectory();
+    if (temporaryDirectory.length > 0) {
+        [directories addObject:temporaryDirectory];
+    }
+
+    for (NSString *directory in directories) {
+        [fileManager createDirectoryAtPath:directory
+               withIntermediateDirectories:YES
+                                attributes:nil
+                                     error:NULL];
+        NSString *path =
+            [directory stringByAppendingPathComponent:@"trending-custom.plist"];
+        // No pre-delete: NSDataWritingAtomic already writes-then-renames, so
+        // unlinking first would only open a window in which a path we verified
+        // and returned has vanished. Clear the path solely to recover from a
+        // failed write — a stale directory sitting there is that case.
+        if (![data writeToFile:path options:NSDataWritingAtomic error:NULL]) {
+            [fileManager removeItemAtPath:path error:NULL];
+            if (![data writeToFile:path options:NSDataWritingAtomic error:NULL]) {
+                ApolloLog(@"[RandomSources] Trending plist write failed at %@", path);
+                continue;
+            }
+        }
+        if ([NSDictionary dictionaryWithContentsOfFile:path].count == 0) {
+            ApolloLog(@"[RandomSources] Trending plist at %@ did not read back as a "
+                      @"dictionary; discarding", path);
+            [fileManager removeItemAtPath:path error:NULL];
+            continue;
+        }
+        return [NSURL fileURLWithPath:path isDirectory:NO];
+    }
+
+    ApolloLog(@"[RandomSources] No writable location for the trending plist; "
+              @"falling back to Apollo's bundled resource");
+    return nil;
+}
+
 // Randomise the trending subreddits list
 %hook NSBundle
 -(NSURL *)URLForResource:(NSString *)name withExtension:(NSString *)ext {
     NSURL *url = %orig;
-    if ([name isEqualToString:@"trending-subreddits"] && [ext isEqualToString:@"plist"]) {
-        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    // Scoped to the main bundle: that is where Apollo looks, and the synthesised
+    // table below must never turn another bundle's honest nil into a URL for a
+    // file we invented.
+    if ([name isEqualToString:@"trending-subreddits"] && [ext isEqualToString:@"plist"] &&
+        self == [NSBundle mainBundle]) {
         // ex: 2023-9-28 (28th September 2023)
-        [formatter setDateFormat:@"yyyy-M-d"];
+        NSString *todayKey = ApolloTrendingTodayKey();
 
         /*
             - Parse plist
@@ -2190,6 +2289,15 @@ static const char kARCompletion = '\0';
             - Return plist as a new file
         */
         NSMutableDictionary *fallbackDict = [[NSDictionary dictionaryWithContentsOfURL:url] mutableCopy];
+        if (fallbackDict.count == 0) {
+            // Apollo's own resource is missing or unreadable and Apollo
+            // force-unwraps that read, so give it an empty-but-valid table
+            // rather than the URL that would trap. Residual, unavoidable: if no
+            // candidate directory is writable either, `url` is still a trap —
+            // but returning nil instead would just trip Apollo's OTHER
+            // force-unwrap, the one on the path.
+            return ApolloWriteTrendingPlist(@{ todayKey: @[] }) ?: url;
+        }
         // Build an immediate local fallback. For a configured limit, sample
         // across Apollo's historical lists so the fallback has that many rows
         // instead of silently reverting to one native five-item day.
@@ -2198,14 +2306,13 @@ static const char kARCompletion = '\0';
         if (fallbackArray.count == 0 && sTrendingSubredditsLimit.integerValue != 0) {
             return url;
         }
-        [fallbackDict setObject:fallbackArray forKey:[formatter stringFromDate:[NSDate date]]];
+        [fallbackDict setObject:fallbackArray forKey:todayKey];
 
+        // `url` is a safe fallback here: we only reach this point after parsing
+        // the bundled plist at it, so Apollo's force-unwrapped read of it will
+        // succeed.
         NSURL * (^writeDict)(NSMutableDictionary *d) = ^(NSMutableDictionary *d){
-            // write new file
-            NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"trending-custom.plist"];
-            [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil]; // remove in case it exists
-            [d writeToFile:tempPath atomically:YES];
-            return [NSURL fileURLWithPath:tempPath isDirectory:NO];
+            return ApolloWriteTrendingPlist(d) ?: url;
         };
 
         // Constructor prefetch normally has this ready. On a cold/slow network,
@@ -2238,7 +2345,7 @@ static const char kARCompletion = '\0';
         }
 
         NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-        [dict setObject:subreddits forKey:[formatter stringFromDate:[NSDate date]]];
+        [dict setObject:subreddits forKey:todayKey];
         return writeDict(dict);
     }
     return url;
