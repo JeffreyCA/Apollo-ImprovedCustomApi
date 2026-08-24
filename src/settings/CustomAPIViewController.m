@@ -11,6 +11,7 @@
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloDirectChatWeb.h"
 #import "ApolloDevvitPosts.h"        // ApolloDevvitFeedOwnershipChangedNotification
+#import "ApolloFloatingTabs.h"       // close-all / fan-out entry points for the toggles
 #import "settings/ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
@@ -1418,6 +1419,27 @@ typedef NS_ENUM(NSInteger, Tag) {
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
                                             footer:@"Small tweaks for the post list. Feed Video Scrubber: drag the progress bar at the bottom of a video — in the feed or on the post itself — to scrub it without opening the video. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
                                               rows:@[ textPostThumbnails, infoRow, feedScrubber, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
+}
+
+- (ApolloSettingsSection *)buildPostsFloatingTabsSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *floatingTabs =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabs"
+                                     title:@"Floating Post Tabs"
+                                      isOn:^BOOL { return sFloatingPostTabs; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsSwitchToggled:sender]; }];
+
+    ApolloSettingsRow *magnet =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabsMagnet"
+                                     title:@"Magnetic Stacking"
+                                      isOn:^BOOL { return sFloatingPostTabsMagnet; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsMagnetSwitchToggled:sender]; }];
+    magnet.visible = ^BOOL { return sFloatingPostTabs; };
+
+    return [ApolloSettingsSection sectionWithTitle:@"Floating Tabs"
+                                            footer:@"Keep up to 3 posts open as floating bubbles, chat-heads style. In a post, open the top-right ••• menu and choose Keep in Floating Tab. Drag a bubble anywhere (it snaps to the screen edges), flick it past the edge to tuck it into a slim handle, and tap it to jump back to the post exactly where you left off. Long-press a bubble for a preview and options, or drag it onto the ✕ that appears while dragging to close it. Magnetic Stacking snaps bubbles into a pile when you drop one on another — drag the pile to move it together, tap it to fan the bubbles back out."
+                                              rows:@[ floatingTabs, magnet ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -3605,6 +3627,21 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [[NSUserDefaults standardUserDefaults] setBool:sSwipeUpForComments forKey:UDKeySwipeUpForComments];
 }
 
+- (void)floatingPostTabsSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabs = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabs forKey:UDKeyFloatingPostTabs];
+    [self visibilityDidChange];  // drives the "Magnetic Stacking" sub-row
+    // Bubbles must not survive the feature being disabled.
+    if (!sFloatingPostTabs) ApolloFloatingTabsCloseAll();
+}
+
+- (void)floatingPostTabsMagnetSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabsMagnet = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabsMagnet forKey:UDKeyFloatingPostTabsMagnet];
+    // Turning the magnet off fans existing piles apart.
+    ApolloFloatingTabsMagnetSettingChanged();
+}
+
 - (void)devvitPostsSwitchToggled:(UISwitch *)sender {
     sDevvitInteractivePosts = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sDevvitInteractivePosts forKey:UDKeyDevvitInteractivePosts];
@@ -3876,7 +3913,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSString *)apollo_screenTitle { return @"Posts & Feeds"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildPostsRecentlyReadSection],
-              [self buildPostsFeedSection] ];
+              [self buildPostsFeedSection],
+              [self buildPostsFloatingTabsSection] ];
 }
 @end
 

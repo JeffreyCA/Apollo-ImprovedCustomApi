@@ -22,6 +22,8 @@ BOOL sFeedGalleryEdgeSwipeNav = YES;
 BOOL sSwipeUpForComments = YES;
 BOOL sDevvitInteractivePosts = NO;
 BOOL sDevvitFeedWidgets = YES;
+BOOL sFloatingPostTabs = NO;         // chat-heads-style floating post tabs (ApolloFloatingTabs.xm)
+BOOL sFloatingPostTabsMagnet = YES;  // effective default ON via registerDefaults; consulted only while master is on
 NSInteger sPreferredGIFFallbackFormat = 1; // 0=GIF, 1=MP4
 
 NSInteger sReadPostMaxCount = 0;
