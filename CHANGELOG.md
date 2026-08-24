@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixes
+
+- Give **Show/Hide Deleted Comments** in the comments ⋯ menu custom icons that match Apollo's own artwork instead of the SF Symbol eye (#962: @AcornElf, @icpryde)
+
 ## [v3.6.0] - 2026-08-18
 
 ### Features

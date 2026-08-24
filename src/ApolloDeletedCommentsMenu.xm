@@ -279,6 +279,22 @@ static BOOL ApolloDCMenuResolveState(id actionController, id *outVC,
 
 %end
 
+#pragma mark - Row icon
+
+// Contributed vector icons (issue #962) drawn to sit with Apollo's own
+// `option-*` comment icons rather than the SF Symbol eye/eye.slash pair they
+// replace. 18pt is the box Apollo's native rows are fitted into
+// (ApolloNativeActionMenuSizedIcon), so ours carries the same weight next to
+// them in the Liquid Glass menu; the legacy sheet aspect-fits it into the
+// donor cell's icon frame. Falls back to the original SF Symbols when the
+// tweak's resources aren't staged in this install layout.
+static UIImage *ApolloDCMenuIcon(BOOL effective) {
+    NSString *name = effective ? @"option-hide-deleted-comments" : @"option-show-deleted-comments";
+    UIImage *icon = ApolloBundledPDFTemplateImage(name, CGSizeMake(18.0, 18.0));
+    if (icon) return icon;
+    return [UIImage systemImageNamed:(effective ? @"eye.slash" : @"eye")];
+}
+
 #pragma mark - Registration
 
 %ctor {
@@ -304,7 +320,7 @@ static BOOL ApolloDCMenuResolveState(id actionController, id *outVC,
         (void)donor;
         BOOL effective = NO;
         if (!ApolloDCMenuResolveState(actionController, NULL, NULL, &effective)) return nil;
-        return [UIImage systemImageNamed:(effective ? @"eye.slash" : @"eye")];
+        return ApolloDCMenuIcon(effective);
     };
     spec.perform = ^(id actionController) {
         id vc = nil;
