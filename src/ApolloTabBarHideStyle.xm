@@ -70,24 +70,6 @@ static NSString *TabBarHideStyleMenuTitle(NSInteger mode) {
 
 // MARK: Runtime pill mirroring
 
-// Find the tab bar's visual provider (private ivar; name stable across 26.x).
-static id TabBarHideStyleVisualProvider(UITabBar *tabBar) {
-    if (!tabBar) return nil;
-    Ivar ivar = class_getInstanceVariable([tabBar class], "_visualProvider");
-    if (!ivar) return nil;
-    return object_getIvar(tabBar, ivar);
-}
-
-// Morph target: 0 = expanded, 2 = minimized pill (RE: -[UITabBar _isMinimized]
-// returns visualProvider.currentMorphTarget == 2 — but that UITabBar accessor
-// is Photos-app-gated, so read the provider directly).
-static NSInteger TabBarHideStyleProviderMorphTarget(id provider) {
-    if (!provider) return 0;
-    SEL sel = NSSelectorFromString(@"currentMorphTarget");
-    if (![provider respondsToSelector:sel]) return 0;
-    return ((NSInteger (*)(id, SEL))objc_msgSend)(provider, sel);
-}
-
 static UIView *TabBarHideStyleProviderIvarView(id provider, const char *name) {
     if (!provider) return nil;
     Ivar ivar = class_getInstanceVariable([provider class], name);
@@ -119,7 +101,7 @@ static UIView *TabBarHideStyleProviderIvarView(id provider, const char *name) {
 static void TabBarHideStyleApplyMirror(UITabBar *tabBar) {
     if (!ApolloSupportsNativeTabBarScrollBehavior() ||
         ApolloTabBarHideStyleUsesCustomPresentation(sTabBarHideStyle)) return;
-    id provider = TabBarHideStyleVisualProvider(tabBar);
+    id provider = ApolloTabBarVisualProvider(tabBar);
     if (!provider) return;
     UIView *collapsePlatter = TabBarHideStyleProviderIvarView(provider, "collapsePlatterView");
     if (!collapsePlatter || !collapsePlatter.superview) return;
@@ -135,7 +117,10 @@ static void TabBarHideStyleApplyMirror(UITabBar *tabBar) {
 
     // UIKit only registers the pocket rect while morphed (currentMorphTarget
     // != 0); match that gate when re-registering the mirrored rect.
-    if (TabBarHideStyleProviderMorphTarget(provider) != 0) {
+    BOOL morphTargetKnown = NO;
+    NSInteger morphTarget = ApolloTabBarVisualMorphTarget(tabBar,
+                                                           &morphTargetKnown);
+    if (morphTargetKnown && morphTarget != 0) {
         id pocket = nil;
         Ivar pocketIvar = class_getInstanceVariable([provider class], "scrollPocketInteraction");
         if (pocketIvar) pocket = object_getIvar(provider, pocketIvar);

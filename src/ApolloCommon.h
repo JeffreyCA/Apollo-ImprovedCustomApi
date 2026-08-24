@@ -242,6 +242,7 @@ void ApolloAppendListLayoutDiag(NSString *line);
 // (future iOS). Callers must treat unknown as "assume nothing" and fail OPEN
 // (accept UIKit's writes), never as "expanded" — fighting UIKit per frame on a
 // wrong guess is worse than missing one correction. Main-thread only.
+id ApolloTabBarVisualProvider(UITabBar *tabBar);
 NSInteger ApolloTabBarVisualMorphTarget(UITabBar *tabBar, BOOL *known);
 
 // One-byte Swift Bool stored property on the tab bar's visual provider (e.g.

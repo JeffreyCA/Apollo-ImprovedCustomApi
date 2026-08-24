@@ -55,7 +55,6 @@ BOOL sSubredditShowJoinButton = YES;
 BOOL sSubredditShowDisplayName = YES;
 BOOL sCommunityHighlights = NO;
 BOOL sCommunityHighlightsWeb = NO;
-BOOL sAutoHideTabBarShowOnIdle = NO;
 NSString *const ApolloTabBarScrollBehaviorChangedNotification = @"ApolloTabBarScrollBehaviorChangedNotification";
 BOOL sClassicTabBarScrollBehavior = NO;
 ApolloTabBarHideStyle sTabBarHideStyle = ApolloTabBarHideStyleLeft;

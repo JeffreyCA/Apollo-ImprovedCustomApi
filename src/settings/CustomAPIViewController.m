@@ -3564,11 +3564,10 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     // Idle re-expansion is shared by both selectable modes. Keep the legacy
     // boolean enabled for existing preferences/backups; the classic flag now
     // selects the gesture model presented by the single row.
-    BOOL behaviorChanged = !sAutoHideTabBarShowOnIdle ||
-        sClassicTabBarScrollBehavior != classic;
-    sAutoHideTabBarShowOnIdle = YES;
-    sClassicTabBarScrollBehavior = classic;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL behaviorChanged = ![defaults boolForKey:UDKeyAutoHideTabBarShowOnIdle] ||
+        sClassicTabBarScrollBehavior != classic;
+    sClassicTabBarScrollBehavior = classic;
     [defaults setBool:YES forKey:UDKeyAutoHideTabBarShowOnIdle];
     [defaults setBool:classic forKey:UDKeyClassicTabBarScrollBehavior];
     if (behaviorChanged) {

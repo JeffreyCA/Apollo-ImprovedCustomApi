@@ -148,8 +148,6 @@ extern BOOL sCommunityHighlights;
 // Full mode uses a hidden WKWebView to harvest up to 6 highlights beyond the 2
 // Reddit's REST API exposes. See ApolloSubredditHighlights.xm (ApolloHLWebFetch).
 extern BOOL sCommunityHighlightsWeb;
-// Internal idle-re-expansion component shared by both selectable modes.
-extern BOOL sAutoHideTabBarShowOnIdle;
 // Posted after the Liquid Glass tab-bar scroll behavior changes so the runtime
 // can cancel in-flight work and reconcile the native policy.
 extern NSString *const ApolloTabBarScrollBehaviorChangedNotification;
