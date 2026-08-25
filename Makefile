@@ -100,6 +100,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloImageUploadHost.xm \
     $(SRC_DIR)/ApolloPhotoPostComposerScrollFix.xm \
     $(SRC_DIR)/ApolloMarkdownToolbarGif.xm \
+    $(SRC_DIR)/ApolloComposerToolbarTint.xm \
     $(SRC_DIR)/ApolloMarkdownBodyCleanup.xm \
     $(SRC_DIR)/ApolloGiphyClient.m \
     $(SRC_DIR)/GiphyPickerViewController.m \
