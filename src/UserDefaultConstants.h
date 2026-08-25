@@ -539,6 +539,14 @@ static NSString *const ApolloFeedGalleryCarouselChangedNotification = @"ApolloFe
 // gesture time, so no change notification is needed (same reasoning as
 // UDKeySwipeUpForComments below). See ApolloFeedGalleryCarousel.xm.
 static NSString *const UDKeyFeedGalleryEdgeSwipeNav = @"FeedGalleryEdgeSwipeNavigation";
+// Apollo's forward-swipe (right edge, plus the gallery edge-swipe hand-off)
+// re-opens the screen you last swiped back from, and that memory natively
+// survives unlimited feed scrolling. With this on, scrolling the feed a few
+// posts away from where you popped back drops the stale forward memory, so a
+// much-later accidental swipe doesn't teleport to an old post. Default YES.
+// Read live per scroll tick, so no change notification is needed. See
+// ApolloForwardSwipeExpiry.xm.
+static NSString *const UDKeyForwardSwipeForgetAfterScrolling = @"ForwardSwipeForgetAfterScrolling";
 // In the fullscreen viewer for post-backed images, galleries, GIFs, and video,
 // an upward vertical flick or comments-button tap opens a media-owned comments
 // pane. The normal downward flick still dismisses when the pane is closed.
