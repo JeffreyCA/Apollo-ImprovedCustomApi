@@ -421,6 +421,44 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             ApolloSimDebugPerformCrash(payload);
             return;
         }
+        // "devvitjs <js>" command: evaluate JS in the live interactive-post
+        // widget's web view and log the result (DOM inspection without a web
+        // inspector). See ApolloDevvitDebugEvaluateJS in ApolloDevvitPosts.xm.
+        if ([contents hasPrefix:@"devvitjs "]) {
+            extern void ApolloDevvitDebugEvaluateJS(NSString *js);
+            ApolloDevvitDebugEvaluateJS([contents substringFromIndex:9]);
+            return;
+        }
+        // "devvitsweep": run the interactive-post stale-width sweep now, with
+        // a per-surface geometry dump.
+        if ([contents hasPrefix:@"devvitsweep"]) {
+            extern void ApolloDevvitDebugSweep(void);
+            ApolloDevvitDebugSweep();
+            return;
+        }
+        // "rotate <landscape|portrait>" command: rotate the scene from inside
+        // the app — Simulator.app menu automation needs accessibility grants a
+        // headless agent doesn't have, and simctl has no rotate.
+        if ([contents hasPrefix:@"rotate "]) {
+            NSString *dir = [[contents substringFromIndex:7] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (@available(iOS 16.0, *)) {
+                UIInterfaceOrientationMask mask = [dir isEqualToString:@"landscape"]
+                    ? UIInterfaceOrientationMaskLandscapeRight
+                    : UIInterfaceOrientationMaskPortrait;
+                UIWindowScene *scene = ApolloAllWindows().firstObject.windowScene;
+                if (!scene) { ApolloLog(@"[SimDebugTap] rotate: no window scene"); return; }
+                UIWindowSceneGeometryPreferencesIOS *prefs =
+                    [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:mask];
+                [scene requestGeometryUpdateWithPreferences:prefs errorHandler:^(NSError *error) {
+                    ApolloLog(@"[SimDebugTap] rotate error: %@", error.localizedDescription);
+                }];
+                ApolloLog(@"[SimDebugTap] rotate -> %@", dir);
+            } else {
+                ApolloLog(@"[SimDebugTap] rotate: needs iOS 16+");
+            }
+            return;
+        }
         if ([contents hasPrefix:@"insight "]) {
             NSString *fullName = [[contents substringFromIndex:8]
                 stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];

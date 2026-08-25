@@ -76,6 +76,7 @@
 #import "ApolloDevvitPosts.h"
 
 static void ApolloDevvitHeightDidChangeForFullName(NSString *fullName);
+static void ApolloDevvitScheduleStaleSweep(void);
 
 NSString *const ApolloDevvitFeedOwnershipChangedNotification = @"ApolloDevvitFeedOwnershipChangedNotification";
 
@@ -427,6 +428,67 @@ static NSString *const kApolloDevvitProbeScript = @""
 "    })(el.shadowRoot); }"
 "  } catch (e) {}"
 "  var h = Math.max(Math.round(r.height), Math.round(deep));"
+    /* Offsite-link confirmation fix (#959): tapping an external link makes
+       the devvit platform show devvit2-navigate-offsite-dialog, which is
+       broken twice over on narrow viewports (both halves reproduce on mobile
+       Safari — Reddit bugs, same missing-utility-class family):
+         1. its fixed overlay is hard-sized ~512px wide no matter the real
+            viewport, putting the Continue button past the WKWebView's right
+            edge, and
+         2. the card never re-enables pointer events under the overlay's
+            pointer-events:none, so the buttons ignore every tap even when
+            visible (verified: computed pointer-events on the button is
+            "none", while element.click() fires the handler fine).
+       Document CSS cannot pierce the shadow roots the dialog lives in, but
+       this probe already walks them — so fix it inline: clamp any too-wide
+       element (max-width budgeted for its x offset), force pointer-events
+       back on across the dialog subtree, and on short widgets top-align the
+       centered overlay so the card starts inside the visible area (the
+       deep-walk above then grows the row to fit the rest). This runs 0.12s
+       after every tap (the tap poke), so the fix lands as the dialog opens. */
+"  try {"
+"    var nav = null;"
+"    (function findNav(root, depth) {"
+"      if (!root || depth > 8 || nav) { return; }"
+"      var m = root.querySelector('devvit2-navigate-offsite-dialog');"
+"      if (m) { nav = m; return; }"
+"      var kids = root.querySelectorAll('*');"
+"      for (var i = 0; i < kids.length && i < 3000 && !nav; i++) {"
+"        if (kids[i].shadowRoot) { findNav(kids[i].shadowRoot, depth + 1); }"
+"      }"
+"    })(el, 0);"
+"    if (!nav) { var direct = document.querySelector('devvit2-navigate-offsite-dialog'); if (direct) { nav = direct; } }"
+"    if (nav) {"
+"      var clampDialog = function (root, depth) {"
+"        if (!root || depth > 6) { return; }"
+"        var kids = root.querySelectorAll('*');"
+"        for (var i = 0; i < kids.length && i < 400; i++) {"
+"          var n = kids[i];"
+"          var nr = n.getBoundingClientRect ? n.getBoundingClientRect() : null;"
+"          if (nr && nr.width > innerWidth + 2) {"
+"            n.style.setProperty('max-width', 'calc(100vw - ' + Math.max(0, Math.round(nr.left)) + 'px)', 'important');"
+"            n.style.setProperty('box-sizing', 'border-box', 'important');"
+"          }"
+    /* pointer-events:auto everywhere under the dialog: the backdrop wrapper
+       is pointer-events:none and nothing downstream restores it, so without
+       this every button in the dialog is tap-dead. Blocking tap-through on
+       the backdrop while a modal is open is correct behavior anyway. */
+"          n.style.setProperty('pointer-events', 'auto', 'important');"
+"          if (nr && innerHeight < 360) {"
+"            var cs = getComputedStyle(n);"
+"            if (cs.position === 'fixed') {"
+"              n.style.setProperty('place-items', 'start center', 'important');"
+"              n.style.setProperty('align-items', 'flex-start', 'important');"
+"              n.style.setProperty('top', '0', 'important');"
+"            }"
+"          }"
+"          if (n.shadowRoot) { clampDialog(n.shadowRoot, depth + 1); }"
+"        }"
+"      };"
+"      clampDialog(nav, 0);"
+"      if (nav.shadowRoot) { clampDialog(nav.shadowRoot, 1); }"
+"    }"
+"  } catch (e) {}"
 "  return JSON.stringify({ found: 1, h: h, w: Math.round(r.width), hostH: Math.round(r.height), deep: Math.round(deep), tag: el.tagName.toLowerCase() });"
 "})();";
 
@@ -622,6 +684,11 @@ static WKWebsiteDataStore *ApolloDevvitDataStoreForIdentity(NSString *identity, 
 // Mid-handoff to a reloaded row (sDevvitDetachedWidgets): don't cap-evict it —
 // destroying it here turns a seamless height correction into a full re-load.
 @property (nonatomic) BOOL stashedForReadopt;
+// Width the page last hydrated at, for the rotation reload (#959): devvit
+// blocks lay out once for the width they hydrate at and never adapt, so a
+// rotated widget keeps the old layout until the page is loaded again.
+@property (nonatomic) CGFloat loadedWidth;
+@property (nonatomic) NSInteger widthReloadGeneration;
 // Post-reveal row-height corrections already spent (hard-capped).
 @property (nonatomic) NSInteger heightCorrections;
 // Candidate post-reveal height awaiting a quick confirm probe; a correction
@@ -764,6 +831,20 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
     [self pollAfter:kApolloDevvitTapProbeDelay attempt:0 generation:gen];
 }
 
+// iPhone rotation always flips a size class, and trait propagation reaches
+// this view even while the stale row keeps its bounds unchanged — the trigger
+// the UIViewController transition hook can miss when the geometry change is
+// requested programmatically (requestGeometryUpdate applies bounds before the
+// VC callbacks, and not every controller in the hierarchy receives them).
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (!previousTraitCollection) return;
+    if (previousTraitCollection.verticalSizeClass != self.traitCollection.verticalSizeClass ||
+        previousTraitCollection.horizontalSizeClass != self.traitCollection.horizontalSizeClass) {
+        ApolloDevvitScheduleStaleSweep();
+    }
+}
+
 - (void)apolloDevvitTapPoke:(UITapGestureRecognizer *)gesture {
     if (!self.revealed || !self.webView) return;
     // An explicit tap re-arms the correction budget. The budget exists to stop
@@ -879,8 +960,44 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 
 - (void)startLoad {
     if (!self.webView || !self.permalinkURL) return;
+    self.loadedWidth = self.bounds.size.width;
     [self.webView loadRequest:[NSURLRequest requestWithURL:self.permalinkURL]];
     [self beginProbePolling];
+}
+
+// Rotation / split-view resize (#959): the shreddit page is responsive, but a
+// hydrated devvit blocks surface is not — it keeps the layout computed for the
+// width it hydrated at, so landscape shows the portrait widget (and vice
+// versa) until the page loads again. Watch our own width and reload the page
+// once it settles at a materially different value. Pre-reveal width changes
+// just update the tracker: a page still hydrating lays itself out at whatever
+// the width is by the time blocks mount.
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat width = self.bounds.size.width;
+    if (width <= 0.0 || !self.webView) return;
+    if (self.loadedWidth <= 0.0 || !self.revealed) { self.loadedWidth = width; return; }
+    if (fabs(width - self.loadedWidth) < 60.0) return;
+    NSInteger gen = ++self.widthReloadGeneration;
+    __weak typeof(self) weakSelf = self;
+    // Debounced past the rotation animation's intermediate frames; only reads
+    // happen synchronously here (no layout-driving writes from layoutSubviews).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        typeof(self) s = weakSelf;
+        if (!s || s.widthReloadGeneration != gen || !s.webView || !s.revealed) return;
+        CGFloat settled = s.bounds.size.width;
+        if (settled <= 0.0 || fabs(settled - s.loadedWidth) < 60.0) return;
+        ApolloLog(@"[Devvit] %@ width %.0f -> %.0f — reloading widget for the new layout",
+                  s.fullName, s.loadedWidth, settled);
+        s.loadedWidth = settled;
+        s.revealed = NO;
+        s.coverView.alpha = 1.0;
+        [s.spinner startAnimating];
+        s.statusLabel.text = @"Loading interactive post…";
+        [s.webView reload];
+        [s beginProbePolling];
+    });
 }
 
 #pragma mark Probe polling
@@ -1050,6 +1167,9 @@ static const NSUInteger kApolloDevvitMaxLiveWidgets = 4;
 
 - (void)revealWithHeight:(CGFloat)height {
     self.revealed = YES;
+    // The width this layout was computed for — the rotation reload compares
+    // against it (bounds can drift between load start and hydration).
+    if (self.bounds.size.width > 0.0) self.loadedWidth = self.bounds.size.width;
     ApolloLog(@"[Devvit] %@ hydrated at %.0fpt", self.fullName, height);
     ApolloDevvitStoreHeight(self.fullName, height);
     // Fire the height plumbing even when the store deduped (same value as a
@@ -1548,7 +1668,10 @@ static void ApolloDevvitScheduleRowReload(UITableView *table, NSIndexPath *index
             return;
         }
         @try {
-            if (![[table indexPathsForVisibleRows] containsObject:indexPath]) return;
+            if (![[table indexPathsForVisibleRows] containsObject:indexPath]) {
+                ApolloLog(@"[Devvit] %@ reload dropped — row no longer visible (heals on next sight)", fullName);
+                return;
+            }
             ApolloDevvitStashWidgetForReadopt(fullName);
             [UIView performWithoutAnimation:^{
                 [table reloadRowsAtIndexPaths:@[indexPath]
@@ -1592,6 +1715,60 @@ static void ApolloDevvitReloadRowForParentAttempt(id parentNode, NSString *fullN
 
 static void ApolloDevvitReloadRowForParent(id parentNode, NSString *fullName) {
     ApolloDevvitReloadRowForParentAttempt(parentNode, fullName, 0);
+}
+
+// Rotation (#959): the comments-header cell re-measures its text at the new
+// width, but the widget HOST node keeps the layout cached for the old width —
+// the height plumbing's invalidation walks UP from the registered parent and
+// never touches the host below it, so the widget view (and the page in it)
+// stayed portrait-sized in landscape until the post was reopened.
+//
+// Staleness is judged from live geometry at sweep time — no before/after
+// snapshots, because the transition callback's ordering is not dependable
+// (physical rotation delivers it before the new bounds, requestGeometryUpdate
+// after). The judged object is the WIDGET VIEW against the UIKit cell that
+// contains it: the cell tracks the table faithfully, while the widget sits at
+// the bottom of the node subtree where a cached Texture layout can leave it
+// at the old width even after the cell re-measured (sim-proven: the header
+// node read 402pt while the widget view — and the page in it — was still
+// 720pt). Two shapes only a stale widget can have:
+//   • WIDER than the cell wrapping it (a landscape widget stuck in a portrait
+//     row) — always wrong on any device;
+//   • on iPhone, hundreds of points NARROWER than its cell (a portrait widget
+//     stuck in a landscape row). iPhone content margins are ~150pt at most;
+//     iPad readable-width margins are legitimately huge, so this arm stays
+//     phone-only to never misread them.
+// Healthy widgets fail both tests, which keeps the sweep idempotent — it can
+// run generously often and only ever acts on genuinely wedged rows, which it
+// heals with the same row reload + widget handoff as a height correction.
+static void ApolloDevvitInterfaceSizeChanged(void) {
+    BOOL phone = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone;
+    NSArray<ApolloDevvitWidgetView *> *widgets;
+    @synchronized ([ApolloDevvitWidgetView class]) {
+        widgets = sDevvitLiveWidgets.allObjects;
+    }
+    for (ApolloDevvitWidgetView *widget in widgets) {
+        if (!widget.webView || !widget.window || !widget.fullName) continue;
+        UITableViewCell *uikitCell = nil;
+        UITableView *table = nil;
+        for (UIView *v = widget.superview; v; v = v.superview) {
+            if (!uikitCell && [v isKindOfClass:[UITableViewCell class]]) uikitCell = (UITableViewCell *)v;
+            if (uikitCell && [v isKindOfClass:[UITableView class]]) { table = (UITableView *)v; break; }
+        }
+        if (!uikitCell || !table || !table.window) continue;
+        CGFloat widgetW = widget.bounds.size.width;
+        CGFloat cellW = uikitCell.bounds.size.width;
+        if (widgetW <= 0 || cellW <= 0) continue;
+        BOOL stale = (widgetW > cellW + 8.0) || (phone && cellW - widgetW > 200.0);
+        if (!stale) continue;
+        ApolloLog(@"[Devvit] %@ widget %.0fpt wide in a %.0fpt row after a size change — reloading its row",
+                  widget.fullName, widgetW, cellW);
+        NSIndexPath *indexPath = nil;
+        @try { indexPath = [table indexPathForCell:uikitCell]; } @catch (__unused id e) {}
+        if (!indexPath) continue;
+        if (!ApolloDevvitBurnReloadBudget(widget.fullName)) continue;
+        ApolloDevvitScheduleRowReload(table, indexPath, widget.fullName, 0);
+    }
 }
 
 static void ApolloDevvitHeightDidChangeForFullName(NSString *fullName) {
@@ -1875,6 +2052,95 @@ static id ApolloDevvitPlaceInSpec(id rootSpec, id hostSpec, NSUInteger depth) {
 }
 
 %end
+
+#pragma mark - Interface size changes (rotation, iPad resizes)
+
+// viewWillTransitionToSize: covers every way the interface can change size —
+// physical rotation, requestGeometryUpdate, iPad multitasking — where a
+// UIDevice orientation observer misses the programmatic ones. Every VC in the
+// transition receives it; the generation counter collapses the burst into one
+// debounced pass after the animation has settled.
+// Two sweeps: right after the rotation animation, and a catch-up pass — the
+// first can lose its row reload to transient table state (mid-update indexPath
+// resolution, a measure pass in flight). The sweep judges from live geometry
+// and only touches genuinely wedged rows, so scheduling it generously from
+// every trigger is free for healthy surfaces; the generation collapses trigger
+// bursts (each VC in a transition, each widget's trait change) into one pair.
+static void ApolloDevvitScheduleStaleSweep(void) {
+    static NSInteger sSweepGeneration = 0;
+    NSInteger gen = ++sSweepGeneration;
+    for (NSNumber *delay in @[@0.6, @2.2]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (gen != sSweepGeneration) return;  // superseded by a newer trigger
+            ApolloDevvitInterfaceSizeChanged();
+        });
+    }
+}
+
+%hook UIViewController
+
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id)coordinator {
+    %orig;
+    if (!sDevvitInteractivePosts) return;
+    if (sDevvitHostParents.allObjects.count == 0) return;
+    ApolloDevvitScheduleStaleSweep();
+}
+
+%end
+
+#pragma mark - Sim debug JS bridge
+
+#if APOLLO_SIM_BUILD
+// Simulator-only: run the stale-width sweep on demand (`devvitsweep` debug-tap
+// command) with a state dump of every registered surface.
+void ApolloDevvitDebugSweep(void);
+void ApolloDevvitDebugSweep(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (id parent in sDevvitHostParents.allObjects) {
+            CGRect pf = CGRectZero;
+            @try { pf = ((CGRect (*)(id, SEL))objc_msgSend)(parent, @selector(frame)); } @catch (__unused id e) {}
+            UITableViewCell *cell = nil; UITableView *table = nil;
+            if ([parent isNodeLoaded]) {
+                for (UIView *v = [parent view]; v; v = v.superview) {
+                    if (!cell && [v isKindOfClass:[UITableViewCell class]]) cell = (UITableViewCell *)v;
+                    if (cell && [v isKindOfClass:[UITableView class]]) { table = (UITableView *)v; break; }
+                }
+            }
+            ApolloLog(@"[Devvit][dbg] sweep-state parent=%@ loaded=%d nodeW=%.0f cellW=%.0f table=%d window=%d",
+                      NSStringFromClass([parent class]), [parent isNodeLoaded] ? 1 : 0, pf.size.width,
+                      cell.bounds.size.width, table ? 1 : 0, table.window ? 1 : 0);
+        }
+        ApolloDevvitInterfaceSizeChanged();
+    });
+}
+
+// Simulator-only: evaluate arbitrary JS in the first on-window widget's web
+// view and log the result — DOM inspection for the embedded shreddit page
+// without attaching a web inspector. Driven by the `devvitjs <js>` debug-tap
+// command (ApolloSimDebugTap.xm).
+void ApolloDevvitDebugEvaluateJS(NSString *js);
+void ApolloDevvitDebugEvaluateJS(NSString *js) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloDevvitWidgetView *target = nil;
+        @synchronized ([ApolloDevvitWidgetView class]) {
+            for (ApolloDevvitWidgetView *w in sDevvitLiveWidgets.allObjects) {
+                if (w.webView && w.window) { target = w; break; }
+            }
+            if (!target) {
+                for (ApolloDevvitWidgetView *w in sDevvitLiveWidgets.allObjects) {
+                    if (w.webView) { target = w; break; }
+                }
+            }
+        }
+        if (!target) { ApolloLog(@"[Devvit][dbg] no live widget to evaluate in"); return; }
+        [target.webView evaluateJavaScript:js completionHandler:^(id result, NSError *error) {
+            ApolloLog(@"[Devvit][dbg] %@ -> %@ err=%@", target.fullName, result,
+                      error.localizedDescription ?: @"none");
+        }];
+    });
+}
+#endif
 
 #pragma mark - ctor
 
