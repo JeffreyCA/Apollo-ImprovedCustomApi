@@ -2,6 +2,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloTranslation.h"
 #import "UserDefaultConstants.h"
 #import "SSZipArchive.h"
 #import <Security/Security.h>
@@ -375,8 +376,10 @@ BOOL ApolloBackupRestoreRestoreFromZipURL(NSURL *zipURL, NSString **outErrorTitl
         [defaults setBool:NO forKey:UDKeyTranslationProviderUserSelected];
     }
 
+    // Restored backups can carry the dead libretranslate.de default (issue
+    // #995) — normalize exactly like %ctor does.
     NSString *libreURL = [defaults stringForKey:UDKeyLibreTranslateURL];
-    sLibreTranslateURL = libreURL.length > 0 ? libreURL : @"https://libretranslate.de/translate";
+    sLibreTranslateURL = [ApolloNormalizedLibreTranslateURLSetting(libreURL) copy];
 
     NSString *libreAPIKey = [defaults stringForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = libreAPIKey.length > 0 ? libreAPIKey : nil;

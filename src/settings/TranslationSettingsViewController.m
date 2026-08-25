@@ -17,7 +17,9 @@ typedef NS_ENUM(NSInteger, TranslationTextFieldTag) {
     TranslationTextFieldTagLibreAPIKey,
 };
 
-static NSString *const kDefaultLibreTranslateURL = @"https://libretranslate.de/translate";
+// The old libretranslate.de public instance shut down in 2026 (issue #995);
+// keep this in sync with kApolloDefaultLibreTranslateURL in ApolloTranslation.xm.
+static NSString *const kDefaultLibreTranslateURL = @"https://libretranslate.com/translate";
 
 // The three mutually-exclusive translation modes, derived from and persisted to
 // the sTapToTranslate / sAutoTranslateOnAppear defaults (no migration needed):
@@ -280,7 +282,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                                            rows:skipRows]];
     [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"LibreTranslate"
-                                         footer:@"Google is the default provider. If Google or LibreTranslate fails, the tweak automatically falls back to the other one. Apple (On-Device) translates privately on your device with no network — it stays Apple (no fallback) and will ask you to download a language the first time it's needed (iOS 18+). The settings below configure the LibreTranslate endpoint."
+                                         footer:@"Google is the default provider. If Google or LibreTranslate fails, the tweak automatically falls back to the other one. Apple (On-Device) translates privately on your device with no network — it stays Apple (no fallback) and will ask you to download a language the first time it's needed (iOS 18+). The settings below configure the LibreTranslate endpoint: public LibreTranslate instances now require an API key (get one at portal.libretranslate.com), or point the URL at your own self-hosted instance."
                                            rows:@[ libreURL, libreAPIKey ]]];
 
     return sections;
