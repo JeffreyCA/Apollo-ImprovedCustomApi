@@ -29,6 +29,9 @@
 @interface ApolloSubredditsSettingsViewController : CustomAPIViewController // Features → Subreddits
 @end
 
+@interface ApolloFeedShortcutsSettingsViewController : CustomAPIViewController // Subreddits → Feed Shortcuts
+@end
+
 @interface ApolloProfilesSettingsViewController : CustomAPIViewController // Features → Profiles
 @end
 

@@ -25,6 +25,7 @@
 //   "Open Videos in YouTube App"  → Open in App (YouTube switch mirror)
 //   "Hide Username on Tab Bar"    → Apollo Reborn → Profiles (below Icon-Only
 //                                   Tab Bar, which supersedes it while active)
+//   "Hide Subreddits Row"         → Apollo Reborn → Subreddits → Feed Shortcuts
 //
 // Geometry is owned by settings/ApolloSettingsGeneralTable.xm — this file only
 // registers factories + selection handlers + hide matchers, and each push goes
@@ -123,6 +124,7 @@ static const void *kApolloInjSavedCategoriesKey = &kApolloInjSavedCategoriesKey;
     ApolloGeneralTableHideRows(^BOOL(UITableViewCell *cell) {
         return ApolloGeneralTableCellHasTitle(cell, @"Open Links in")
             || ApolloGeneralTableCellHasTitle(cell, @"Open Videos in YouTube App")
-            || ApolloGeneralTableCellHasTitle(cell, @"Hide Username on Tab Bar");
+            || ApolloGeneralTableCellHasTitle(cell, @"Hide Username on Tab Bar")
+            || ApolloGeneralTableCellHasTitle(cell, @"Hide Subreddits Row");
     });
 }

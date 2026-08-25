@@ -1,5 +1,7 @@
 #import "settings/CustomAPIViewController.h"
 #import "ApolloCommon.h"
+#import "ApolloFeedShortcutsAppearance.h"
+#import "ApolloThemeRuntime.h"
 #import "ApolloNotificationBackend.h"
 #import "ApolloBarkNotifications.h"
 #import "ApolloPushNotifications.h"
@@ -75,6 +77,214 @@ static NSInteger sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
 
 static NSString *const kApolloRebornSubredditName = @"ApolloReborn";
 static char kAboutSubredditIconTaskKey;
+
+@interface ApolloFeedShortcutsPreviewCell : UITableViewCell
+@property (nonatomic, weak) UITableView *hostTableView;
+@property (nonatomic, strong) NSArray<UILayoutGuide *> *shortcutLayoutGuides;
+- (void)apollo_configurePreview;
+- (void)apollo_configurePreviewAnimated:(BOOL)animated;
+@end
+
+@implementation ApolloFeedShortcutsPreviewCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (!self) return nil;
+
+    self.selectionStyle = UITableViewCellSelectionStyleNone;
+    self.backgroundColor = UIColor.clearColor;
+    self.contentView.backgroundColor = UIColor.clearColor;
+    self.backgroundView = [UIView new];
+    self.backgroundView.backgroundColor = UIColor.clearColor;
+    if (@available(iOS 14.0, *)) {
+        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+    }
+    return self;
+}
+
+- (UIStackView *)apollo_textStackWithTitle:(NSString *)title detail:(NSString *)detail {
+    UILabel *titleLabel = [UILabel new];
+    titleLabel.text = title;
+    titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    titleLabel.textColor = UIColor.labelColor;
+    titleLabel.adjustsFontForContentSizeCategory = YES;
+
+    NSMutableArray<UIView *> *labels = [NSMutableArray arrayWithObject:titleLabel];
+    if (detail.length > 0) {
+        UILabel *detailLabel = [UILabel new];
+        detailLabel.text = detail;
+        detailLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        detailLabel.textColor = UIColor.secondaryLabelColor;
+        detailLabel.adjustsFontForContentSizeCategory = YES;
+        [labels addObject:detailLabel];
+    }
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:labels];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentLeading;
+    stack.spacing = 1.0;
+    return stack;
+}
+
+- (UIView *)apollo_previewItemAtIndex:(NSInteger)index
+                            itemCount:(NSUInteger)itemCount
+                               layout:(ApolloSubredditFeedLayout)layout
+                          contentView:(UIView **)contentView
+             contentCenterXConstraint:(NSLayoutConstraint **)contentCenterXConstraint {
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:ApolloFeedShortcutIconImage(index,
+                                                                                           sSubredditFeedIconStyle,
+                                                                                           layout)];
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+
+    if (layout == ApolloSubredditFeedLayoutRows) {
+        CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(sSubredditFeedIconStyle, layout, itemCount);
+        [NSLayoutConstraint activateConstraints:@[
+            [iconView.widthAnchor constraintEqualToConstant:iconSize],
+            [iconView.heightAnchor constraintEqualToConstant:iconSize]
+        ]];
+        NSString *detail = sHideSubredditListDescriptions ? nil : ApolloFeedShortcutDetail(index);
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[
+            iconView,
+            [self apollo_textStackWithTitle:ApolloFeedShortcutRowTitle(index) detail:detail]
+        ]];
+        row.axis = UILayoutConstraintAxisHorizontal;
+        row.alignment = UIStackViewAlignmentCenter;
+        row.spacing = 12.0;
+        [row.heightAnchor constraintEqualToConstant:ApolloFeedShortcutPreviewRowItemHeight(self.traitCollection)].active = YES;
+        return row;
+    }
+
+    BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
+    BOOL usesFourItemSideBySideLayout = sideBySide && itemCount == 4;
+    CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(sSubredditFeedIconStyle, layout, itemCount);
+    [NSLayoutConstraint activateConstraints:@[
+        [iconView.widthAnchor constraintEqualToConstant:iconSize],
+        [iconView.heightAnchor constraintEqualToConstant:iconSize]
+    ]];
+    UILabel *label = [UILabel new];
+    label.text = ApolloFeedShortcutShortTitle(index);
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    label.textColor = UIColor.labelColor;
+    label.adjustsFontForContentSizeCategory = YES;
+    label.adjustsFontSizeToFitWidth = YES;
+    label.minimumScaleFactor = 0.5;
+    label.lineBreakMode = NSLineBreakByClipping;
+    label.textAlignment = NSTextAlignmentCenter;
+    [label setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                          forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:@[ iconView, label ]];
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    content.axis = sideBySide
+        ? UILayoutConstraintAxisHorizontal
+        : UILayoutConstraintAxisVertical;
+    content.alignment = UIStackViewAlignmentCenter;
+    content.spacing = ApolloFeedShortcutContentSpacing(layout, itemCount);
+
+    UIView *item = [UIView new];
+    [item addSubview:content];
+    NSLayoutConstraint *centerConstraint = [content.centerXAnchor constraintEqualToAnchor:item.centerXAnchor];
+    if (sideBySide && itemCount == 3 && index == 3) {
+        centerConstraint.constant = 6.0;
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        centerConstraint,
+        [content.centerYAnchor constraintEqualToAnchor:item.centerYAnchor]
+    ]];
+    BOOL preservesModeratorLabelWidth = sideBySide && itemCount == 3 && index == 3;
+    if (!usesFourItemSideBySideLayout && !preservesModeratorLabelWidth) {
+        CGFloat horizontalMargin = sideBySide ? 6.0 : 4.0;
+        [NSLayoutConstraint activateConstraints:@[
+            [content.leadingAnchor constraintGreaterThanOrEqualToAnchor:item.leadingAnchor constant:horizontalMargin],
+            [content.trailingAnchor constraintLessThanOrEqualToAnchor:item.trailingAnchor constant:-horizontalMargin]
+        ]];
+    }
+    if (contentView) *contentView = content;
+    if (contentCenterXConstraint) *contentCenterXConstraint = centerConstraint;
+    return item;
+}
+
+- (void)apollo_configurePreview {
+    for (UILayoutGuide *layoutGuide in self.shortcutLayoutGuides) {
+        [self.contentView removeLayoutGuide:layoutGuide];
+    }
+    self.shortcutLayoutGuides = nil;
+    for (UIView *view in self.contentView.subviews) [view removeFromSuperview];
+
+    NSArray<NSNumber *> *visibleIndexes = ApolloFeedShortcutVisibleIndexes();
+    CGFloat availableWidth = CGRectGetWidth(self.hostTableView.bounds);
+    if (availableWidth <= 0.0) availableWidth = CGRectGetWidth(UIScreen.mainScreen.bounds);
+    ApolloSubredditFeedLayout layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
+                                                                          visibleIndexes,
+                                                                          (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
+                                                                          availableWidth,
+                                                                          self.traitCollection);
+    BOOL usesShortcutLayout = layout != ApolloSubredditFeedLayoutRows;
+    NSMutableArray<UIView *> *shortcutItems = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
+    NSMutableArray<UIView *> *contentViews = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
+    NSMutableArray<NSLayoutConstraint *> *centerConstraints = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
+    for (NSNumber *index in visibleIndexes) {
+        UIView *contentView = nil;
+        NSLayoutConstraint *centerConstraint = nil;
+        [shortcutItems addObject:[self apollo_previewItemAtIndex:index.integerValue
+                                                       itemCount:visibleIndexes.count
+                                                          layout:layout
+                                                     contentView:&contentView
+                                        contentCenterXConstraint:&centerConstraint]];
+        if (contentView) [contentViews addObject:contentView];
+        if (centerConstraint) [centerConstraints addObject:centerConstraint];
+    }
+
+    if (usesShortcutLayout) {
+        UIColor *separatorColor = ApolloThemeSeparatorColor()
+            ?: self.hostTableView.separatorColor
+            ?: UIColor.separatorColor;
+        NSArray<UILayoutGuide *> *layoutGuides = nil;
+        ApolloFeedShortcutInstallLayout(self.contentView,
+                                        shortcutItems,
+                                        contentViews,
+                                        centerConstraints,
+                                        layout,
+                                        separatorColor,
+                                        &layoutGuides);
+        self.shortcutLayoutGuides = layoutGuides;
+        return;
+    }
+
+    UIStackView *previewStack = [[UIStackView alloc] initWithArrangedSubviews:shortcutItems];
+    previewStack.axis = UILayoutConstraintAxisVertical;
+    previewStack.alignment = UIStackViewAlignmentFill;
+    previewStack.distribution = UIStackViewDistributionFillEqually;
+    previewStack.spacing = 8.0;
+    previewStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.contentView addSubview:previewStack];
+    [NSLayoutConstraint activateConstraints:@[
+        [previewStack.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16.0],
+        [previewStack.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-16.0],
+        [previewStack.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:10.0],
+        [previewStack.bottomAnchor constraintLessThanOrEqualToAnchor:self.contentView.bottomAnchor constant:-10.0]
+    ]];
+}
+
+- (void)apollo_configurePreviewAnimated:(BOOL)animated {
+    if (!animated || self.contentView.subviews.count == 0) {
+        [self apollo_configurePreview];
+        return;
+    }
+    [UIView transitionWithView:self.contentView
+                      duration:0.25
+                       options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionBeginFromCurrentState
+                    animations:^{
+        [self apollo_configurePreview];
+        [self.contentView layoutIfNeeded];
+    } completion:nil];
+}
+
+@end
+
+@interface CustomAPIViewController (ApolloFeedShortcutsPreview)
+- (void)apollo_refreshFeedShortcutsPreviewAnimated:(BOOL)animated;
+@end
 
 @implementation CustomAPIViewController
 
@@ -562,6 +772,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
     [self reloadRowWithID:@"polls.settings"];
+    [self reloadRowWithID:@"sub.feedShortcuts"];
     // Refresh the Profile Layout summary after returning from that screen
     // (Density/Avatar/band switches may have just changed).
     [self reloadRowWithID:@"media.profileLayout"];
@@ -1420,8 +1631,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                               rows:@[ textPostThumbnails, infoRow, feedScrubber, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
-// Interface group screen (ApolloInterfaceSettingsViewController) — the
-// Liquid Glass chrome behaviors.
+// Interface group screen (ApolloInterfaceSettingsViewController).
 - (ApolloSettingsSection *)buildInterfaceSection {
     __weak typeof(self) weakSelf = self;
 
@@ -2013,23 +2223,27 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                       isOn:^BOOL { return sSubredditListEnhancements; }
                                   onToggle:^(UISwitch *sender) { [weakSelf subredditListEnhancementsSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *feedShortcuts =
+        [self hubDisclosureRowWithID:@"sub.feedShortcuts"
+                               title:@"Feed Shortcuts"
+                            subtitle:^NSString * {
+            return [NSString stringWithFormat:@"%@ · %@",
+                    [weakSelf subredditFeedIconStyleText],
+                    [weakSelf subredditFeedLayoutText]];
+        }
+                                push:^UIViewController * {
+            return ApolloSettingsRouteInstantiate(@"feed-shortcuts");
+        }];
+    feedShortcuts.visible = ^BOOL { return sSubredditListEnhancements; };
+
     ApolloSettingsRow *modernDividers =
         [ApolloSettingsRow switchRowWithID:@"sub.modernDividers"
                                      title:@"Modern Subreddit Dividers"
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf modernSubredditDividersSwitchToggled:sender]; }];
+
     // Sub-option: only exists while Subreddit List Enhancements is on.
     modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
-
-    // Deliberately NOT gated on the enhancements master: hides the description
-    // subtitles under Home/Popular/All/Moderator in both classic and modern lists.
-    // A subreddit-LIST feature, so it stays here beside the list toggles rather
-    // than moving into the Subreddit Layout (header) screen below.
-    ApolloSettingsRow *hideDescriptions =
-        [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
-                                     title:@"Hide Feed Descriptions"
-                                      isOn:^BOOL { return sHideSubredditListDescriptions; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
 
     // Sibling of Hide Feed Descriptions for the MULTIREDDITS section's rows
     // (which otherwise show a custom description, or the joined subreddit
@@ -2054,8 +2268,182 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts. Multireddits show the subreddits they contain, or a custom description — tap a multireddit while editing the list to rename it or change its description. Hide Multireddit Descriptions blanks that line entirely."
-                                              rows:@[ enhancements, modernDividers, hideDescriptions, hideMultiredditDescriptions, subredditLayout ]];
+                                            footer:@"Multireddits show their contents or a custom description; Hide Multireddit Descriptions removes that line."
+                                              rows:@[ enhancements, feedShortcuts, modernDividers, hideMultiredditDescriptions, subredditLayout ]];
+}
+
+- (ApolloSettingsSection *)buildFeedShortcutsPreviewSection {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *preview =
+        [ApolloSettingsRow customRowWithID:@"feedShortcuts.preview"
+                                     cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
+        static NSString *reuseID = @"Cell_FeedShortcutsPreview";
+        ApolloFeedShortcutsPreviewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
+        if (!cell) cell = [[ApolloFeedShortcutsPreviewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseID];
+        cell.hostTableView = tableView;
+        [cell apollo_configurePreview];
+        [weakSelf apollo_applyPrimaryTextColorToCell:cell];
+        return cell;
+    }
+                                 onSelect:nil];
+    preview.height = ^CGFloat {
+        NSArray<NSNumber *> *visibleIndexes = ApolloFeedShortcutVisibleIndexes();
+        NSUInteger visibleCount = visibleIndexes.count;
+        ApolloSubredditFeedLayout layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
+                                                                              visibleIndexes,
+                                                                              (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
+                                                                              CGRectGetWidth(weakSelf.tableView.bounds),
+                                                                              weakSelf.traitCollection);
+        if (layout == ApolloSubredditFeedLayoutRows) {
+            CGFloat rowItemHeight = ApolloFeedShortcutPreviewRowItemHeight(weakSelf.traitCollection);
+            CGFloat rowsHeight = (CGFloat)visibleCount * rowItemHeight;
+            CGFloat spacingHeight = visibleCount > 1 ? (CGFloat)(visibleCount - 1) * 8.0 : 0.0;
+            return rowsHeight + spacingHeight + 20.0;
+        }
+        return ApolloFeedShortcutLayoutHeight(layout, weakSelf.traitCollection);
+    };
+    return [ApolloSettingsSection sectionWithTitle:@"Preview" footer:nil rows:@[ preview ]];
+}
+
+- (ApolloSettingsSection *)buildFeedShortcutsVisibilitySection {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *showPopular =
+        [ApolloSettingsRow switchRowWithID:@"sub.showPopularShortcut"
+                                     title:@"Show Popular"
+                                      isOn:^BOOL {
+            return ![NSUserDefaults.standardUserDefaults boolForKey:UDKeyHideRPopularRedditList];
+        }
+                                  onToggle:^(UISwitch *sender) {
+            [weakSelf setFeedShortcutVisible:sender.isOn defaultsKey:UDKeyHideRPopularRedditList];
+        }];
+    ApolloSettingsRow *showAll =
+        [ApolloSettingsRow switchRowWithID:@"sub.showAllShortcut"
+                                     title:@"Show All Posts"
+                                      isOn:^BOOL {
+            return ![NSUserDefaults.standardUserDefaults boolForKey:UDKeyHideRAllRedditList];
+        }
+                                  onToggle:^(UISwitch *sender) {
+            [weakSelf setFeedShortcutVisible:sender.isOn defaultsKey:UDKeyHideRAllRedditList];
+        }];
+    ApolloSettingsRow *showModerator =
+        [ApolloSettingsRow switchRowWithID:@"sub.showModeratorShortcut"
+                                     title:@"Show Moderator Posts"
+                                      isOn:^BOOL {
+            return ![NSUserDefaults.standardUserDefaults boolForKey:UDKeyHideModeratorRedditList];
+        }
+                                  onToggle:^(UISwitch *sender) {
+            [weakSelf setFeedShortcutVisible:sender.isOn defaultsKey:UDKeyHideModeratorRedditList];
+        }];
+    return [ApolloSettingsSection sectionWithTitle:@"Visible Shortcuts"
+                                            footer:@"Home is always shown. Choose which other shortcuts appear."
+                                              rows:@[ showPopular, showAll, showModerator ]];
+}
+
+- (ApolloSettingsSection *)buildFeedShortcutsControlsSection {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *feedIconStyle =
+        [ApolloSettingsRow valueRowWithID:@"sub.feedIconStyle"
+                                    title:@"Icon Style"
+                                   detail:^NSString * { return [weakSelf subredditFeedIconStyleText]; }
+                                 onSelect:^{
+            [weakSelf presentSubredditFeedIconStylePickerFromSourceView:[weakSelf cellForRowID:@"sub.feedIconStyle"]];
+        }];
+    feedIconStyle.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    ApolloSettingsRow *feedLayout =
+        [ApolloSettingsRow valueRowWithID:@"sub.feedLayout"
+                                    title:@"Feed Layout"
+                                   detail:^NSString * { return [weakSelf subredditFeedLayoutText]; }
+                                 onSelect:^{
+            [weakSelf presentSubredditFeedLayoutPickerFromSourceView:[weakSelf cellForRowID:@"sub.feedLayout"]];
+        }];
+    feedLayout.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    ApolloSettingsRow *hideDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
+                                     title:@"Hide Feed Descriptions"
+                                      isOn:^BOOL { return sHideSubredditListDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
+    hideDescriptions.enabled = ^BOOL {
+        NSArray<NSNumber *> *visibleIndexes = ApolloFeedShortcutVisibleIndexes();
+        ApolloSubredditFeedLayout layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
+                                                                              visibleIndexes,
+                                                                              (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
+                                                                              CGRectGetWidth(weakSelf.tableView.bounds),
+                                                                              weakSelf.traitCollection);
+        return layout == ApolloSubredditFeedLayoutRows;
+    };
+
+    return [ApolloSettingsSection sectionWithTitle:@"Appearance"
+                                            footer:@"Hide Feed Descriptions applies only to Rows."
+                                              rows:@[ feedIconStyle, feedLayout, hideDescriptions ]];
+}
+
+- (NSString *)subredditFeedIconStyleText {
+    switch (sSubredditFeedIconStyle) {
+        case ApolloSubredditFeedIconStyleCircle: return @"Circle";
+        case ApolloSubredditFeedIconStyleTinted: return @"Tinted";
+        case ApolloSubredditFeedIconStyleSoftTile: return @"Soft Tile";
+        case ApolloSubredditFeedIconStyleSolidTile: return @"Solid Tile";
+        default: return @"Classic";
+    }
+}
+
+- (NSString *)subredditFeedLayoutText {
+    switch (sSubredditFeedLayout) {
+        case ApolloSubredditFeedLayoutSideBySide: return @"Side-by-Side";
+        case ApolloSubredditFeedLayoutGrid: return @"Grid";
+        default: return @"Rows";
+    }
+}
+
+- (void)setSubredditFeedIconStyle:(NSInteger)iconStyle {
+    if (iconStyle < ApolloSubredditFeedIconStyleClassic ||
+        iconStyle > ApolloSubredditFeedIconStyleSolidTile) {
+        iconStyle = ApolloSubredditFeedIconStyleClassic;
+    }
+    sSubredditFeedIconStyle = iconStyle;
+    [[NSUserDefaults standardUserDefaults] setInteger:iconStyle forKey:UDKeySubredditFeedIconStyle];
+    [self reloadRowWithID:@"sub.feedIconStyle"];
+    [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
+}
+
+- (void)setSubredditFeedLayout:(NSInteger)layout {
+    if (layout < ApolloSubredditFeedLayoutRows ||
+        layout > ApolloSubredditFeedLayoutSideBySide) {
+        layout = ApolloSubredditFeedLayoutRows;
+    }
+    sSubredditFeedLayout = layout;
+    [[NSUserDefaults standardUserDefaults] setInteger:layout forKey:UDKeySubredditFeedLayout];
+    [self reloadRowWithID:@"sub.feedLayout"];
+    [self reloadRowWithID:@"sub.hideFeedDescriptions"];
+    [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
+}
+
+- (void)presentSubredditFeedIconStylePickerFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Icon Style",
+                                @[@"Classic", @"Circle", @"Tinted", @"Soft Tile", @"Solid Tile"],
+                                sSubredditFeedIconStyle,
+                                ^(NSInteger pickedIndex) {
+        [weakSelf setSubredditFeedIconStyle:pickedIndex];
+    });
+}
+
+- (void)presentSubredditFeedLayoutPickerFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Feed Layout",
+                                @[@"Rows", @"Grid", @"Side-by-Side"],
+                                sSubredditFeedLayout,
+                                ^(NSInteger pickedIndex) {
+        [weakSelf setSubredditFeedLayout:pickedIndex];
+    });
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -3529,7 +3917,35 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
     sHideSubredditListDescriptions = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
+    [self reloadRowWithID:@"feedShortcuts.preview"];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
+}
+
+- (void)setFeedShortcutVisible:(BOOL)visible defaultsKey:(NSString *)defaultsKey {
+    [NSUserDefaults.standardUserDefaults setBool:!visible forKey:defaultsKey];
+    [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
+    [self reloadRowWithID:@"sub.hideFeedDescriptions"];
+    [NSNotificationCenter.defaultCenter postNotificationName:ApolloMetaFeedVisibilityChangedNotification object:nil];
+}
+
+- (void)apollo_refreshFeedShortcutsPreviewAnimated:(BOOL)animated {
+    NSIndexPath *indexPath = [self indexPathForRowID:@"feedShortcuts.preview"];
+    ApolloFeedShortcutsPreviewCell *cell = (ApolloFeedShortcutsPreviewCell *)[self cellForRowID:@"feedShortcuts.preview"];
+    if (!indexPath || ![cell isKindOfClass:[ApolloFeedShortcutsPreviewCell class]]) {
+        [self reloadRowWithID:@"feedShortcuts.preview"];
+        return;
+    }
+
+    [cell apollo_configurePreviewAnimated:animated];
+    if (!animated) return;
+    [UIView animateWithDuration:0.28
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        [self.tableView beginUpdates];
+        [self.tableView endUpdates];
+        [self.tableView layoutIfNeeded];
+    } completion:nil];
 }
 
 - (void)hideMultiredditDescriptionsSwitchToggled:(UISwitch *)sender {
@@ -3905,6 +4321,57 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildSubredditsMainSection],
               [self buildSubredditsSourcesSection] ];
+}
+@end
+
+@implementation ApolloFeedShortcutsSettingsViewController
+- (NSString *)apollo_screenTitle { return @"Feed Shortcuts"; }
+- (NSArray<ApolloSettingsSection *> *)buildForm {
+    return @[ [self buildFeedShortcutsPreviewSection],
+              [self buildFeedShortcutsVisibilitySection],
+              [self buildFeedShortcutsControlsSection] ];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reloadRowWithID:@"feedShortcuts.preview"];
+    [self reloadRowWithID:@"sub.showPopularShortcut"];
+    [self reloadRowWithID:@"sub.showAllShortcut"];
+    [self reloadRowWithID:@"sub.showModeratorShortcut"];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (!previousTraitCollection ||
+        [self.traitCollection.preferredContentSizeCategory
+            isEqualToString:previousTraitCollection.preferredContentSizeCategory]) {
+        return;
+    }
+    [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
+    [self reloadRowWithID:@"sub.hideFeedDescriptions"];
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    __weak typeof(self) weakSelf = self;
+    [coordinator animateAlongsideTransition:nil
+                                 completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+        [weakSelf apollo_refreshFeedShortcutsPreviewAnimated:YES];
+        [weakSelf reloadRowWithID:@"sub.hideFeedDescriptions"];
+    }];
+}
+
+- (void)apollo_applyThemeToCell:(UITableViewCell *)cell {
+    [super apollo_applyThemeToCell:cell];
+    if (![cell isKindOfClass:[ApolloFeedShortcutsPreviewCell class]]) return;
+
+    cell.backgroundColor = UIColor.clearColor;
+    cell.contentView.backgroundColor = UIColor.clearColor;
+    cell.backgroundView.backgroundColor = UIColor.clearColor;
+    if (@available(iOS 14.0, *)) {
+        cell.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+    }
 }
 @end
 
