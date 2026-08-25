@@ -1,7 +1,9 @@
 // Floating Post Tabs — chat-heads-style bubbles that keep up to 5 posts open.
 //
 // From the comments screen's "..." menu, "Keep in Floating Tab" turns the
-// current post into a small draggable bubble (the subreddit's icon) floating
+// current post into a small draggable bubble floating (face = the post's
+// thumbnail with a subreddit rim badge, or the subreddit icon for text posts
+// — see the "Bubble identity" section for the disambiguation rules)
 // above all of Apollo's UI, Messenger-chat-heads style. The bubble outlives
 // navigation: browse anywhere, tap the bubble, and you're back on that post —
 // EXACTLY where you left it, because the tab retains the live
@@ -99,6 +101,7 @@ static NSString *const kFTSaveLinkKey = @"linkKey";
 static NSString *const kFTSavePermalink = @"permalink";
 static NSString *const kFTSaveTitle = @"title";
 static NSString *const kFTSaveSubreddit = @"subreddit";
+static NSString *const kFTSaveThumbURL = @"thumbURL";
 static NSString *const kFTSaveSide = @"side";
 static NSString *const kFTSaveYFrac = @"yFrac";
 static NSString *const kFTSaveTucked = @"tucked";
@@ -123,6 +126,7 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 @property (nonatomic, copy) NSString *permalink;      // "/r/sub/comments/..." (cold-reopen fallback; may be empty)
 @property (nonatomic, copy) NSString *title;          // post title (menus, accessibility)
 @property (nonatomic, copy) NSString *subreddit;      // display name for the icon/monogram
+@property (nonatomic, copy) NSString *thumbnailURL;   // post thumbnail (bubble face when present; empty for text/NSFW/spoiler posts)
 @property (nonatomic, strong) UIViewController *commentsVC; // the LIVE screen; nil for cold tabs
 @property (nonatomic, strong) UIImage *snapshot;      // last-seen preview; nil for cold tabs / after memory warning
 // Dock state
@@ -146,7 +150,15 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UILabel *monogramLabel;
 @property (nonatomic, strong) UIImageView *chevronView;
-- (void)applyIconImage:(UIImage *)image;
+// Rim badge (bottom-trailing, iOS-contact-badge style): shows the subreddit
+// icon when the bubble face is a post thumbnail, or a letter (subreddit /
+// post-title initial) when there's no image to show.
+@property (nonatomic, strong) UIView *badgeContainer;
+@property (nonatomic, strong) UIImageView *badgeImageView;
+@property (nonatomic, strong) UILabel *badgeLabel;
+@property (nonatomic, assign) BOOL badgeConfigured;
+- (void)applyMainImage:(UIImage *)image;                          // nil → subreddit monogram
+- (void)applyBadgeImage:(UIImage *)image initial:(NSString *)initial; // both nil → hidden
 - (void)applyMonogramColors;
 - (void)updateTuckAppearance;
 - (void)refreshAccessibility;
@@ -195,6 +207,29 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
     _chevronView.hidden = YES;
     [self addSubview:_chevronView];
 
+    // Rim badge, overlapping the bottom-trailing edge like an iOS contact
+    // badge. A sibling of the clipped icon container so it can sit on the rim.
+    const CGFloat badgeSize = 24.0;
+    _badgeContainer = [[UIView alloc] initWithFrame:CGRectMake(kFTBubbleSize - badgeSize + 2,
+                                                               kFTBubbleSize - badgeSize + 2,
+                                                               badgeSize, badgeSize)];
+    _badgeContainer.layer.cornerRadius = badgeSize / 2.0;
+    _badgeContainer.clipsToBounds = YES;
+    _badgeContainer.layer.borderWidth = 1.5;
+    _badgeContainer.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.92].CGColor;
+    _badgeContainer.hidden = YES;
+    [self addSubview:_badgeContainer];
+
+    _badgeImageView = [[UIImageView alloc] initWithFrame:_badgeContainer.bounds];
+    _badgeImageView.contentMode = UIViewContentModeScaleAspectFill;
+    [_badgeContainer addSubview:_badgeImageView];
+
+    _badgeLabel = [[UILabel alloc] initWithFrame:_badgeContainer.bounds];
+    _badgeLabel.textAlignment = NSTextAlignmentCenter;
+    _badgeLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+    _badgeLabel.hidden = YES;
+    [_badgeContainer addSubview:_badgeLabel];
+
     [self applyMonogramColors];
     [self refreshAccessibility];
     return self;
@@ -220,20 +255,46 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
     [super traitCollectionDidChange:previous];
     if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previous]) {
         [self applyMonogramColors];
+        [self refreshBadgeColors];
     }
 }
 
-- (void)applyIconImage:(UIImage *)image {
-    if (!image) return;
+- (void)applyMainImage:(UIImage *)image {
     self.iconView.image = image;
-    self.iconView.hidden = NO;
-    self.monogramLabel.hidden = YES;
+    self.iconView.hidden = (image == nil);
+    self.monogramLabel.hidden = (image != nil);
+}
+
+- (void)applyBadgeImage:(UIImage *)image initial:(NSString *)initial {
+    self.badgeConfigured = (image != nil || initial.length > 0);
+    if (image) {
+        self.badgeImageView.image = image;
+        self.badgeImageView.hidden = NO;
+        self.badgeLabel.hidden = YES;
+        self.badgeContainer.backgroundColor = [UIColor clearColor];
+    } else if (initial.length > 0) {
+        self.badgeLabel.text = [initial substringToIndex:1].uppercaseString;
+        self.badgeLabel.hidden = NO;
+        self.badgeImageView.hidden = YES;
+        [self refreshBadgeColors];
+    }
+    self.badgeContainer.hidden = !self.badgeConfigured || self.tab.tucked;
+}
+
+- (void)refreshBadgeColors {
+    if (self.badgeLabel.hidden) return;
+    UIColor *accent = ApolloThemeAccentColor() ?: [UIColor systemBlueColor];
+    UIColor *resolved = [accent resolvedColorWithTraitCollection:self.traitCollection];
+    self.badgeContainer.backgroundColor = resolved;
+    self.badgeLabel.textColor = ApolloColorIsLight(resolved) ? [UIColor blackColor] : [UIColor whiteColor];
 }
 
 - (void)updateTuckAppearance {
     BOOL tucked = self.tab.tucked;
     self.chevronView.hidden = !tucked;
     self.alpha = tucked ? 0.88 : 1.0;
+    // The ~21pt sliver has no room for a rim badge.
+    self.badgeContainer.hidden = tucked || !self.badgeConfigured;
     if (!tucked) return;
     // Chevron points inward — the direction to pull the bubble back out. The
     // visible sliver is the bubble's inner-facing portion: left part for a
@@ -346,13 +407,16 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 // Icon pipeline
 @property (nonatomic, strong) NSCache<NSString *, UIImage *> *iconCache;         // lowercased subreddit -> image
 @property (nonatomic, strong) NSMutableSet<NSString *> *iconFetchesInFlight;
+@property (nonatomic, strong) NSCache<NSString *, UIImage *> *thumbCache;        // thumbnail URL -> image
+@property (nonatomic, strong) NSMutableSet<NSString *> *thumbFetchesInFlight;
 @property (nonatomic, assign) BOOL didAttemptRestore;
 
 + (instancetype)shared;
 + (instancetype)sharedIfExists;
 - (ApolloFloatingTab *)tabForLinkKey:(NSString *)linkKey;
 - (void)addTabWithLinkKey:(NSString *)linkKey permalink:(NSString *)permalink title:(NSString *)title
-                subreddit:(NSString *)subreddit viewController:(UIViewController *)vc;
+                subreddit:(NSString *)subreddit thumbnailURL:(NSString *)thumbnailURL
+           viewController:(UIViewController *)vc;
 - (void)closeTabs:(NSArray<ApolloFloatingTab *> *)tabsToClose animated:(BOOL)animated;
 - (void)closeAll;
 - (void)refreshSnapshotForViewController:(UIViewController *)vc;
@@ -390,6 +454,8 @@ static ApolloFloatingTabsController *sFTController = nil;
     _bubbles = [NSMapTable strongToStrongObjectsMapTable];
     _iconCache = [[NSCache alloc] init];
     _iconFetchesInFlight = [NSMutableSet set];
+    _thumbCache = [[NSCache alloc] init];
+    _thumbFetchesInFlight = [NSMutableSet set];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleMemoryWarning)
                                                  name:UIApplicationDidReceiveMemoryWarningNotification
@@ -499,7 +565,8 @@ static ApolloFloatingTabsController *sFTController = nil;
 }
 
 - (void)addTabWithLinkKey:(NSString *)linkKey permalink:(NSString *)permalink title:(NSString *)title
-                subreddit:(NSString *)subreddit viewController:(UIViewController *)vc {
+                subreddit:(NSString *)subreddit thumbnailURL:(NSString *)thumbnailURL
+           viewController:(UIViewController *)vc {
     if (linkKey.length == 0 || [self tabForLinkKey:linkKey] || self.tabs.count >= kFTMaxTabs) return;
 
     ApolloFloatingTab *tab = [[ApolloFloatingTab alloc] init];
@@ -507,6 +574,7 @@ static ApolloFloatingTabsController *sFTController = nil;
     tab.permalink = permalink ?: @"";
     tab.title = title ?: @"Post";
     tab.subreddit = subreddit ?: @"";
+    tab.thumbnailURL = thumbnailURL ?: @"";
     tab.commentsVC = vc;
     tab.side = 1;
     tab.yFrac = [self nextFreeYFrac];
@@ -514,6 +582,8 @@ static ApolloFloatingTabsController *sFTController = nil;
 
     [self installBubbleForTab:tab];
     [self resolveIconForTab:tab];
+    [self resolveThumbnailForTab:tab];
+    [self refreshAllIdentities];
 
     // Capture "where you left off" right now, while the post is on screen (the
     // presented menu/sheet lives in other windows / presentation containers,
@@ -564,7 +634,7 @@ static ApolloFloatingTabsController *sFTController = nil;
     [self.rootViewController.view addSubview:bubble];
     [self.window.interactiveViews addObject:bubble];
     [self.bubbles setObject:bubble forKey:tab];
-    [self applyCachedIconToTab:tab];
+    [self refreshIdentityForTab:tab];
     [bubble updateTuckAppearance];
     [self applyZOrder];
 }
@@ -588,6 +658,7 @@ static ApolloFloatingTabsController *sFTController = nil;
         }
     }
     [self normalizeStacks];
+    [self refreshAllIdentities]; // a departing duplicate may clear collision badges
     [self layoutBubblesAnimated:animated];
     [self persist];
     [self tearDownWindowIfEmpty];
@@ -632,22 +703,65 @@ static ApolloFloatingTabsController *sFTController = nil;
 }
 
 // =============================================================================
-// MARK: Subreddit icon
+// MARK: Bubble identity (post thumbnail / subreddit icon / badges)
 // =============================================================================
+// What a bubble looks like, in priority order:
+//   1. Post thumbnail as the face + subreddit icon (or its letter) as the rim
+//      badge — every tab reads distinctly even when several come from one
+//      subreddit, and the badge keeps the community identity visible.
+//   2. No thumbnail (text/NSFW/spoiler post): subreddit icon (or monogram) as
+//      the face. If ANOTHER badge-less tab shares the subreddit, each gets a
+//      post-title-initial badge so same-sub text posts still tell apart.
+// Recomputed wholesale on every add/close/restore and image arrival —
+// identity is derived state, never patched incrementally.
 
-- (void)applyCachedIconToTab:(ApolloFloatingTab *)tab {
-    NSString *key = tab.subreddit.lowercaseString;
-    UIImage *cached = key.length > 0 ? [self.iconCache objectForKey:key] : nil;
-    if (cached) [[self bubbleForTab:tab] applyIconImage:cached];
+- (void)refreshIdentityForTab:(ApolloFloatingTab *)tab {
+    ApolloFloatingBubbleView *bubble = [self bubbleForTab:tab];
+    if (!bubble) return;
+    NSString *subKey = tab.subreddit.lowercaseString;
+    UIImage *subIcon = subKey.length > 0 ? [self.iconCache objectForKey:subKey] : nil;
+    UIImage *thumb = tab.thumbnailURL.length > 0 ? [self.thumbCache objectForKey:tab.thumbnailURL] : nil;
+
+    if (thumb) {
+        [bubble applyMainImage:thumb];
+        NSString *subInitial = subKey.length > 0 ? [subKey substringToIndex:1] : @"r";
+        [bubble applyBadgeImage:subIcon initial:(subIcon ? nil : subInitial)];
+        return;
+    }
+
+    [bubble applyMainImage:subIcon]; // nil → monogram
+    // Collision = another tab that will ALSO wear this subreddit's face
+    // (judged by stored thumbnail URL, not fetch state, so badges don't
+    // flicker while a thumbnail is still downloading).
+    BOOL collision = NO;
+    for (ApolloFloatingTab *other in self.tabs) {
+        if (other != tab && other.thumbnailURL.length == 0
+            && [other.subreddit.lowercaseString isEqualToString:subKey]) {
+            collision = YES;
+            break;
+        }
+    }
+    NSString *titleInitial = nil;
+    if (collision) {
+        for (NSUInteger i = 0; i < tab.title.length; i++) {
+            unichar c = [tab.title characterAtIndex:i];
+            if ([[NSCharacterSet alphanumericCharacterSet] characterIsMember:c]) {
+                titleInitial = [tab.title substringWithRange:NSMakeRange(i, 1)];
+                break;
+            }
+        }
+        if (!titleInitial) titleInitial = @"•";
+    }
+    [bubble applyBadgeImage:nil initial:titleInitial];
+}
+
+- (void)refreshAllIdentities {
+    for (ApolloFloatingTab *tab in self.tabs) [self refreshIdentityForTab:tab];
 }
 
 - (void)resolveIconForTab:(ApolloFloatingTab *)tab {
     NSString *key = tab.subreddit.lowercaseString;
-    if (key.length == 0) return;
-    if ([self.iconCache objectForKey:key]) {
-        [self applyCachedIconToTab:tab];
-        return;
-    }
+    if (key.length == 0 || [self.iconCache objectForKey:key]) return;
     if ([self.iconFetchesInFlight containsObject:key]) return;
     [self.iconFetchesInFlight addObject:key];
 
@@ -670,13 +784,31 @@ static ApolloFloatingTabsController *sFTController = nil;
             UIImage *image = data ? [UIImage imageWithData:data] : nil;
             if (!image) return;
             [innerSelf.iconCache setObject:image forKey:key];
-            for (ApolloFloatingTab *candidate in innerSelf.tabs) {
-                if ([candidate.subreddit.lowercaseString isEqualToString:key]) {
-                    [[innerSelf bubbleForTab:candidate] applyIconImage:image];
-                }
-            }
+            [innerSelf refreshAllIdentities];
         });
     }];
+}
+
+- (void)resolveThumbnailForTab:(ApolloFloatingTab *)tab {
+    NSString *urlString = tab.thumbnailURL;
+    if (urlString.length == 0 || [self.thumbCache objectForKey:urlString]) return;
+    if ([self.thumbFetchesInFlight containsObject:urlString]) return;
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) return;
+    [self.thumbFetchesInFlight addObject:urlString];
+
+    __weak __typeof(self) weakSelf = self;
+    NSURLRequest *request = [NSURLRequest requestWithURL:url];
+    ApolloStartBoundedDataRequest(request, 4 * 1024 * 1024, nil, nil,
+                                  ^(NSData *data, NSHTTPURLResponse *response, NSError *error) {
+        __typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf.thumbFetchesInFlight removeObject:urlString];
+        UIImage *image = data ? [UIImage imageWithData:data] : nil;
+        if (!image) return; // face falls back to the subreddit icon
+        [strongSelf.thumbCache setObject:image forKey:urlString];
+        [strongSelf refreshAllIdentities];
+    });
 }
 
 // =============================================================================
@@ -1514,6 +1646,7 @@ static ApolloFloatingTabsController *sFTController = nil;
         dict[kFTSavePermalink] = tab.permalink;
         dict[kFTSaveTitle] = tab.title ?: @"";
         dict[kFTSaveSubreddit] = tab.subreddit ?: @"";
+        if (tab.thumbnailURL.length > 0) dict[kFTSaveThumbURL] = tab.thumbnailURL;
         dict[kFTSaveSide] = @(tab.side);
         dict[kFTSaveYFrac] = @(tab.yFrac);
         dict[kFTSaveTucked] = @(tab.tucked);
@@ -1546,6 +1679,7 @@ static ApolloFloatingTabsController *sFTController = nil;
         tab.permalink = permalink;
         tab.title = [dict[kFTSaveTitle] isKindOfClass:[NSString class]] ? dict[kFTSaveTitle] : @"Post";
         tab.subreddit = [dict[kFTSaveSubreddit] isKindOfClass:[NSString class]] ? dict[kFTSaveSubreddit] : @"";
+        tab.thumbnailURL = [dict[kFTSaveThumbURL] isKindOfClass:[NSString class]] ? dict[kFTSaveThumbURL] : @"";
         tab.side = [dict[kFTSaveSide] respondsToSelector:@selector(integerValue)]
             ? (([dict[kFTSaveSide] integerValue] < 0) ? -1 : 1) : 1;
         tab.yFrac = [dict[kFTSaveYFrac] respondsToSelector:@selector(doubleValue)]
@@ -1560,9 +1694,11 @@ static ApolloFloatingTabsController *sFTController = nil;
         [self.tabs addObject:tab];
         [self installBubbleForTab:tab];
         [self resolveIconForTab:tab];
+        [self resolveThumbnailForTab:tab];
     }
     if (self.tabs.count == 0) return;
     [self normalizeStacks];
+    [self refreshAllIdentities];
     [self layoutBubblesAnimated:NO];
     ApolloLog(@"[FloatingTabs] Restored %lu saved tab(s) (cold — reopen via URL router)",
               (unsigned long)self.tabs.count);
@@ -1638,6 +1774,26 @@ static NSString *ApolloFTStringFromSelector(id object, SEL selector) {
     if (!object || ![object respondsToSelector:selector]) return nil;
     id value = ((id (*)(id, SEL))objc_msgSend)(object, selector);
     return [value isKindOfClass:[NSString class]] ? (NSString *)value : nil;
+}
+
+// The post's thumbnail URL, for the bubble face. Deliberately nil for NSFW and
+// spoiler posts — a floating bubble is visible over everything, everywhere.
+// The http(s) scheme check also drops reddit's "self"/"default" placeholder
+// values (same validation as Recently Read's thumbnail path).
+static NSString *ApolloFTThumbnailURLStringForLink(id link) {
+    if (!link) return nil;
+    SEL nsfwSel = NSSelectorFromString(@"isNSFW");
+    if ([link respondsToSelector:nsfwSel] && ((BOOL (*)(id, SEL))objc_msgSend)(link, nsfwSel)) return nil;
+    SEL spoilerSel = NSSelectorFromString(@"isSpoiler");
+    if ([link respondsToSelector:spoilerSel] && ((BOOL (*)(id, SEL))objc_msgSend)(link, spoilerSel)) return nil;
+    SEL thumbSel = NSSelectorFromString(@"thumbnailURL");
+    if (![link respondsToSelector:thumbSel]) return nil;
+    id value = ((id (*)(id, SEL))objc_msgSend)(link, thumbSel);
+    NSString *urlString = [value isKindOfClass:[NSURL class]] ? [(NSURL *)value absoluteString]
+                        : ([value isKindOfClass:[NSString class]] ? (NSString *)value : nil);
+    NSString *lower = urlString.lowercaseString;
+    if (!([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"])) return nil;
+    return urlString;
 }
 
 // Post identity + metadata for a CommentsViewController, from its RDKLink
@@ -1717,8 +1873,10 @@ static void ApolloFTKeepOrToggleForVC(id vc) {
     }
     NSString *permalink = nil, *title = nil, *subreddit = nil;
     ApolloFTLinkInfoForVC(vc, &linkKey, &permalink, &title, &subreddit);
+    NSString *thumbnailURL = ApolloFTThumbnailURLStringForLink(ApolloFTIvarObject(vc, "link"));
     [controller addTabWithLinkKey:linkKey permalink:permalink title:title
-                        subreddit:subreddit viewController:(UIViewController *)vc];
+                        subreddit:subreddit thumbnailURL:thumbnailURL
+                   viewController:(UIViewController *)vc];
 }
 
 static void ApolloFTMenuPerform(id actionController) {
