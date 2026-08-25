@@ -47,6 +47,8 @@
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/ApolloSubredditLayoutViewController.h"
+#import "settings/ApolloSubredditSectionsViewController.h"
+#import "ApolloFollowingSection.h"
 #import "settings/TranslationSettingsViewController.h"
 #import "PictureInPictureViewController.h"
 #import "TagFiltersViewController.h"
@@ -2053,9 +2055,30 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return [[ApolloSubredditLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
+    // Pushes the dedicated Subreddit Sections screen: the FOLLOWING section
+    // for followed users, drag-to-reorder for the special sections, and a
+    // live preview of the list layout (see ApolloSubredditSectionsViewController).
+    ApolloSettingsRow *subredditSections =
+        [self hubDisclosureRowWithID:@"sub.sections"
+                                title:@"Subreddit Sections"
+                             subtitle:^NSString * { return [weakSelf subredditSectionsSummaryText]; }
+                                 push:^UIViewController * {
+            return [[ApolloSubredditSectionsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts. Multireddits show the subreddits they contain, or a custom description — tap a multireddit while editing the list to rename it or change its description. Hide Multireddit Descriptions blanks that line entirely."
-                                              rows:@[ enhancements, modernDividers, hideDescriptions, hideMultiredditDescriptions, subredditLayout ]];
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, hideMultiredditDescriptions, subredditSections, subredditLayout ]];
+}
+
+- (NSString *)subredditSectionsSummaryText {
+    BOOL separate = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySeparateFollowedUsers];
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *token in ApolloSubredditSectionsResolvedOrder()) {
+        if (!separate && [token isEqualToString:ApolloSubredditSectionTokenFollowing]) continue;
+        [parts addObject:ApolloSubredditSectionDisplayName(token)];
+    }
+    return [parts componentsJoinedByString:@" · "];
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -3905,6 +3928,12 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildSubredditsMainSection],
               [self buildSubredditsSourcesSection] ];
+}
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // Refresh the Subreddit Sections summary after returning from that screen
+    // (the order / Following toggle may have just changed).
+    [self reloadRowWithID:@"sub.sections"];
 }
 @end
 

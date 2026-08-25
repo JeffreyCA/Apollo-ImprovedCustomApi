@@ -57,6 +57,20 @@ static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = 
 // contains). Default NO. See ApolloMultiredditEdit.xm.
 static NSString *const UDKeyHideMultiredditDescriptions = @"HideMultiredditDescriptions";
 static NSString *const ApolloHideMultiredditDescriptionsChangedNotification = @"ApolloHideMultiredditDescriptionsChangedNotification";
+// Pull followed users (the u_<name> profile "subreddits" Reddit mixes into
+// subscriptions) out of the A-Z sections into a dedicated FOLLOWING section in
+// the Subreddits list. Default NO. See ApolloFollowingSection.xm.
+static NSString *const UDKeySeparateFollowedUsers = @"SeparateFollowedUsers";
+// Display order of the Favorites/Multireddits/Moderator/Following sections in
+// the Subreddits list: an array of the tokens declared in
+// ApolloFollowingSection.h. Missing/unknown tokens fall back to the native
+// order (favorites, multireddits, moderator, following).
+static NSString *const UDKeySubredditSectionOrder = @"SubredditSectionOrder";
+// Custom display order of the FOLLOWING section's rows (array of u_<name>
+// subscription names, matched case-insensitively). Users not in the array
+// append in their natural alphabetical order.
+static NSString *const UDKeyFollowedUsersOrder = @"FollowedUsersOrder";
+static NSString *const ApolloSubredditSectionsChangedNotification = @"ApolloSubredditSectionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
