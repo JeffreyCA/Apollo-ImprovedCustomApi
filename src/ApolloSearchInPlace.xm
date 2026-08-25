@@ -20,6 +20,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 
 // Forward ref for the setContentInset:/setContentOffset: hooks below (also declared in
 // ApolloLiquidGlass.xm; a forward @interface in a second .xm is fine).
@@ -83,7 +84,9 @@ static const CGFloat kCommentBlurInsetY  = 4.0;   // top/bottom margins
 static const CGFloat kCommentBlurCorner  = 14.0;  // corner radius
 static const CGFloat kCommentDoneNudgeX  = 14.0;  // Done button → right (off the rounded corner, more centered)
 static const CGFloat kCommentDoneNudgeY  = -6.0;  // Done button ↑ up (Apollo sits it a touch low)
+static const CGFloat kCommentThemeTintAlpha = 0.72; // theme wash over the blur (1 = solid card color)
 static const void *kCommentBlurKey = &kCommentBlurKey;
+static const void *kCommentTintKey = &kCommentTintKey;
 
 // Nudge the docked find bar's "Done" button (Apollo's leftmost button) right + up via a transform (idempotent,
 // doesn't compound across layout passes, and the tap target moves with it).
@@ -114,6 +117,29 @@ static void ensureCommentBlurBacking(UIView *bar) {
     CGRect r = CGRectInset(bar.bounds, kCommentBlurInsetX, kCommentBlurInsetY);
     blur.frame = r;
     blur.layer.cornerRadius = MIN(kCommentBlurCorner, CGRectGetHeight(r) / 2.0);
+
+    // Theme wash (#946 follow-up): the bare material reads as the same neutral
+    // grey slab under every theme. Tint the frost with the theme's card/cell
+    // surface color — the surface Apollo's own chrome sits on, distinct from
+    // the page background — so the docked bar follows the active theme (glass
+    // and non-glass alike). Reassigned every pass on purpose: stock-theme
+    // switches don't bump the runtime epoch, and this only runs on the bar's
+    // own (rare) layout passes.
+    UIView *tint = objc_getAssociatedObject(bar, kCommentTintKey);
+    if (!tint) {
+        tint = [[UIView alloc] init];
+        tint.userInteractionEnabled = NO;
+        tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        objc_setAssociatedObject(bar, kCommentTintKey, tint, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (tint.superview != blur.contentView) [blur.contentView insertSubview:tint atIndex:0];
+    // Size from the effect view's own bounds (just set above): contentView's
+    // bounds can lag a pass behind right after the blur is created, which left
+    // the tint zero-sized (and the bar grey) until some later relayout.
+    tint.frame = blur.bounds;
+    UIColor *card = ApolloThemeCardBackgroundColor() ?: UIColor.secondarySystemBackgroundColor;
+    tint.backgroundColor = [card colorWithAlphaComponent:kCommentThemeTintAlpha];
+
     if (bar.backgroundColor != nil) bar.backgroundColor = nil; // let the blur show through
     bar.opaque = NO;
 }
