@@ -1,8 +1,6 @@
 #import "ApolloSettingsForm.h"
 
 // Dedicated "Profile Layout" screen: Density + Avatar pickers and the per-band
-// show switches (Banner, Stat Cards, Social Links, Follow & Message). Pushed
-// from the Profiles group screen's "Profile Layout" row. Declarative form —
-// see -buildForm.
+// show switches (Banner, Stat Cards, Social Links, Follow & Message).
 @interface ApolloProfileLayoutViewController : ApolloSettingsFormViewController
 @end

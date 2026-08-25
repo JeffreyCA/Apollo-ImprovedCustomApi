@@ -558,7 +558,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"interface.tabBarScrollBehavior"];
     // Refresh the Profile Layout summary after returning from that screen
     // (Density/Avatar/band switches may have just changed).
-    [self reloadRowWithID:@"media.profileLayout"];
+    [self reloadRowWithID:@"feat.profileLayout"];
     // The Setup section footer (onboarding nudge) collapses once a Reddit key
     // exists, which may have just been entered on the pushed API Keys screen.
     // Section 0 is Setup on the hub; reloading it re-evaluates the footer.
@@ -733,6 +733,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (ApolloSettingsSection *)buildFeaturesSection {
+    __weak typeof(self) weakSelf = self;
+
     ApolloSettingsRow *posts =
         [self hubDisclosureRowWithID:@"feat.posts" title:@"Posts & Feeds" subtitle:nil
                                 push:^UIViewController * {
@@ -753,10 +755,12 @@ typedef NS_ENUM(NSInteger, Tag) {
                                 push:^UIViewController * {
             return [[ApolloSubredditsSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
-    ApolloSettingsRow *profiles =
-        [self hubDisclosureRowWithID:@"feat.profiles" title:@"Profiles" subtitle:nil
+    ApolloSettingsRow *profileLayout =
+        [self hubDisclosureRowWithID:@"feat.profileLayout"
+                               title:@"Profile Layout"
+                            subtitle:^NSString * { return [weakSelf profileLayoutSummaryText]; }
                                 push:^UIViewController * {
-            return [[ApolloProfilesSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
     ApolloSettingsRow *interface_ =
         [self hubDisclosureRowWithID:@"feat.interface" title:@"Interface" subtitle:nil
@@ -771,15 +775,15 @@ typedef NS_ENUM(NSInteger, Tag) {
     comments.iconSystemName     = @"text.bubble.fill";            comments.iconTileColor     = [UIColor systemGreenColor];
     media.iconSystemName        = @"play.rectangle.fill";         media.iconTileColor        = [UIColor systemPinkColor];
     subreddits.iconSystemName   = @"person.3.fill";               subreddits.iconTileColor   = [UIColor systemRedColor];
-    profiles.iconSystemName     = @"person.crop.circle.fill";     profiles.iconTileColor     = [UIColor systemTealColor];
+    profileLayout.iconSystemName = @"person.crop.circle.fill";   profileLayout.iconTileColor = [UIColor systemTealColor];
     interface_.iconSystemName   = @"slider.horizontal.3";         interface_.iconTileColor   = [UIColor systemPurpleColor];
     linkPreviews.iconSystemName = @"link";                        linkPreviews.iconTileColor = [UIColor systemBlueColor];
     polls.iconSystemName        = @"chart.bar.fill";              polls.iconTileColor        = [UIColor systemYellowColor];
     apolloAI.iconSystemName     = @"sparkles";                    apolloAI.iconTileColor     = [UIColor systemIndigoColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Features"
-                                            footer:@"Fine-tune posts, comments, media, subreddits, profiles and the interface."
-                                              rows:@[ posts, comments, media, subreddits, profiles, interface_,
+                                            footer:@"Fine-tune posts, comments, media, subreddits, profile layout and the interface."
+                                              rows:@[ posts, comments, media, subreddits, profileLayout, interface_,
                                                       linkPreviews, polls, apolloAI ]];
 }
 
@@ -1985,28 +1989,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     return [ApolloSettingsSection sectionWithTitle:@"Network"
                                             footer:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still appear where Imgur is blocked (e.g. the UK).\n\nDuckDuckGo can only carry images. Multi-image albums also need a small text file listing the album's contents, which DuckDuckGo refuses to fetch. With Album Fallback Proxies on, Apollo gets that file through public text proxies (r.jina.ai, allorigins.win, codetabs.com) whenever Imgur can't be reached directly. Only the album's Imgur address is sent to them — nothing about you or your Reddit account. Turn it off to use DuckDuckGo strictly; albums will then fail while Imgur is blocked.\n\nVideos and uploads can't be proxied at all."
                                               rows:@[ proxyImgur, albumFallback ]];
-}
-
-// Profiles group screen (ApolloProfilesSettingsViewController).
-- (ApolloSettingsSection *)buildProfilesSection {
-    __weak typeof(self) weakSelf = self;
-
-    // Pushes the dedicated Profile Layout screen (Density + Avatar pickers,
-    // per-band show switches). Supersedes the old flat "Show Detailed
-    // Profiles" switch — sShowDetailedProfiles is now driven entirely from
-    // there (forced YES whenever Density/Avatar changes; New vs Classic is
-    // the real on/off for the melt backdrop, not this flag).
-    ApolloSettingsRow *profileLayout =
-        [self hubDisclosureRowWithID:@"media.profileLayout"
-                                title:@"Profile Layout"
-                             subtitle:^NSString * { return [weakSelf profileLayoutSummaryText]; }
-                                 push:^UIViewController * {
-            return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-        }];
-
-    return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Customize the layout and details shown on profile pages."
-                                              rows:@[ profileLayout ]];
 }
 
 - (NSString *)profileLayoutSummaryText {
@@ -3938,13 +3920,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildSubredditsMainSection],
               [self buildSubredditsSourcesSection] ];
-}
-@end
-
-@implementation ApolloProfilesSettingsViewController
-- (NSString *)apollo_screenTitle { return @"Profiles"; }
-- (NSArray<ApolloSettingsSection *> *)buildForm {
-    return @[ [self buildProfilesSection] ];
 }
 @end
 
