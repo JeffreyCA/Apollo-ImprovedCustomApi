@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import "ApolloCommon.h"
 #import "ApolloState.h"
-#import "ApolloThemeRuntime.h"
+#import "ApolloTabBarHideStyle.h"
 #import "UserDefaultConstants.h"
 
 // MARK: - Tab Bar Hide Style (Left / Right / Fade / Down / Off)
@@ -18,7 +18,8 @@
 // mirroring the minimized pill's frame across the tab bar's midline in a
 // post-layout pass. The custom styles instead keep native minimization disabled
 // and let ApolloAutoHideTabBar.xm animate the full bar. The choice is surfaced
-// on Apollo's own Settings > General > "Hide Bars on Scroll" row.
+// in Apollo Reborn > Interface > Tab Bar; Apollo's native General row is hidden
+// so there remains one source of truth.
 //
 // The native row (RE via Hopper, Apollo 1.15.11):
 //   - Eureka SwitchRow, NO tag, title "Hide Bars on Scroll", built in
@@ -27,45 +28,36 @@
 //   - onChange (sub_100145e4c): [standardUserDefaults setBool:forKey:@"HideBarsOnScroll"]
 //     then posts "com.christianselig.HideBarsOnSwipeChanged".
 //   - Every ApolloNavigationController observes that notification and re-reads
-//     the key (sub_10015a010), so flipping the underlying UISwitch (setOn: +
-//     sendActionsForControlEvents:) applies app-wide through Apollo's own path
-//     and keeps Eureka's cached row value coherent (writing the defaults key
-//     under Eureka leaves row.value stale — the PR #570 lesson).
-//
-// Only the accessory view of the positively-identified cell is touched; no
-// table remapping happens here (index space untouched — safe to coexist with
-// ApolloPerPostCommentSort.xm's remapper on the same screen, same pattern as
-// ApolloHideNativeOpenInAppRows.xm).
+//     the key (sub_10015a010). The relocated control replays those same two side
+//     effects directly; the hidden Eureka row's cached value is never displayed.
 
-// Local alias for the Swift settings VC; bound in %ctor via %init(...=objc_getClass).
-@interface SettingsGeneralViewController : UIViewController
-@end
-
-static NSString *const kApolloHideBarsRowTitle = @"Hide Bars on Scroll";
 static NSString *const kApolloHideBarsChangedNote = @"com.christianselig.HideBarsOnSwipeChanged";
 static const NSInteger ApolloTabBarHideMenuModeOff = ApolloTabBarHideStyleDown + 1;
 
-static char kTabBarHideStyleNativeSwitchKey;   // cell -> its original Eureka UISwitch
-static char kTabBarHideStyleButtonKey;         // cell -> our menu button
-
-static BOOL TabBarHideStyleNativeHideBarsOn(void) {
+BOOL ApolloTabBarHideBarsEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNativeHideBarsOnScroll];
 }
 
 // Off maps to Apollo's native toggle; the styles use the legacy persisted key.
-static NSInteger TabBarHideStyleCurrentMenuMode(void) {
-    if (!TabBarHideStyleNativeHideBarsOn()) return ApolloTabBarHideMenuModeOff;
-    return sTabBarHideStyle;
+NSInteger ApolloTabBarHideStyleCurrentOptionIndex(void) {
+    if (!ApolloTabBarHideBarsEnabled()) return ApolloTabBarHideMenuModeOff;
+    return MIN(ApolloTabBarHideStyleDown,
+               MAX(ApolloTabBarHideStyleLeft, sTabBarHideStyle));
 }
 
-static NSString *TabBarHideStyleMenuTitle(NSInteger mode) {
-    switch (mode) {
-        case ApolloTabBarHideStyleLeft: return @"Left";
-        case ApolloTabBarHideStyleRight: return @"Right";
-        case ApolloTabBarHideStyleFade: return @"Fade";
-        case ApolloTabBarHideStyleDown: return @"Down";
-        default: return @"Off";
-    }
+NSArray<NSString *> *ApolloTabBarHideStyleOptionTitles(void) {
+    static NSArray<NSString *> *titles;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        titles = @[@"Left", @"Right", @"Fade", @"Down", @"Off"];
+    });
+    return titles;
+}
+
+NSString *ApolloTabBarHideStyleCurrentTitle(void) {
+    NSArray<NSString *> *titles = ApolloTabBarHideStyleOptionTitles();
+    NSInteger index = ApolloTabBarHideStyleCurrentOptionIndex();
+    return (index >= 0 && index < (NSInteger)titles.count) ? titles[index] : @"Off";
 }
 
 // MARK: Runtime pill mirroring
@@ -159,7 +151,7 @@ static void TabBarHideStyleRelayoutVisibleTabBars(void) {
     }
 }
 
-// MARK: Settings row (native Settings > General > Other > "Hide Bars on Scroll")
+// MARK: Shared setting application (Interface > Tab Bar)
 
 static void TabBarHideStyleSet(ApolloTabBarHideStyle style) {
     style = (ApolloTabBarHideStyle)MIN(ApolloTabBarHideStyleDown,
@@ -171,190 +163,41 @@ static void TabBarHideStyleSet(ApolloTabBarHideStyle style) {
     }
 }
 
-// Flip Apollo's native toggle THROUGH its own UISwitch so Eureka's cached row
-// value and Apollo's onChange (defaults write + HideBarsOnSwipeChanged post)
-// both run. Falls back to replaying the onChange side effects directly when
-// the switch is gone (screen dismissed mid-menu).
-static void TabBarHideStyleSetNativeHideBars(UISwitch *nativeSwitch, BOOL on) {
-    if (TabBarHideStyleNativeHideBarsOn() == on) return;
-    if (nativeSwitch) {
-        [nativeSwitch setOn:on animated:NO];
-        [nativeSwitch sendActionsForControlEvents:UIControlEventValueChanged];
-        // Eureka's onChange ran Apollo's setBool + notification post here.
-        if (TabBarHideStyleNativeHideBarsOn() == on) return;
-        ApolloLog(@"[TabBarHideStyle] Native switch flip didn't persist, falling back to direct write");
-    }
+// The native General row is hidden, so replay its exact persisted-key and
+// notification side effects here. ApolloNavigationController observes this
+// notification and immediately re-reads HideBarsOnScroll app-wide.
+static void TabBarHideStyleSetNativeHideBars(BOOL on) {
+    if (ApolloTabBarHideBarsEnabled() == on) return;
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:UDKeyNativeHideBarsOnScroll];
     [[NSNotificationCenter defaultCenter] postNotificationName:kApolloHideBarsChangedNote object:nil];
 }
 
-static void TabBarHideStyleRefreshRowControl(UITableViewCell *cell);
-
-static UITableView *TabBarHideStyleContainingTableView(UITableViewCell *cell) {
-    for (UIView *view = cell.superview; view; view = view.superview) {
-        if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
-    }
-    return nil;
-}
-
-// Apply through Apollo's own toggle plumbing, then refresh the tab bar and row.
-static void TabBarHideStyleApplyModeSelection(NSInteger mode, UITableViewCell *cell) {
-    UISwitch *nativeSwitch = cell ? objc_getAssociatedObject(cell, &kTabBarHideStyleNativeSwitchKey) : nil;
-    if (mode == ApolloTabBarHideMenuModeOff) {
-        TabBarHideStyleSetNativeHideBars(nativeSwitch, NO);
-    } else {
-        TabBarHideStyleSet((ApolloTabBarHideStyle)mode);
-        TabBarHideStyleSetNativeHideBars(nativeSwitch, YES);
-    }
-    // Changing styles while the native setting remains ON does not
-    // fire Apollo's native switch callback. Reconcile the runtime explicitly.
+static void TabBarHideStyleReconcileRuntime(void) {
+    // Changing styles while Hide Bars remains ON does not fire Apollo's native
+    // switch callback. Reconcile Reborn's scroll driver explicitly either way.
     [[NSNotificationCenter defaultCenter]
         postNotificationName:ApolloTabBarScrollBehaviorChangedNotification object:nil];
     TabBarHideStyleRelayoutVisibleTabBars();
-    if (cell) {
-        // Replacing UIButton.menu from inside its still-presented action can
-        // strand the accessory (or its Eureka cell) in the highlighted state.
-        // Let UIKit finish dismissing the menu before rebuilding it and clear
-        // any table selection left by a tap on the row around the accessory.
-        __weak UITableViewCell *weakCell = cell;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UITableViewCell *strongCell = weakCell;
-            if (!strongCell) return;
-            TabBarHideStyleRefreshRowControl(strongCell);
-            UIButton *button = objc_getAssociatedObject(
-                strongCell, &kTabBarHideStyleButtonKey);
-            button.highlighted = NO;
-            [strongCell setHighlighted:NO animated:NO];
-            [strongCell setSelected:NO animated:NO];
-            UITableView *tableView = TabBarHideStyleContainingTableView(strongCell);
-            NSIndexPath *indexPath = [tableView indexPathForCell:strongCell];
-            if (indexPath) [tableView deselectRowAtIndexPath:indexPath animated:NO];
-        });
-    }
 }
 
-static UIMenu *TabBarHideStyleBuildMenu(UITableViewCell *cell) {
-    NSInteger current = TabBarHideStyleCurrentMenuMode();
-    __weak UITableViewCell *weakCell = cell;
-
-    UIAction *(^makeAction)(NSInteger) = ^UIAction *(NSInteger mode) {
-        UIAction *action = [UIAction actionWithTitle:TabBarHideStyleMenuTitle(mode)
-                                               image:nil
-                                          identifier:nil
-                                             handler:^(__unused UIAction *act) {
-            TabBarHideStyleApplyModeSelection(mode, weakCell);
-        }];
-        action.state = (current == mode) ? UIMenuElementStateOn : UIMenuElementStateOff;
-        return action;
-    };
-
-    return [UIMenu menuWithTitle:@"Hide Tab Bar"
-                        children:@[makeAction(ApolloTabBarHideStyleLeft),
-                                   makeAction(ApolloTabBarHideStyleRight),
-                                   makeAction(ApolloTabBarHideStyleFade),
-                                   makeAction(ApolloTabBarHideStyleDown),
-                                   makeAction(ApolloTabBarHideMenuModeOff)]];
+void ApolloTabBarHideBarsSetEnabled(BOOL enabled) {
+    TabBarHideStyleSetNativeHideBars(enabled);
+    TabBarHideStyleReconcileRuntime();
 }
 
-// Rebuild the accessory button's title + size. The title is a single
-// attributed line measured with the CELL's current (already-themed) font, and
-// the label is font-pinned afterwards — Apollo's theme runtime re-fonts plain
-// labels after the fact, which is how a size measured pre-theming ends up
-// wrapping "Right" onto two lines at larger text sizes. Measuring the themed
-// font and pinning keeps the measurement authoritative; the willDisplay
-// re-adopt refreshes it whenever the row re-themes.
-static void TabBarHideStyleRefreshRowControl(UITableViewCell *cell) {
-    UIButton *button = objc_getAssociatedObject(cell, &kTabBarHideStyleButtonKey);
-    if (!button) return;
-
-    UIFont *font = cell.detailTextLabel.font ?: cell.textLabel.font
-        ?: [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-    UIColor *color = cell.detailTextLabel.textColor ?: [UIColor secondaryLabelColor];
-    NSString *title = TabBarHideStyleMenuTitle(TabBarHideStyleCurrentMenuMode());
-
-    NSMutableAttributedString *label = [[NSMutableAttributedString alloc]
-        initWithString:title
-            attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: color}];
-    UIImage *chevron = [[UIImage systemImageNamed:@"chevron.up.chevron.down"
-                                withConfiguration:[UIImageSymbolConfiguration configurationWithFont:font
-                                                                                              scale:UIImageSymbolScaleSmall]]
-        imageWithTintColor:color renderingMode:UIImageRenderingModeAlwaysOriginal];
-    if (chevron) {
-        [label appendAttributedString:[[NSAttributedString alloc]
-            initWithString:@" " attributes:@{NSFontAttributeName: font}]];
-        NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
-        attachment.image = chevron;
-        attachment.bounds = CGRectMake(0.0, (font.capHeight - chevron.size.height) / 2.0,
-                                       chevron.size.width, chevron.size.height);
-        [label appendAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
-    }
-
-    button.titleLabel.numberOfLines = 1;
-    button.titleLabel.lineBreakMode = NSLineBreakByClipping;
-    [button setAttributedTitle:label forState:UIControlStateNormal];
-    ApolloThemeRuntimeSetFontPinned(button.titleLabel, YES);
-    CGSize size = [label boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)
-                                      options:NSStringDrawingUsesLineFragmentOrigin
-                                      context:nil].size;
-    button.bounds = CGRectMake(0.0, 0.0, ceil(size.width) + 4.0, MAX(ceil(size.height) + 8.0, 34.0));
-
-    button.menu = TabBarHideStyleBuildMenu(cell);
-    button.showsMenuAsPrimaryAction = YES;
-}
-
-// Replace the identified cell's UISwitch accessory with the style menu button.
-// The original switch is retained on the cell (it is Eureka's
-// value binding) and driven programmatically from the menu actions.
-static void TabBarHideStyleAdoptCell(UITableViewCell *cell) {
-    if (!ApolloSupportsNativeTabBarScrollBehavior()) return;
-
-    UISwitch *nativeSwitch = nil;
-    if ([cell.accessoryView isKindOfClass:[UISwitch class]]) {
-        nativeSwitch = (UISwitch *)cell.accessoryView;
-        objc_setAssociatedObject(cell, &kTabBarHideStyleNativeSwitchKey, nativeSwitch,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+void ApolloTabBarHideStyleApplyOptionIndex(NSInteger optionIndex) {
+    NSInteger mode = MIN(ApolloTabBarHideMenuModeOff,
+                         MAX(ApolloTabBarHideStyleLeft, optionIndex));
+    if (mode == ApolloTabBarHideMenuModeOff) {
+        TabBarHideStyleSetNativeHideBars(NO);
     } else {
-        nativeSwitch = objc_getAssociatedObject(cell, &kTabBarHideStyleNativeSwitchKey);
+        TabBarHideStyleSet((ApolloTabBarHideStyle)mode);
+        TabBarHideStyleSetNativeHideBars(YES);
     }
-    if (!nativeSwitch) return;   // unexpected shape — leave the native row alone
-
-    UIButton *button = objc_getAssociatedObject(cell, &kTabBarHideStyleButtonKey);
-    if (!button) {
-        // Custom type: attributed titles render literally (no system re-tint).
-        button = [UIButton buttonWithType:UIButtonTypeCustom];
-        objc_setAssociatedObject(cell, &kTabBarHideStyleButtonKey, button,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    TabBarHideStyleRefreshRowControl(cell);
-    if (cell.accessoryView != button) cell.accessoryView = button;
+    TabBarHideStyleReconcileRuntime();
 }
-
-static BOOL TabBarHideStyleCellMatches(UITableViewCell *cell) {
-    NSString *text = cell.textLabel.text;
-    return [text isKindOfClass:[NSString class]] &&
-           [[text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]]
-               isEqualToString:kApolloHideBarsRowTitle];
-}
-
-%hook SettingsGeneralViewController
-
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = %orig;
-    if (TabBarHideStyleCellMatches(cell)) TabBarHideStyleAdoptCell(cell);
-    return cell;
-}
-
-// Apollo's shared Eureka cellUpdate closure re-themes cells on display; if it
-// (or Eureka's own update pass) restored the switch accessory, re-adopt here.
-- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
-    %orig;
-    if (TabBarHideStyleCellMatches(cell)) TabBarHideStyleAdoptCell(cell);
-}
-
-%end
 
 %ctor {
-    %init(SettingsGeneralViewController=objc_getClass("_TtC6Apollo29SettingsGeneralViewController"));
     ApolloLog(@"[TabBarHideStyle] hook installed (supported=%d style=%ld)",
               ApolloSupportsNativeTabBarScrollBehavior(), (long)sTabBarHideStyle);
 }

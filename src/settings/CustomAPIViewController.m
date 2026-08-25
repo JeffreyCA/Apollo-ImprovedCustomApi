@@ -15,6 +15,7 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
+#import "ApolloTabBarHideStyle.h"
 #import "ApolloTagFilters.h"
 #import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
@@ -237,7 +238,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (BOOL)apollo_nativeHideBarsOnScrollEnabled {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNativeHideBarsOnScroll];
+    return ApolloTabBarHideBarsEnabled();
 }
 
 - (void)setPreferredGIFFallbackFormat:(NSInteger)format {
@@ -551,9 +552,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
     [self reloadRowWithID:@"polls.settings"];
-    // This prerequisite lives on Apollo's native General screen, so it can
-    // change while this group screen is off-screen. Refresh the dependent
-    // behavior row every time the user returns.
+    // Refresh the tab-bar presentation and its dependent gesture row after
+    // returning to Interface or after preferences are restored elsewhere.
+    [self reloadRowWithID:@"interface.hideBarsOnScroll"];
     [self reloadRowWithID:@"interface.tabBarScrollBehavior"];
     // Refresh the Profile Layout summary after returning from that screen
     // (Density/Avatar/band switches may have just changed).
@@ -1413,20 +1414,68 @@ typedef NS_ENUM(NSInteger, Tag) {
                                               rows:@[ textPostThumbnails, infoRow, feedScrubber, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
-// Interface group screen (ApolloInterfaceSettingsViewController) — the
-// Liquid Glass chrome behaviors.
-- (ApolloSettingsSection *)buildInterfaceSection {
+// Interface group screen (ApolloInterfaceSettingsViewController) — compact
+// tab-bar controls followed by global display/navigation options.
+- (ApolloSettingsSection *)buildInterfaceTabBarSection {
     __weak typeof(self) weakSelf = self;
 
+    ApolloSettingsRow *profileTabAvatar =
+        [ApolloSettingsRow switchRowWithID:@"interface.profileTabAvatar"
+                                     title:@"Profile Picture Tab Icon"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf profileTabAvatarSwitchToggled:sender]; }];
+
     ApolloSettingsRow *iconOnlyTabBar =
-        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
+        [ApolloSettingsRow switchRowWithID:@"interface.iconOnlyTabBar"
                                      title:@"Icon-Only Tab Bar"
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
 
-    // Idle re-expansion is part of both choices. A single picker makes the
-    // mutually-exclusive gesture models explicit instead of exposing two
-    // switches that could both be enabled at once.
+    // Icon-Only already hides every tab label. Hide the narrower profile-only
+    // option while it is active, then reinsert it with its remembered value.
+    ApolloSettingsRow *hideUsernameTab =
+        [ApolloSettingsRow switchRowWithID:@"interface.hideUsernameTab"
+                                     title:@"Hide Username on Tab Bar"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNativeHideUsernameOnTabBar]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideUsernameTabSwitchToggled:sender]; }];
+    hideUsernameTab.visible = ^BOOL { return !sHideTabBarTitles; };
+
+    ApolloSettingsRow *hideBarsOnScroll;
+    if (ApolloSupportsNativeTabBarScrollBehavior()) {
+        hideBarsOnScroll =
+            [ApolloSettingsRow valueRowWithID:@"interface.hideBarsOnScroll"
+                                        title:@"Hide Bars on Scroll"
+                                       detail:^NSString * { return ApolloTabBarHideStyleCurrentTitle(); }
+                                     onSelect:^{
+                ApolloSettingsPresentPicker(weakSelf,
+                    [weakSelf cellForRowID:@"interface.hideBarsOnScroll"],
+                    @"Hide Bars on Scroll",
+                    ApolloTabBarHideStyleOptionTitles(),
+                    ApolloTabBarHideStyleCurrentOptionIndex(),
+                    ^(NSInteger pickedIndex) {
+                        ApolloTabBarHideStyleApplyOptionIndex(pickedIndex);
+                        [weakSelf reloadRowWithID:@"interface.hideBarsOnScroll"];
+                        [weakSelf reloadRowWithID:@"interface.tabBarScrollBehavior"];
+                    });
+            }];
+        hideBarsOnScroll.configure = ^(UITableViewCell *cell) {
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        };
+    } else {
+        // Before Liquid Glass, retain the original on/off control rather than
+        // offering presentation styles the system cannot display.
+        hideBarsOnScroll =
+            [ApolloSettingsRow switchRowWithID:@"interface.hideBarsOnScroll"
+                                         title:@"Hide Bars on Scroll"
+                                          isOn:^BOOL { return ApolloTabBarHideBarsEnabled(); }
+                                      onToggle:^(UISwitch *sender) {
+                ApolloTabBarHideBarsSetEnabled(sender.isOn);
+                [weakSelf reloadRowWithID:@"interface.tabBarScrollBehavior"];
+            }];
+    }
+
+    // Both behavior choices include idle re-expansion. A single picker keeps
+    // the gesture models mutually exclusive and explicit.
     ApolloSettingsRow *tabBarScrollBehavior =
         [ApolloSettingsRow valueRowWithID:@"interface.tabBarScrollBehavior"
                                     title:@"Scroll Behavior"
@@ -1451,51 +1500,51 @@ typedef NS_ENUM(NSInteger, Tag) {
     };
     tabBarScrollBehavior.visible = ^BOOL { return ApolloSupportsNativeTabBarScrollBehavior(); };
 
-    // "Color Flairs" now rides Appearance → Flair (native injection) —
-    // -flairColorsSwitchToggled: below stays as the shared toggle handler.
+    // Temporary iPad stopgap (#387): only show it where the option can work.
+    ApolloSettingsRow *iPadTabBarBottom =
+        [ApolloSettingsRow switchRowWithID:@"gen.iPadTabBarBottom"
+                                     title:@"Move Tab Bar to Bottom"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf iPadTabBarBottomSwitchToggled:sender]; }];
+    iPadTabBarBottom.visible = ^BOOL {
+        return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad && IsLiquidGlass();
+    };
+
+    NSString *footer = ApolloSupportsNativeTabBarScrollBehavior()
+        ? @"After the tab bar reappears, Two-Gesture hides it on the second downward gesture; Classic hides it on the first. Both re-expand after 30 seconds of inactivity."
+        : @"Hide Bars on Scroll uses the classic on/off behavior on this version of iOS.";
+    return [ApolloSettingsSection sectionWithTitle:@"Tab Bar"
+                                            footer:footer
+                                              rows:@[ profileTabAvatar, iconOnlyTabBar, hideUsernameTab,
+                                                      hideBarsOnScroll, tabBarScrollBehavior,
+                                                      iPadTabBarBottom ]];
+}
+
+- (ApolloSettingsSection *)buildInterfaceDisplayNavigationSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *userAvatars =
+        [ApolloSettingsRow switchRowWithID:@"interface.userAvatars"
+                                     title:@"Show User Profile Pictures"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf userAvatarsSwitchToggled:sender]; }];
+
     ApolloSettingsRow *keepSearchInPlace =
-        [ApolloSettingsRow customRowWithID:@"gen.keepSearchInPlace"
-                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
-            BOOL lgSupported = IsLiquidGlass();
-            UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_KeepSearchInPlace"
-                                                                 label:@"Keep Search Bar Visible"
-                                                                detail:@"Requires Liquid Glass."
-                                                                    on:lgSupported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace]
-                                                               enabled:lgSupported
-                                                                action:@selector(keepSearchBarInPlaceSwitchToggled:)];
-            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        [ApolloSettingsRow switchRowWithID:@"gen.keepSearchInPlace"
+                                     title:@"Keep Search Bar Visible"
+                                      isOn:^BOOL {
+            return IsLiquidGlass() &&
+                   [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];
         }
-                                  onSelect:nil];
+                                  onToggle:^(UISwitch *sender) { [weakSelf keepSearchBarInPlaceSwitchToggled:sender]; }];
+    keepSearchInPlace.enabled = ^BOOL { return IsLiquidGlass(); };
 
     ApolloSettingsRow *titleGapCentering =
-        [ApolloSettingsRow customRowWithID:@"gen.titleGapCentering"
-                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
-            BOOL lgSupported = IsLiquidGlass();
-            UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_TitleGapCentering"
-                                                                 label:@"Balance Title Between Buttons"
-                                                                detail:@"Requires Liquid Glass. Centers the nav bar title between the back button and the top-right buttons; off centers it on the screen instead."
-                                                                    on:lgSupported && sLGTitleGapCentering
-                                                               enabled:lgSupported
-                                                                action:@selector(lgTitleGapCenteringSwitchToggled:)];
-            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        }
-                                  onSelect:nil];
-
-    // Temporary iPad stopgap (#387): dock the floating tab bar at the
-    // bottom instead of the top-center pill that overlaps the search bar.
-    ApolloSettingsRow *iPadTabBarBottom =
-        [ApolloSettingsRow customRowWithID:@"gen.iPadTabBarBottom"
-                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
-            BOOL supported = (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) && IsLiquidGlass();
-            UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_IPadTabBarBottom"
-                                                                 label:@"Move Tab Bar to Bottom"
-                                                                detail:@"iPad only. Docks the tab bar at the bottom instead of the top."
-                                                                    on:supported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom]
-                                                               enabled:supported
-                                                                action:@selector(iPadTabBarBottomSwitchToggled:)];
-            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        }
-                                  onSelect:nil];
+        [ApolloSettingsRow switchRowWithID:@"gen.titleGapCentering"
+                                     title:@"Center Title Between Buttons"
+                                      isOn:^BOOL { return IsLiquidGlass() && sLGTitleGapCentering; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf lgTitleGapCenteringSwitchToggled:sender]; }];
+    titleGapCentering.enabled = ^BOOL { return IsLiquidGlass(); };
 
     // Overrides the top scroll-edge glass under the nav bar (iOS 26+). Liquid
     // Glass only — hidden otherwise rather than shown-disabled, since the row
@@ -1510,9 +1559,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.configure = ^(UITableViewCell *cell) { cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; };
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
-    return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Customize tab-bar labels and Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ iconOnlyTabBar, tabBarScrollBehavior, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
+    return [ApolloSettingsSection sectionWithTitle:@"Display & Navigation"
+                                            footer:@"User Profile Pictures adds avatars beside usernames in posts, comments, messages, inbox rows, and moderator lists. Liquid Glass is required for the remaining options."
+                                              rows:@[ userAvatars, keepSearchInPlace,
+                                                      titleGapCentering, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -1941,18 +1991,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (ApolloSettingsSection *)buildProfilesSection {
     __weak typeof(self) weakSelf = self;
 
-    ApolloSettingsRow *userAvatars =
-        [ApolloSettingsRow switchRowWithID:@"media.userAvatars"
-                                     title:@"Show User Profile Pictures"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf userAvatarsSwitchToggled:sender]; }];
-
-    ApolloSettingsRow *profileTabAvatar =
-        [ApolloSettingsRow switchRowWithID:@"media.profileTabAvatar"
-                                     title:@"Profile Picture Tab Icon"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf profileTabAvatarSwitchToggled:sender]; }];
-
     // Pushes the dedicated Profile Layout screen (Density + Avatar pickers,
     // per-band show switches). Supersedes the old flat "Show Detailed
     // Profiles" switch — sShowDetailedProfiles is now driven entirely from
@@ -1966,26 +2004,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
-    // Mirror of Apollo's native "Hide Username on Tab Bar" switch (relocated
-    // here from General → Other, which now hides it — see
-    // ApolloSettingsNativeInjections.xm). Same key, and the native change
-    // notification is posted so Apollo relabels the profile tab live. While
-    // Icon-Only Tab Bar is on, every tab label is already hidden, so this
-    // narrower option shows off + disabled — the same treatment
-    // ApolloTabBarTitles.xm gives the native row.
-    ApolloSettingsRow *hideUsernameTab =
-        [ApolloSettingsRow switchRowWithID:@"profiles.hideUsernameTab"
-                                     title:@"Hide Username on Tab Bar"
-                                      isOn:^BOOL {
-            return !sHideTabBarTitles &&
-                   [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNativeHideUsernameOnTabBar];
-        }
-                                  onToggle:^(UISwitch *sender) { [weakSelf hideUsernameTabSwitchToggled:sender]; }];
-    hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
-
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Customize profile pictures and profile pages. Hide Username on Tab Bar hides only your profile-tab label; Interface → Icon-Only Tab Bar hides every tab label."
-                                              rows:@[ userAvatars, profileTabAvatar, hideUsernameTab, profileLayout ]];
+                                            footer:@"Customize the layout and details shown on profile pages."
+                                              rows:@[ profileLayout ]];
 }
 
 - (NSString *)profileLayoutSummaryText {
@@ -3660,10 +3681,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 }
 
 - (void)iconOnlyTabBarSwitchToggled:(UISwitch *)sender {
-    // Enabling also clears the native Hide Username key (see
-    // ApolloSetHideTabBarTitlesEnabled). The profile-specific row re-reads
-    // that state whenever its screen appears.
+    // Icon-Only temporarily supersedes the narrower profile-only choice.
+    // Preserve its preference while hiding the redundant row, then restore
+    // both when tab labels return.
     ApolloSetHideTabBarTitlesEnabled(sender.isOn);
+    [self visibilityDidChange];
 }
 
 - (void)hideUsernameTabSwitchToggled:(UISwitch *)sender {
@@ -3929,7 +3951,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 @implementation ApolloInterfaceSettingsViewController
 - (NSString *)apollo_screenTitle { return @"Interface"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
-    return @[ [self buildInterfaceSection] ];
+    return @[ [self buildInterfaceTabBarSection],
+              [self buildInterfaceDisplayNavigationSection] ];
 }
 @end
 

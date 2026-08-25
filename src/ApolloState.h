@@ -99,11 +99,12 @@ extern BOOL sHideTabBarTitles;
 #ifdef __cplusplus
 extern "C" {
 #endif
-// Central setter used by the settings UI. Enabling icon-only mode also clears
-// Apollo's narrower "Hide Username on Tab Bar" preference because every tab
-// title is already hidden, then refreshes both settings surfaces live.
+// Central setter used by the settings UI. Icon-only mode temporarily suspends
+// Apollo's narrower "Hide Username on Tab Bar" preference, then restores the
+// user's prior choice when tab labels return.
 void ApolloSetHideTabBarTitlesEnabled(BOOL enabled);
-// Repairs a persisted both-on state during launch or settings restore.
+// Suspends a persisted native setting while icon-only mode is active. Used at
+// launch/restore and after external native-setting notifications.
 void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void);
 #ifdef __cplusplus
 }

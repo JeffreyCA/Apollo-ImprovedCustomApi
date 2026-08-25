@@ -105,10 +105,15 @@ static NSString *const UDKeyNativeOpenLinksIn = @"OpenLinksIn";
 // Apollo NATIVE key + change notification for its "Hide Username on Tab Bar"
 // switch. Apollo observes the notification (hideUsernameOnTabBarChangedWithNotification:)
 // and re-lays-out the profile tab live, so mirrors must post it after writing
-// the key. Reborn's Profiles settings screen mirrors this row (gather-and-hide);
-// ApolloTabBarTitles.xm clears the key while Icon-Only Tab Bar is active.
+// the key. Reborn's Interface settings screen mirrors this row (gather-and-hide);
+// ApolloTabBarTitles.xm temporarily suspends the key while Icon-Only Tab Bar is
+// active, then restores the user's prior choice when labels return.
 static NSString *const UDKeyNativeHideUsernameOnTabBar = @"HideUsernameOnTabBar";
 static NSString *const ApolloNativeHideUsernameOnTabBarChangedNotification = @"com.christianselig.HideUsernameOnTabBarChanged";
+// Presence matters, so this key is intentionally NOT registered with a default.
+// It is a temporary snapshot taken when Icon-Only is enabled and removed after
+// the native Hide Username preference is restored.
+static NSString *const UDKeyIconOnlySavedHideUsernameOnTabBar = @"IconOnlySavedHideUsernameOnTabBar";
 // Reborn "Open in App" deep-link toggles — open these services' links in their
 // app via Universal Links (see ApolloShareLinks.xm). Default OFF (opt-in). The
 // key string literals are duplicated in ApolloShareLinks.xm; keep them in sync.
@@ -195,13 +200,13 @@ static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdl
 // restores Apollo's bidirectional feel: scrolling down minimizes the tab bar,
 // and reversing toward the top expands it immediately. Default NO.
 static NSString *const UDKeyClassicTabBarScrollBehavior = @"ClassicTabBarScrollBehavior";
-// Apollo's native Settings > General preference, consumed by the Liquid Glass
-// tab-bar compatibility layer as its source of truth.
+// Apollo's native preference, mirrored in Reborn's Interface > Tab Bar screen
+// and consumed by the Liquid Glass compatibility layer as its source of truth.
 static NSString *const UDKeyNativeHideBarsOnScroll = @"HideBarsOnScroll";
 // Liquid Glass "Hide Bars on Scroll" presentation: 0 = collapsed pill on the
 // Left (system default), 1 = collapsed pill on the Right, 2 = fade the full tab
 // bar out, 3 = sink the full tab bar down while fading. The styles plus Off are
-// surfaced on Apollo's native Settings > General row (Off = the native toggle).
+// surfaced on Reborn's Interface > Tab Bar row (Off = the native toggle off).
 // See ApolloTabBarHideStyle.xm and ApolloAutoHideTabBar.xm.
 static NSString *const UDKeyTabBarCollapseSide = @"TabBarCollapseSide";
 // When ON, focusing the main feed / subreddit search keeps the nav bar and the search
