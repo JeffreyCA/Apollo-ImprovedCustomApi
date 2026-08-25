@@ -1560,7 +1560,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:@"Display & Navigation"
-                                            footer:@"User Profile Pictures adds avatars beside usernames in posts, comments, messages, inbox rows, and moderator lists. Liquid Glass is required for the remaining options."
+                                            footer:@"User Profile Pictures adds avatars beside usernames in posts, comments, messages, inbox rows, and moderator lists. Liquid Glass is required for the remaining options.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
                                               rows:@[ userAvatars, keepSearchInPlace,
                                                       titleGapCentering, scrollEdgeEffect ]];
 }
