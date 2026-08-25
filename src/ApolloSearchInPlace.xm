@@ -48,6 +48,8 @@ static id ApolloObjectIvar(id object, const char *name) {
 // Done button / chevrons. Detect it (its toolbar belongs to a CommentsViewController) and give it a solid
 // backing only while it's docked (active); restore it (transparent) at its resting pill.
 
+static const void *kCommentBarMarkerKey = &kCommentBarMarkerKey; // sticky "this is the comments find bar" tag
+
 // The CommentsViewController that owns a comment find-in-page bar (walk the responder chain), else nil.
 static UIViewController *commentsVCForView(UIView *v) {
     UIResponder *r = [v nextResponder];
@@ -63,6 +65,11 @@ static UIViewController *commentsVCForView(UIView *v) {
 }
 
 static BOOL isCommentToolbar(UIView *v) {
+    // Sticky tag first (set at textFieldDidBeginEditing): right after docking, the bar can be
+    // hosted in the keyboard-anchored hierarchy where the responder walk doesn't reach the
+    // comments VC yet — which used to leave the freshly-docked bar bare (grey) until a later
+    // relayout re-homed it. The walk stays as the fallback for a dock without a focus pass.
+    if (objc_getAssociatedObject(v, kCommentBarMarkerKey)) return YES;
     return commentsVCForView(v) != nil;
 }
 
@@ -83,23 +90,36 @@ static const CGFloat kCommentBlurInsetX  = 3.0;   // side margins (small, so the
 static const CGFloat kCommentBlurInsetY  = 4.0;   // top/bottom margins
 static const CGFloat kCommentBlurCorner  = 14.0;  // corner radius
 static const CGFloat kCommentDoneNudgeX  = 14.0;  // Done button → right (off the rounded corner, more centered)
-static const CGFloat kCommentDoneNudgeY  = -6.0;  // Done button ↑ up (Apollo sits it a touch low)
-static const CGFloat kCommentThemeTintAlpha = 0.72; // theme wash over the blur (1 = solid card color)
+static const CGFloat kCommentThemeTintAlpha      = 0.72; // non-glass: near-solid themed surface
+static const CGFloat kCommentThemeTintAlphaGlass = 0.50; // glass: let the foggy material + content ghost through
 static const void *kCommentBlurKey = &kCommentBlurKey;
 static const void *kCommentTintKey = &kCommentTintKey;
 
-// Nudge the docked find bar's "Done" button (Apollo's leftmost button) right + up via a transform (idempotent,
-// doesn't compound across layout passes, and the tap target moves with it).
+// Nudge the docked find bar's "Done" button (Apollo's leftmost button) right, and center its
+// title on the search field's midline — Apollo lays the label a few points low (glass and
+// non-glass alike), and a fixed offset never quite matched both bar layouts. Everything is
+// computed from centers/bounds, which a translation transform does not affect, so the result
+// is idempotent across layout passes; moving via transform keeps the tap target with it.
 static void nudgeCommentDoneButton(UIView *bar) {
     UIButton *done = nil;
+    UIView *field = nil;
     for (UIView *sv in bar.subviews) {
         if ([sv isKindOfClass:[UIButton class]] &&
             (!done || CGRectGetMinX(sv.frame) < CGRectGetMinX(done.frame))) {
             done = (UIButton *)sv;
         }
+        if ([sv isKindOfClass:[UITextField class]]) field = sv;
     }
     if (!done) return;
-    CGAffineTransform t = CGAffineTransformMakeTranslation(kCommentDoneNudgeX, kCommentDoneNudgeY);
+    CGFloat targetCenterY = field ? field.center.y : CGRectGetMidY(bar.bounds);
+    // Center the visible title, not the button box: label center in bar coords, untransformed.
+    CGFloat titleCenterY = done.center.y;
+    CGRect titleFrame = done.titleLabel.frame;
+    if (!CGRectIsEmpty(titleFrame)) {
+        titleCenterY = done.center.y - CGRectGetMidY(done.bounds) + CGRectGetMidY(titleFrame);
+    }
+    CGFloat dy = round(targetCenterY - titleCenterY);
+    CGAffineTransform t = CGAffineTransformMakeTranslation(kCommentDoneNudgeX, dy);
     if (!CGAffineTransformEqualToTransform(done.transform, t)) done.transform = t;
 }
 
@@ -138,7 +158,21 @@ static void ensureCommentBlurBacking(UIView *bar) {
     // the tint zero-sized (and the bar grey) until some later relayout.
     tint.frame = blur.bounds;
     UIColor *card = ApolloThemeCardBackgroundColor() ?: UIColor.secondarySystemBackgroundColor;
-    tint.backgroundColor = [card colorWithAlphaComponent:kCommentThemeTintAlpha];
+    // Glass gets a lighter wash so the frost keeps its foggy translucency behind
+    // Done / the chevrons; non-glass stays closer to a solid themed surface.
+    CGFloat tintAlpha = IsLiquidGlass() ? kCommentThemeTintAlphaGlass : kCommentThemeTintAlpha;
+    tint.backgroundColor = [card colorWithAlphaComponent:tintAlpha];
+    // The docked bar is a real UIKit bar: its _UIBarBackground (full-width, extends
+    // below the bar toward the keyboard) stacks ABOVE our backing and paints the
+    // system grey slab regardless of theme — the "always grey" of #946. The Liquid
+    // Glass chrome leaves it transparent, which is why only non-glass stayed grey.
+    // Hide it while docked (our themed panel IS the background; the keyboard-anchored
+    // container behind is page-colored by Apollo, so the under-bar gap stays themed).
+    for (UIView *sv in bar.subviews) {
+        if (strcmp(object_getClassName(sv), "_UIBarBackground") == 0 && !sv.hidden) {
+            sv.hidden = YES;
+        }
+    }
 
     if (bar.backgroundColor != nil) bar.backgroundColor = nil; // let the blur show through
     bar.opaque = NO;
@@ -148,6 +182,11 @@ static void removeCommentBlurBacking(UIView *bar) {
     UIVisualEffectView *blur = objc_getAssociatedObject(bar, kCommentBlurKey);
     if (blur.superview) [blur removeFromSuperview];
     if (bar.backgroundColor != nil) bar.backgroundColor = nil;
+    for (UIView *sv in bar.subviews) {   // resting pill: give the system backdrop back
+        if (strcmp(object_getClassName(sv), "_UIBarBackground") == 0 && sv.hidden) {
+            sv.hidden = NO;
+        }
+    }
 }
 
 // MARK: - Nav-bar hide
@@ -499,8 +538,19 @@ static void recenterCancelButton(void) {
 - (void)textFieldDidBeginEditing:(id)textField {
     %orig;
 
-    // searchBarShouldStickToKeyboard == YES is the comments in-thread search (different layout); skip it.
-    if (MSHookIvar<BOOL>(self, "searchBarShouldStickToKeyboard")) return;
+    // searchBarShouldStickToKeyboard == YES is the comments in-thread search (different layout):
+    // tag its toolbar so the docked-bar styling recognizes it even while it's hosted in the
+    // keyboard-anchored hierarchy (where the responder walk can't reach the comments VC yet),
+    // then skip the feed-search handling below.
+    if (MSHookIvar<BOOL>(self, "searchBarShouldStickToKeyboard")) {
+        UIView *bar = [textField isKindOfClass:[UIView class]] ? [(UIView *)textField superview] : nil;
+        while (bar && !strstr(object_getClassName(bar), "SearchToolbar")) bar = bar.superview;
+        if (bar && !objc_getAssociatedObject(bar, kCommentBarMarkerKey)) {
+            objc_setAssociatedObject(bar, kCommentBarMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [bar setNeedsLayout];   // apply the backing on this docking, not the next relayout
+        }
+        return;
+    }
 
     // Offset stabilizer (runs regardless of Liquid Glass): arm the active flags and capture the feed
     // table + docked toolbar (the rest anchor) + field so the ASTableView inset/offset hooks engage.
