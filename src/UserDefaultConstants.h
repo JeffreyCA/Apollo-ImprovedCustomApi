@@ -562,7 +562,7 @@ static NSString *const UDKeyDevvitInteractivePosts = @"DevvitInteractivePosts";
 // only consulted while DevvitInteractivePosts is on.
 static NSString *const UDKeyDevvitFeedWidgets = @"DevvitFeedWidgets";
 
-// Floating Post Tabs: chat-heads-style bubbles (max 3) that keep posts open
+// Floating Post Tabs: chat-heads-style bubbles (max 5) that keep posts open
 // for instant return, created from the comments "..." menu. Default OFF
 // (opt-in). See ApolloFloatingTabs.xm.
 static NSString *const UDKeyFloatingPostTabs = @"FloatingPostTabs";

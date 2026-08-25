@@ -33,7 +33,7 @@ extern BOOL sDevvitInteractivePosts;
 // Sub-toggle: Devvit widgets in large-mode feed cards too (vs comments only).
 // Default on, but only consulted while the master toggle is on.
 extern BOOL sDevvitFeedWidgets;
-// Opt-in (default OFF) chat-heads-style floating post tabs (up to 3 bubbles
+// Opt-in (default OFF) chat-heads-style floating post tabs (up to 5 bubbles
 // that keep posts open). See ApolloFloatingTabs.xm.
 extern BOOL sFloatingPostTabs;
 // Sub-toggle: bubbles released near each other magnetize into a pile (drag

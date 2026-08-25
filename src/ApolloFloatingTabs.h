@@ -1,5 +1,5 @@
 // ApolloFloatingTabs — cross-module entry points for the Floating Post Tabs
-// feature (chat-heads-style bubbles that keep up to 3 posts open; see
+// feature (chat-heads-style bubbles that keep up to 5 posts open; see
 // ApolloFloatingTabs.xm for the full feature doc).
 //
 // Both functions are safe to call any time on the main thread, including when

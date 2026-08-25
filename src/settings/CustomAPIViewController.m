@@ -1445,7 +1445,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     preview.visible = ^BOOL { return sFloatingPostTabs; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Floating Tabs"
-                                            footer:@"Keep up to 3 posts open as floating bubbles, chat-heads style. In a post, open the top-right ••• menu and choose Keep in Floating Tab. Drag a bubble anywhere (it snaps to the screen edges), flick it past the edge to tuck it into a slim handle, and tap it to jump back to the post exactly where you left off. To close one, drag it onto the ✕ that appears while dragging. Hold to Preview shows a card of the post while you keep your finger down — release to open it, or slide away first to cancel. Magnetic Stacking snaps bubbles into a pile when you drop one on another — drag the pile to move it together, tap it to fan the bubbles back out."
+                                            footer:@"Keep up to 5 posts open as floating bubbles, chat-heads style. In a post, open the top-right ••• menu and choose Keep in Floating Tab. Drag a bubble anywhere (it snaps to the screen edges), flick it past the edge to tuck it into a slim handle, and tap it to jump back to the post exactly where you left off. To close one, drag it onto the ✕ that appears while dragging. Hold to Preview shows a card of the post while you keep your finger down — release to open it, or slide away first to cancel. Magnetic Stacking snaps bubbles into a pile when you drop one on another — drag the pile to move it together, tap it to fan the bubbles back out."
                                               rows:@[ floatingTabs, magnet, preview ]];
 }
 

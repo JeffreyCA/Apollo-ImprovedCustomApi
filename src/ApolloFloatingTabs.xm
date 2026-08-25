@@ -1,4 +1,4 @@
-// Floating Post Tabs — chat-heads-style bubbles that keep up to 3 posts open.
+// Floating Post Tabs — chat-heads-style bubbles that keep up to 5 posts open.
 //
 // From the comments screen's "..." menu, "Keep in Floating Tab" turns the
 // current post into a small draggable bubble (the subreddit's icon) floating
@@ -80,7 +80,7 @@ static const CGFloat kFTCloseTargetSize = 56.0;     // ✕ drop target diameter
 static const CGFloat kFTCloseHitRadius = 64.0;      // drop-to-close capture distance from the target center
 static const CGFloat kFTFlingVelocityThreshold = 250.0;  // below this a release stays put (same as PiP)
 static const CGFloat kFTTuckVelocityThreshold = 300.0;   // outward fling speed that tucks (same as PiP)
-static const NSInteger kFTMaxTabs = 3;
+static const NSInteger kFTMaxTabs = 5;
 // Hold-to-preview (peek-and-pop): finger travel from the press point beyond
 // this radius flips the pending action from "release opens" to "cancelled"
 // (sliding back inside re-arms it). Roomy enough that the natural hold jitter
@@ -483,15 +483,17 @@ static ApolloFloatingTabsController *sFTController = nil;
 }
 
 // First free default docking slot on the right edge (new bubbles stagger down
-// instead of stacking invisibly on top of each other).
+// instead of stacking invisibly on top of each other). One slot per possible
+// tab, 0.14 of the screen apart starting at 0.30 — the fifth lands at 0.86,
+// still above the dock clamp's bottom margin.
 - (CGFloat)nextFreeYFrac {
-    const CGFloat slots[] = {0.30, 0.44, 0.58};
-    for (int i = 0; i < 3; i++) {
+    for (NSInteger i = 0; i < kFTMaxTabs; i++) {
+        CGFloat slot = 0.30 + 0.14 * (CGFloat)i;
         BOOL taken = NO;
         for (ApolloFloatingTab *tab in self.tabs) {
-            if (tab.side > 0 && fabs(tab.yFrac - slots[i]) < 0.08) { taken = YES; break; }
+            if (tab.side > 0 && fabs(tab.yFrac - slot) < 0.08) { taken = YES; break; }
         }
-        if (!taken) return slots[i];
+        if (!taken) return slot;
     }
     return 0.30 + 0.14 * (CGFloat)self.tabs.count;
 }
@@ -1686,7 +1688,9 @@ static void ApolloFTPresentTabsFullAlert(id vc) {
         if (![host isKindOfClass:[UIViewController class]] || !host.viewLoaded || !host.view.window) return;
         UIAlertController *alert = [UIAlertController
             alertControllerWithTitle:@"Floating Tabs Full"
-                             message:@"You can keep up to 3 posts in floating tabs. Close one first — drag a bubble onto the ✕ that appears while dragging."
+                             message:[NSString stringWithFormat:
+                                      @"You can keep up to %d posts in floating tabs. Close one first — drag a bubble onto the ✕ that appears while dragging.",
+                                      (int)kFTMaxTabs]
                       preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *presenter = host.presentedViewController ?: host;
