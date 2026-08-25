@@ -2368,18 +2368,12 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                      title:@"Hide Feed Descriptions"
                                       isOn:^BOOL { return sHideSubredditListDescriptions; }
                                   onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
-    hideDescriptions.enabled = ^BOOL {
-        NSArray<NSNumber *> *visibleIndexes = ApolloFeedShortcutVisibleIndexes();
-        ApolloSubredditFeedLayout layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
-                                                                              visibleIndexes,
-                                                                              (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
-                                                                              CGRectGetWidth(weakSelf.tableView.bounds),
-                                                                              weakSelf.traitCollection);
-        return layout == ApolloSubredditFeedLayoutRows;
+    hideDescriptions.visible = ^BOOL {
+        return sSubredditFeedLayout == ApolloSubredditFeedLayoutRows;
     };
 
     return [ApolloSettingsSection sectionWithTitle:@"Appearance"
-                                            footer:@"Hide Feed Descriptions applies only to Rows."
+                                            footer:nil
                                               rows:@[ feedIconStyle, feedLayout, hideDescriptions ]];
 }
 
@@ -2421,7 +2415,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sSubredditFeedLayout = layout;
     [[NSUserDefaults standardUserDefaults] setInteger:layout forKey:UDKeySubredditFeedLayout];
     [self reloadRowWithID:@"sub.feedLayout"];
-    [self reloadRowWithID:@"sub.hideFeedDescriptions"];
+    [self visibilityDidChange];
     [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
 }
