@@ -4,6 +4,9 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <malloc/malloc.h>
+#import <mach-o/dyld.h>
+#import <mach-o/getsect.h>
+#import <os/lock.h>
 #import <stdatomic.h>
 
 #import "ApolloCommon.h"
@@ -1454,24 +1457,63 @@ static BOOL ApolloProfileUsernameIsLoggedInAccount(NSString *username) {
     return NO;
 }
 
-// One-shot registered-class set for validating candidate isa pointers by
-// identity only (no dereference). Classes never unregister, so a single
-// snapshot is safe; classes registered later (KVO subclasses etc.) miss and
-// the probe returns nil for them — a skipped read, never a crash.
+// Registered-class set for validating candidate isa pointers by identity only
+// (no dereference), built by reading each loaded image's `__objc_classlist`
+// directly.
+//
+// It used to be built with objc_copyClassList(), which is the one thing this
+// must never do: objc_copyClassList/objc_getClassList call realizeAllClasses(),
+// realizing EVERY class in the process, and realizing a Swift class runs its
+// type-metadata accessor. Apollo weak-links frameworks that do not exist on
+// older systems, so on iOS 14.5.1 one of those accessors is bound to 0 and
+// realization jumps straight to a NULL PC — issue #961, EXC_BAD_ACCESS at 0x0
+// on the first large post cell of the session, reached through
+// ApolloWordLooksLikeObjCObject below. Stock Apollo never realizes those
+// classes, so nothing else in the process trips the weak link.
+//
+// Reading the section data touches no class: `__objc_classlist` already holds
+// the class pointers, so this stays an identity-only test. dyld replays the
+// callback for every image already loaded and calls it again for each new one,
+// so the set also stops going stale the way the old one-shot snapshot did.
+// Runtime-registered classes (KVO subclasses, objc_allocateClassPair) appear in
+// no image and still miss, which returns nil for them — a skipped read, never a
+// crash, exactly as before.
+static os_unfair_lock sKnownClassesLock = OS_UNFAIR_LOCK_INIT;
+static CFMutableSetRef sKnownClasses;   // guarded by sKnownClassesLock
+
+static void ApolloRegisterImageClasses(const struct mach_header *header, intptr_t slide) {
+    (void)slide;
+    if (!header) return;
+    const struct mach_header_64 *header64 = (const struct mach_header_64 *)header;
+    // Modern images put the class list in __DATA_CONST; older ones in __DATA.
+    static const char *const kSegments[] = { "__DATA_CONST", "__DATA" };
+    for (size_t i = 0; i < sizeof(kSegments) / sizeof(kSegments[0]); i++) {
+        unsigned long size = 0;
+        const uint8_t *section = getsectiondata(header64, kSegments[i], "__objc_classlist", &size);
+        if (!section || size < sizeof(void *)) continue;
+        const void *const *classes = (const void *const *)section;
+        os_unfair_lock_lock(&sKnownClassesLock);
+        if (!sKnownClasses) sKnownClasses = CFSetCreateMutable(NULL, 0, NULL);
+        for (unsigned long j = 0; j < size / sizeof(void *); j++) {
+            if (classes[j]) CFSetAddValue(sKnownClasses, classes[j]);
+        }
+        os_unfair_lock_unlock(&sKnownClassesLock);
+    }
+}
+
 static BOOL ApolloRuntimeKnowsClass(Class candidate) {
-    static CFSetRef sKnownClasses;
+    if (!candidate) return NO;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        unsigned int count = 0;
-        Class *list = objc_copyClassList(&count);
-        CFMutableSetRef set = CFSetCreateMutable(NULL, count, NULL);
-        for (unsigned int i = 0; i < count; i++) {
-            CFSetAddValue(set, (__bridge const void *)list[i]);
-        }
-        free(list);
-        sKnownClasses = set;
+        // Replays every image loaded so far, then fires for each new one.
+        _dyld_register_func_for_add_image(ApolloRegisterImageClasses);
     });
-    return CFSetContainsValue(sKnownClasses, (__bridge const void *)candidate);
+    os_unfair_lock_lock(&sKnownClassesLock);
+    BOOL known = sKnownClasses
+        ? CFSetContainsValue(sKnownClasses, (__bridge const void *)candidate)
+        : NO;
+    os_unfair_lock_unlock(&sKnownClassesLock);
+    return known;
 }
 
 // Swift-class ivars carry no ObjC type encoding, so an ivar slot named e.g.
