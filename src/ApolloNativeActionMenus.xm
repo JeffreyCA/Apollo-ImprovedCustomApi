@@ -286,7 +286,11 @@ static void ApolloNativeActionMenuStyleElement(UIMenuElement *element, BOOL mode
 static UIImage *ApolloNativeActionMenuSizedIcon(UIImage *image) {
     if (!image) return nil;
 
-    static const CGFloat maxIconSide = 18.0;
+    // Apollo's option-* assets are ~24pt on the long edge and its legacy sheet
+    // shows them at natural size; fitting them into this same box keeps the
+    // glass menu at the stock icon weight (18pt read visibly lighter — #985
+    // review).
+    static const CGFloat maxIconSide = ApolloActionMenuIconBoxSide;
     CGSize imageSize = image.size;
     if (imageSize.width <= 0.0 || imageSize.height <= 0.0) {
         return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];

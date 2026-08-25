@@ -283,16 +283,21 @@ static BOOL ApolloDCMenuResolveState(id actionController, id *outVC,
 
 // Contributed vector icons (issue #962) drawn to sit with Apollo's own
 // `option-*` comment icons rather than the SF Symbol eye/eye.slash pair they
-// replace. 18pt is the box Apollo's native rows are fitted into
-// (ApolloNativeActionMenuSizedIcon), so ours carries the same weight next to
-// them in the Liquid Glass menu; the legacy sheet aspect-fits it into the
-// donor cell's icon frame. Falls back to the original SF Symbols when the
-// tweak's resources aren't staged in this install layout.
+// replace. The PDFs were drawn at the option-* assets' own ~24pt weight, and
+// ApolloActionMenuIconBoxSide is that same box (ApolloNativeActionMenuSizedIcon
+// fits Apollo's rows into it), so rendering to it shows the art at the size it
+// was drawn for next to same-weight neighbours in the Liquid Glass menu; the
+// legacy sheet aspect-fits it into the donor cell's icon frame either way.
+// Falls back to the original SF Symbols (through the same box, so the weight
+// still matches) when the tweak's resources aren't staged in this install
+// layout.
 static UIImage *ApolloDCMenuIcon(BOOL effective) {
     NSString *name = effective ? @"option-hide-deleted-comments" : @"option-show-deleted-comments";
-    UIImage *icon = ApolloBundledPDFTemplateImage(name, CGSizeMake(18.0, 18.0));
+    CGSize box = CGSizeMake(ApolloActionMenuIconBoxSide, ApolloActionMenuIconBoxSide);
+    UIImage *icon = ApolloBundledPDFTemplateImage(name, box);
     if (icon) return icon;
-    return [UIImage systemImageNamed:(effective ? @"eye.slash" : @"eye")];
+    NSString *symbolName = effective ? @"eye.slash" : @"eye";
+    return ApolloActionMenuSymbolIcon(symbolName) ?: [UIImage systemImageNamed:symbolName];
 }
 
 #pragma mark - Registration
