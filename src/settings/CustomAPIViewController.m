@@ -1993,20 +1993,19 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 - (NSString *)profileLayoutSummaryText {
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
-    [parts addObject:sProfileHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"];
+    [parts addObject:sProfileHeaderImmersive ? @"Immersive" : @"Compact"];
     switch (sProfileAvatarStyle) {
-        case 1:  [parts addObject:@"Circle Avatar"]; break;
-        case 2:  [parts addObject:@"Square Avatar"]; break;
-        default: break; // Full is the default, not worth calling out
+        case 1:  [parts addObject:@"Circle"]; break;
+        case 2:  [parts addObject:@"Square"]; break;
+        default: [parts addObject:@"Full"]; break;
     }
-    NSMutableArray<NSString *> *hidden = [NSMutableArray array];
-    if (!sProfileShowBanner) [hidden addObject:@"Banner"];
-    if (!sProfileShowStatCards) [hidden addObject:@"Stat Cards"];
-    if (!sProfileShowSocialLinks) [hidden addObject:@"Social Links"];
-    if (!sBadgeBookEnabled) [hidden addObject:@"Badge Book"];
-    if (!sProfileShowActions) [hidden addObject:@"Follow & Message"];
-    if (hidden.count > 0) {
-        [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
+    NSInteger hiddenCount = (!sProfileShowBanner ? 1 : 0)
+        + (!sProfileShowStatCards ? 1 : 0)
+        + (!sProfileShowSocialLinks ? 1 : 0)
+        + (!sBadgeBookEnabled ? 1 : 0)
+        + (!sProfileShowActions ? 1 : 0);
+    if (hiddenCount > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%ld hidden", (long)hiddenCount]];
     }
     return [parts componentsJoinedByString:@" · "];
 }
