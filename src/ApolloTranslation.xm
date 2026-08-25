@@ -150,6 +150,12 @@ static const void *kApolloReconcileGenerationKey = &kApolloReconcileGenerationKe
 static NSString *const kApolloDefaultLibreTranslateURL = @"https://libretranslate.com/translate";
 static NSString *const kApolloDeadLibreTranslateURL = @"https://libretranslate.de/translate";
 
+// userInfo marker meaning "this failure was a quota/rate-limit rejection, not
+// a bug or an outage". Set by any provider leg that gets throttled; read by the
+// failure notification so the user is told the actual cause and what to do
+// about it, instead of a generic "translation failed" (issue #995).
+static NSString *const kApolloTranslationQuotaErrorKey = @"ApolloTranslationQuotaError";
+
 // Single chokepoint mapping the stored LibreTranslate URL setting to a usable
 // endpoint — %ctor, backup-restore, and the settings screen all route through
 // this so the dead .de default migrates everywhere at once.
@@ -3061,8 +3067,16 @@ static void ApolloGoogleTranslateFetch(NSURL *url,
             NSInteger status = [httpResponse isKindOfClass:[NSHTTPURLResponse class]] ? httpResponse.statusCode : 0;
             NSString *snippet = data.length > 0 ? [[NSString alloc] initWithData:[data subdataWithRange:NSMakeRange(0, MIN(data.length, (NSUInteger)200))] encoding:NSUTF8StringEncoding] : nil;
             ApolloLog(@"[Translation] Google(%@) HTTP %ld body=%@", endpointLabel, (long)status, snippet ?: @"(none)");
-            NSString *message = [NSString stringWithFormat:@"Google Translate request failed (HTTP %ld)", (long)status];
-            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:101 userInfo:@{NSLocalizedDescriptionKey: message}];
+            // 429 is Google throttling this device's IP on the free endpoint —
+            // the exact cause behind #995. Tag it so the failure notification can
+            // say so plainly rather than blaming translation generally.
+            BOOL quota = (status == 429);
+            NSString *message = quota
+                ? @"Google's free translation limit was reached for your connection"
+                : [NSString stringWithFormat:@"Google Translate request failed (HTTP %ld)", (long)status];
+            NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:message forKey:NSLocalizedDescriptionKey];
+            if (quota) info[kApolloTranslationQuotaErrorKey] = @YES;
+            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:101 userInfo:info];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, statusError); });
             return;
         }
@@ -3120,6 +3134,134 @@ static void ApolloTranslateViaGoogle(NSString *text,
     });
 }
 
+// Microsoft (Azure AI Translator), bring-your-own-key like LibreTranslate.
+// Unlike the free Google endpoints this is an official, documented, versioned
+// API: the F0 tier grants 2M characters/month, so ordinary use never hits the
+// throttling that broke the free Google path (issue #995). Omitting `from`
+// asks Azure to auto-detect, matching every other provider's contract.
+static void ApolloTranslateViaMicrosoft(NSString *text,
+                                        NSString *targetLanguage,
+                                        void (^completion)(NSString *translated, NSError *error)) {
+    if (sMicrosoftTranslateAPIKey.length == 0) {
+        NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:300
+                                         userInfo:@{NSLocalizedDescriptionKey: @"Microsoft Translator needs an API key — add one in Translation settings"}];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+        return;
+    }
+
+    NSURLComponents *components = [[NSURLComponents alloc] init];
+    components.scheme = @"https";
+    components.host = @"api.cognitive.microsofttranslator.com";
+    components.path = @"/translate";
+    components.queryItems = @[
+        [NSURLQueryItem queryItemWithName:@"api-version" value:@"3.0"],
+        [NSURLQueryItem queryItemWithName:@"to" value:targetLanguage],
+    ];
+    NSURL *url = components.URL;
+    if (!url) {
+        NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:301
+                                         userInfo:@{NSLocalizedDescriptionKey: @"Failed to build Microsoft Translator URL"}];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+        return;
+    }
+
+    // Body is an array of {"Text": …} objects — the API is natively batched, so
+    // this is the natural shape even though we currently send one string.
+    NSError *jsonError = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:@[@{@"Text": text}] options:0 error:&jsonError];
+    if (!body) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, jsonError); });
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:12.0];
+    request.HTTPMethod = @"POST";
+    [request setValue:@"application/json; charset=UTF-8" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:sMicrosoftTranslateAPIKey forHTTPHeaderField:@"Ocp-Apim-Subscription-Key"];
+    // Regional resources reject the request without their region; "global" ones
+    // don't need it, so only send it when the user supplied one.
+    if (sMicrosoftTranslateRegion.length > 0) {
+        [request setValue:sMicrosoftTranslateRegion forHTTPHeaderField:@"Ocp-Apim-Subscription-Region"];
+    }
+    request.HTTPBody = body;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+            return;
+        }
+
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        NSInteger status = [httpResponse isKindOfClass:[NSHTTPURLResponse class]] ? httpResponse.statusCode : 0;
+        if (status < 200 || status >= 300) {
+            // Azure returns {"error":{"code":…,"message":…}} with genuinely
+            // useful text; map the documented statuses to plain-language causes
+            // so a mistyped key doesn't read like an outage.
+            NSString *azureMessage = nil;
+            if (data.length > 0) {
+                id errorBody = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+                id errorNode = [errorBody isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)errorBody)[@"error"] : nil;
+                if ([errorNode isKindOfClass:[NSDictionary class]] &&
+                    [((NSDictionary *)errorNode)[@"message"] isKindOfClass:[NSString class]]) {
+                    azureMessage = ((NSDictionary *)errorNode)[@"message"];
+                }
+            }
+            ApolloLog(@"[Translation] Microsoft HTTP %ld: %@", (long)status, azureMessage ?: @"(no message)");
+            NSString *cause = nil;
+            BOOL quota = NO;
+            if (status == 401) {
+                cause = @"Microsoft Translator rejected your API key — check it in Translation settings";
+            } else if (status == 403) {
+                cause = @"Microsoft Translator quota exhausted — the free tier resets at the start of each month";
+                quota = YES;
+            } else if (status == 429) {
+                cause = @"Microsoft Translator is rate limiting — too many requests at once";
+                quota = YES;
+            } else {
+                cause = azureMessage.length > 0
+                    ? [NSString stringWithFormat:@"Microsoft Translator: %@", azureMessage]
+                    : [NSString stringWithFormat:@"Microsoft Translator request failed (HTTP %ld)", (long)status];
+            }
+            NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:cause forKey:NSLocalizedDescriptionKey];
+            if (quota) info[kApolloTranslationQuotaErrorKey] = @YES;
+            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:302 userInfo:info];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, statusError); });
+            return;
+        }
+
+        NSError *parseError = nil;
+        id jsonObject = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
+        if (parseError) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, parseError); });
+            return;
+        }
+
+        // [{"detectedLanguage":{…},"translations":[{"text":"…","to":"en"}]}]
+        NSString *translated = nil;
+        id first = [jsonObject isKindOfClass:[NSArray class]] ? [(NSArray *)jsonObject firstObject] : nil;
+        if ([first isKindOfClass:[NSDictionary class]]) {
+            id translations = ((NSDictionary *)first)[@"translations"];
+            id firstTranslation = [translations isKindOfClass:[NSArray class]] ? [(NSArray *)translations firstObject] : nil;
+            if ([firstTranslation isKindOfClass:[NSDictionary class]]) {
+                id candidate = ((NSDictionary *)firstTranslation)[@"text"];
+                if ([candidate isKindOfClass:[NSString class]]) translated = candidate;
+            }
+        }
+
+        if (translated.length == 0) {
+            NSError *shapeError = [NSError errorWithDomain:@"ApolloTranslation" code:303
+                                                  userInfo:@{NSLocalizedDescriptionKey: @"Microsoft Translator response parse error"}];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, shapeError); });
+            return;
+        }
+
+        NSString *result = translated;
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(result, nil); });
+    }];
+
+    [task resume];
+}
+
 static void ApolloTranslateViaLibre(NSString *text,
                                     NSString *targetLanguage,
                                     void (^completion)(NSString *translated, NSError *error)) {
@@ -3127,6 +3269,19 @@ static void ApolloTranslateViaLibre(NSString *text,
     // default URL can never sneak back in via a later settings write.
     NSString *urlString = ApolloNormalizedLibreTranslateURLSetting(sLibreTranslateURL);
     NSURL *url = [NSURL URLWithString:urlString];
+
+    // Every surviving PUBLIC instance requires a key, so a keyless request to one
+    // is a guaranteed 400. Fail immediately with the actionable reason instead of
+    // burning a round-trip (issue #995). Self-hosted instances need no key, so
+    // only short-circuit for the known public hosts.
+    NSString *host = [url.host lowercaseString] ?: @"";
+    BOOL publicInstance = [host hasSuffix:@"libretranslate.com"] || [host hasSuffix:@"libretranslate.de"];
+    if (publicInstance && sLibreTranslateAPIKey.length == 0) {
+        NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:204
+                                         userInfo:@{NSLocalizedDescriptionKey: @"LibreTranslate needs an API key — add one in Translation settings, or use your own self-hosted server"}];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+        return;
+    }
     if (!url) {
         NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:200 userInfo:@{NSLocalizedDescriptionKey: @"Invalid LibreTranslate URL"}];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
@@ -3875,10 +4030,11 @@ static void ApolloTranslateTextWithFallback(NSString *text,
         return;
     }
 
-    // Provider can be: "google" or "libre". Anything unrecognized defaults to Google.
-    // Primary = user's choice; fallback = the other one.
+    // Network providers: "google", "libre", "microsoft". Anything unrecognized
+    // defaults to Google. Primary = user's choice.
     NSString *primaryProvider = sTranslationProvider;
     if (![primaryProvider isEqualToString:@"libre"] &&
+        ![primaryProvider isEqualToString:@"microsoft"] &&
         ![primaryProvider isEqualToString:@"google"]) {
         primaryProvider = @"google";
     }
@@ -3888,6 +4044,8 @@ static void ApolloTranslateTextWithFallback(NSString *text,
         void (^one)(NSString *, NSString *, void (^)(NSString *, NSError *)) = ^(NSString *chunk, NSString *target, void (^cb)(NSString *, NSError *)) {
             if ([provider isEqualToString:@"libre"]) {
                 ApolloTranslateViaLibre(chunk, target, cb);
+            } else if ([provider isEqualToString:@"microsoft"]) {
+                ApolloTranslateViaMicrosoft(chunk, target, cb);
             } else {
                 ApolloTranslateViaGoogle(chunk, target, cb);
             }
@@ -3905,7 +4063,23 @@ static void ApolloTranslateTextWithFallback(NSString *text,
             completion(translated, nil);
             return;
         }
-        NSString *other = [primaryProvider isEqualToString:@"google"] ? @"libre" : @"google";
+        // Pick the fallback that can actually succeed. A configured Microsoft
+        // key is the most reliable option (official API, 2M chars/month), so it
+        // wins when the user has one; otherwise the free legs cover each other.
+        // LibreTranslate without a key can't work at all on today's public
+        // instances, so never fall back into it blind.
+        NSString *other = nil;
+        if (![primaryProvider isEqualToString:@"microsoft"] && sMicrosoftTranslateAPIKey.length > 0) {
+            other = @"microsoft";
+        } else if (![primaryProvider isEqualToString:@"google"]) {
+            other = @"google";
+        } else if (sLibreTranslateAPIKey.length > 0) {
+            other = @"libre";
+        }
+        if (!other) {
+            completion(nil, primaryError);
+            return;
+        }
         runProvider(other, ^(NSString *fallbackTranslated, NSError *fallbackError) {
             if ([fallbackTranslated isKindOfClass:[NSString class]] && fallbackTranslated.length > 0) {
                 completion(fallbackTranslated, nil);
@@ -3920,6 +4094,12 @@ static void ApolloTranslateTextWithFallback(NSString *text,
             NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:message forKey:NSLocalizedDescriptionKey];
             NSError *underlying = fallbackError ?: primaryError;
             if (underlying) info[NSUnderlyingErrorKey] = underlying;
+            // Quota is the headline cause whenever EITHER leg was throttled —
+            // that's the case the user most needs explained (issue #995).
+            if ([primaryError.userInfo[kApolloTranslationQuotaErrorKey] boolValue] ||
+                [fallbackError.userInfo[kApolloTranslationQuotaErrorKey] boolValue]) {
+                info[kApolloTranslationQuotaErrorKey] = @YES;
+            }
             completion(nil, [NSError errorWithDomain:@"ApolloTranslation" code:110 userInfo:info]);
         });
     });
@@ -3962,6 +4142,22 @@ static void ApolloNoteTranslationFailureForToast(NSError *error) {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (now - sLastTranslationFailureToastTime < kApolloTranslationFailureToastMinInterval) return;
     sLastTranslationFailureToastTime = now;
+
+    // A quota/rate-limit rejection isn't a malfunction and shouldn't read like
+    // one — name the cause and point at the fix. Everything else keeps the
+    // generic title with the provider's own reason as detail.
+    if ([error.userInfo[kApolloTranslationQuotaErrorKey] boolValue]) {
+        // The toast's detail line is single-line, middle-truncating (ApolloToast),
+        // so this must stay short — the title carries "what happened" and the
+        // detail carries only "what to do next".
+        BOOL canSuggestApple = IsAppleTranslationSupported() && ![sTranslationProvider isEqualToString:@"apple"];
+        NSString *detail = canSuggestApple
+            ? @"Try Apple (On-Device) in Translation settings"
+            : @"Add a Microsoft API key in Translation settings";
+        ApolloShowToastWithStyle(@"Translation Limit Reached", detail, ApolloToastStyleError, @"exclamationmark.triangle");
+        return;
+    }
+
     ApolloShowToastWithStyle(@"Translation Failed",
                              error.localizedDescription ?: @"The translation provider could not be reached",
                              ApolloToastStyleError, nil);
@@ -3996,6 +4192,14 @@ void ApolloTranslationDebugProbe(NSString *spec) {
         ApolloGoogleTranslateFetch(fallbackURL, @"clients5", report);
     } else if ([leg isEqualToString:@"libre"]) {
         ApolloTranslateViaLibre(text, target, report);
+    } else if ([leg isEqualToString:@"microsoft"]) {
+        ApolloTranslateViaMicrosoft(text, target, report);
+    } else if ([leg isEqualToString:@"quotatoast"]) {
+        // Drives the quota-specific notification path (issue #995).
+        ApolloNoteTranslationFailureForToast([NSError errorWithDomain:@"ApolloTranslation" code:110
+                                                             userInfo:@{NSLocalizedDescriptionKey: text,
+                                                                        kApolloTranslationQuotaErrorKey: @YES}]);
+        ApolloLog(@"[Translation][Probe] quotatoast consecutive=%lu", (unsigned long)sConsecutiveTranslationFailures);
     } else if ([leg isEqualToString:@"failtoast"]) {
         ApolloNoteTranslationFailureForToast([NSError errorWithDomain:@"ApolloTranslation" code:110
                                                              userInfo:@{NSLocalizedDescriptionKey: text}]);

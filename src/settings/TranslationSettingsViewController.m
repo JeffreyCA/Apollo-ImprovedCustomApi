@@ -15,6 +15,8 @@
 typedef NS_ENUM(NSInteger, TranslationTextFieldTag) {
     TranslationTextFieldTagLibreURL = 0,
     TranslationTextFieldTagLibreAPIKey,
+    TranslationTextFieldTagMicrosoftAPIKey,
+    TranslationTextFieldTagMicrosoftRegion,
 };
 
 // The old libretranslate.de public instance shut down in 2026 (issue #995);
@@ -237,12 +239,40 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
         }
                                   onSelect:nil];
 
+    ApolloSettingsRow *microsoftAPIKey =
+        [ApolloSettingsRow customRowWithID:@"microsoftAPIKey"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            UITableViewCell *cell = [weakSelf textFieldCellWithIdentifier:@"Cell_Translation_MicrosoftAPIKey"
+                                                                    label:@"API Key"
+                                                              placeholder:@"Required"
+                                                                     text:sMicrosoftTranslateAPIKey ?: @""
+                                                                      tag:TranslationTextFieldTagMicrosoftAPIKey
+                                                              secureEntry:YES];
+            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:nil];
+
+    ApolloSettingsRow *microsoftRegion =
+        [ApolloSettingsRow customRowWithID:@"microsoftRegion"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            UITableViewCell *cell = [weakSelf textFieldCellWithIdentifier:@"Cell_Translation_MicrosoftRegion"
+                                                                    label:@"Region"
+                                                              placeholder:@"e.g. westeurope"
+                                                                     text:sMicrosoftTranslateRegion ?: @""
+                                                                      tag:TranslationTextFieldTagMicrosoftRegion
+                                                              secureEntry:NO];
+            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:nil];
+
     ApolloSettingsRow *libreAPIKey =
         [ApolloSettingsRow customRowWithID:@"libreAPIKey"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             UITableViewCell *cell = [weakSelf textFieldCellWithIdentifier:@"Cell_Translation_LibreAPIKey"
                                                                     label:@"API Key"
-                                                              placeholder:@"Optional"
+                                                              // Required on every public instance; the footer
+                                                              // covers the self-hosted exception.
+                                                              placeholder:@"Required"
                                                                      text:sLibreTranslateAPIKey ?: @""
                                                                       tag:TranslationTextFieldTagLibreAPIKey
                                                               secureEntry:YES];
@@ -253,7 +283,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     NSMutableArray<ApolloSettingsSection *> *sections = [NSMutableArray array];
     [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"General"
-                                         footer:@"Translates comments in place, and optionally post titles. Translation Mode sets how it kicks in:\n\n• Automatic — opens everything already translated.\n• Tap to Translate — keeps the original language and shows a tappable \"Translate\" line under comments plus a language marker next to post stats; tap to translate that item, tap again to switch back.\n• Manual (Globe) — nothing is translated until you tap the globe per feed or thread.\n\nThe Details toggles control the \"Translated from …\" lines and language markers. Match App Colour tints them with your theme's accent instead of green."
+                                         footer:@"Translates comments in place, and optionally post titles. Translation Mode sets how it kicks in:\n\n• Automatic — opens everything already translated.\n• Tap to Translate — keeps the original language and shows a tappable \"Translate\" line under comments plus a language marker next to post stats; tap to translate that item, tap again to switch back.\n• Manual (Globe) — nothing is translated until you tap the globe per feed or thread.\n\nThe Details toggles control the \"Translated from …\" lines and language markers. Match App Colour tints them with your theme's accent instead of green.\n\nPrimary Provider picks who does the translating:\n\n• Google — free, no setup, but it limits how much one connection may translate; heavy use can be cut off until it resets.\n• Apple (On-Device) — private, offline and unlimited, and never falls back to a network provider. Downloads each language once (iOS 18+).\n• Microsoft — needs a free Azure key (2 million characters a month) and is the most reliable network option.\n• LibreTranslate — needs an API key, or your own self-hosted server.\n\nIf a network provider fails, the tweak automatically tries another one that's configured."
                                            rows:@[ enableBulk, translationMode, translateTitles, showDetails, titleDetails, markerColor, targetLanguage, provider ]]];
 
     // Apollo's own Translate button (the native action-sheet item on comment/post
@@ -281,8 +311,12 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                                          footer:@"Posts and comments detected as one of these languages will be left in their original form. Mixed-language text is still translated so embedded foreign words come through."
                                            rows:skipRows]];
     [sections addObject:
+        [ApolloSettingsSection sectionWithTitle:@"Microsoft"
+                                         footer:@"Microsoft (Azure AI Translator) needs your own free API key. Create a free Azure account, add a Translator resource on the free F0 plan (2 million characters per month, renewed monthly), then paste one of its keys here. Region is the resource's location — leave it empty only if your resource is Global."
+                                           rows:@[ microsoftAPIKey, microsoftRegion ]]];
+    [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"LibreTranslate"
-                                         footer:@"Google is the default provider. If Google or LibreTranslate fails, the tweak automatically falls back to the other one. Apple (On-Device) translates privately on your device with no network — it stays Apple (no fallback) and will ask you to download a language the first time it's needed (iOS 18+). The settings below configure the LibreTranslate endpoint: public LibreTranslate instances now require an API key (get one at portal.libretranslate.com), or point the URL at your own self-hosted instance."
+                                         footer:@"An API key is REQUIRED — LibreTranslate's free public instances shut down, and every remaining public instance (including the default URL) rejects requests without a key. Get one at portal.libretranslate.com, or point the URL at your own self-hosted instance, which needs no key. Without a key LibreTranslate cannot translate anything."
                                            rows:@[ libreURL, libreAPIKey ]]];
 
     return sections;
@@ -351,6 +385,9 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     if ([sTranslationProvider isEqualToString:@"apple"]) {
         return @"apple";
     }
+    if ([sTranslationProvider isEqualToString:@"microsoft"]) {
+        return @"microsoft";
+    }
     return @"google";
 }
 
@@ -358,6 +395,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     NSString *current = [self currentProvider];
     if ([current isEqualToString:@"libre"]) return @"LibreTranslate";
     if ([current isEqualToString:@"apple"]) return @"Apple (On-Device)";
+    if ([current isEqualToString:@"microsoft"]) return @"Microsoft";
     return @"Google";
 }
 
@@ -378,8 +416,9 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 
 - (void)setProvider:(NSString *)provider {
     NSString *normalized = [[provider stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-    // Valid providers: "libre", "apple" (on-device, iOS 18+ only), otherwise "google".
+    // Valid: "libre", "microsoft", "apple" (on-device, iOS 18+), else "google".
     if (![normalized isEqualToString:@"libre"] &&
+        ![normalized isEqualToString:@"microsoft"] &&
         !([normalized isEqualToString:@"apple"] && IsAppleTranslationSupported())) {
         normalized = @"google";
     }
@@ -643,6 +682,33 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     });
 }
 
+// LibreTranslate and Microsoft both need a key the user must supply themselves.
+// Selecting either without one would look like a silent breakage — every request
+// fails — so say so at the moment of choosing, while they're already in the
+// screen that has the field (issue #995). Fires every time (not once-only): the
+// provider genuinely cannot work until the key exists, so it isn't a nag.
+// A self-hosted LibreTranslate instance needs no key, so its wording says so.
+- (void)warnIfProviderMissingAPIKey:(NSString *)provider {
+    NSString *title = nil;
+    NSString *message = nil;
+    if ([provider isEqualToString:@"libre"] && sLibreTranslateAPIKey.length == 0) {
+        title = @"API Key Required";
+        message = @"LibreTranslate won't translate anything until you enter an API key below.\n\nThe free public instances have shut down, and the ones that remain require a key from portal.libretranslate.com. If you run your own LibreTranslate server, set the API URL to it instead — self-hosted instances don't need a key.";
+    } else if ([provider isEqualToString:@"microsoft"] && sMicrosoftTranslateAPIKey.length == 0) {
+        title = @"API Key Required";
+        message = @"Microsoft won't translate anything until you enter an API key below.\n\nCreate a free Azure account, add a Translator resource on the free F0 plan (2 million characters a month), then paste one of its keys into the Microsoft section. Enter the resource's region too, unless it's Global.";
+    }
+    if (!title) return;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                      message:message
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
+}
+
 // One-time explainer the first time Apple is chosen as the provider: translations are
 // on-device and languages download on first use. There is no public deep link to the
 // system Translate download page (UIApplicationOpenSettingsURLString only opens
@@ -671,6 +737,8 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
         [titles addObject:@"Apple (On-Device)"];
         [providers addObject:@"apple"];
     }
+    [titles addObject:@"Microsoft"];
+    [providers addObject:@"microsoft"];
     [titles addObject:@"LibreTranslate"];
     [providers addObject:@"libre"];
 
@@ -681,6 +749,9 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                                 titles, currentIndex, ^(NSInteger pickedIndex) {
         NSString *provider = providers[(NSUInteger)pickedIndex];
         [weakSelf setProvider:provider];
+        // Key-requiring providers: warn immediately when the key is missing,
+        // otherwise the choice silently translates nothing.
+        [weakSelf warnIfProviderMissingAPIKey:provider];
         if ([provider isEqualToString:@"apple"]) {
             // Languages download on-demand (prompt-on-detect, once per language). The first
             // time the user picks Apple, explain that and point them to Settings to
@@ -758,6 +829,16 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
         sLibreTranslateAPIKey = value.length > 0 ? [value copy] : nil;
         [[NSUserDefaults standardUserDefaults] setObject:(sLibreTranslateAPIKey ?: @"") forKey:UDKeyLibreTranslateAPIKey];
         textField.text = sLibreTranslateAPIKey ?: @"";
+    } else if (textField.tag == TranslationTextFieldTagMicrosoftAPIKey) {
+        sMicrosoftTranslateAPIKey = value.length > 0 ? [value copy] : nil;
+        [[NSUserDefaults standardUserDefaults] setObject:(sMicrosoftTranslateAPIKey ?: @"") forKey:UDKeyMicrosoftTranslateAPIKey];
+        textField.text = sMicrosoftTranslateAPIKey ?: @"";
+    } else if (textField.tag == TranslationTextFieldTagMicrosoftRegion) {
+        // Azure region names are lowercase and unspaced ("westeurope").
+        NSString *region = [[value lowercaseString] stringByReplacingOccurrencesOfString:@" " withString:@""];
+        sMicrosoftTranslateRegion = region.length > 0 ? [region copy] : nil;
+        [[NSUserDefaults standardUserDefaults] setObject:(sMicrosoftTranslateRegion ?: @"") forKey:UDKeyMicrosoftTranslateRegion];
+        textField.text = sMicrosoftTranslateRegion ?: @"";
     }
 }
 

@@ -442,9 +442,11 @@ extern BOOL sShowTranslationTitleDetails;
 extern BOOL sTranslationMarkerUseThemeColor;
 extern BOOL sTranslatePostTitles;
 extern NSString *sTranslationTargetLanguage;
-extern NSString *sTranslationProvider; // @"google", @"libre", or @"apple"
+extern NSString *sTranslationProvider; // @"google", @"libre", @"apple", or @"microsoft"
 extern NSString *sLibreTranslateURL;
 extern NSString *sLibreTranslateAPIKey;
+extern NSString *sMicrosoftTranslateAPIKey;
+extern NSString *sMicrosoftTranslateRegion;
 // Lowercased 2-letter language codes the user has opted out of translating.
 extern NSArray<NSString *> *sTranslationSkipLanguages;
 // Redirects Apollo's own Translate button to iOS's on-device Translate sheet

@@ -367,6 +367,8 @@ BOOL ApolloBackupRestoreRestoreFromZipURL(NSURL *zipURL, NSString **outErrorTitl
         sTranslationProvider = @"libre";
     } else if ([provider isEqualToString:@"google"]) {
         sTranslationProvider = @"google";
+    } else if ([provider isEqualToString:@"microsoft"]) {
+        sTranslationProvider = @"microsoft";
     } else if ([provider isEqualToString:@"apple"] && IsAppleTranslationSupported()) {
         sTranslationProvider = @"apple";
     } else {
@@ -383,6 +385,11 @@ BOOL ApolloBackupRestoreRestoreFromZipURL(NSURL *zipURL, NSString **outErrorTitl
 
     NSString *libreAPIKey = [defaults stringForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = libreAPIKey.length > 0 ? libreAPIKey : nil;
+
+    NSString *msKey = [defaults stringForKey:UDKeyMicrosoftTranslateAPIKey];
+    sMicrosoftTranslateAPIKey = msKey.length > 0 ? msKey : nil;
+    NSString *msRegion = [defaults stringForKey:UDKeyMicrosoftTranslateRegion];
+    sMicrosoftTranslateRegion = msRegion.length > 0 ? msRegion : nil;
 
     // AI summary backend + per-provider cloud credentials (same sanitize rules
     // as the launch-time load in Tweak.xm: unknown provider → apple, empty → nil).
