@@ -81,6 +81,9 @@ static char kAboutSubredditIconTaskKey;
 @interface ApolloFeedShortcutsPreviewCell : UITableViewCell
 @property (nonatomic, weak) UITableView *hostTableView;
 @property (nonatomic, strong) NSArray<UILayoutGuide *> *shortcutLayoutGuides;
+@property (nonatomic, strong) NSDictionary<NSNumber *, UIView *> *shortcutItemViewsByIndex;
+@property (nonatomic, strong) NSArray<UIView *> *shortcutSeparators;
+@property (nonatomic, strong) UIViewPropertyAnimator *previewAnimator;
 - (void)apollo_configurePreview;
 - (void)apollo_configurePreviewAnimated:(BOOL)animated;
 @end
@@ -227,35 +230,41 @@ static char kAboutSubredditIconTaskKey;
                                                                           self.traitCollection);
     BOOL usesShortcutLayout = layout != ApolloSubredditFeedLayoutRows;
     NSMutableArray<UIView *> *shortcutItems = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
+    NSMutableDictionary<NSNumber *, UIView *> *itemViewsByIndex =
+        [NSMutableDictionary dictionaryWithCapacity:visibleIndexes.count];
     NSMutableArray<UIView *> *contentViews = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
     NSMutableArray<NSLayoutConstraint *> *centerConstraints = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
     for (NSNumber *index in visibleIndexes) {
         UIView *contentView = nil;
         NSLayoutConstraint *centerConstraint = nil;
-        [shortcutItems addObject:[self apollo_previewItemAtIndex:index.integerValue
-                                                       itemCount:visibleIndexes.count
-                                                          layout:layout
-                                                     contentView:&contentView
-                                        contentCenterXConstraint:&centerConstraint]];
+        UIView *item = [self apollo_previewItemAtIndex:index.integerValue
+                                             itemCount:visibleIndexes.count
+                                                layout:layout
+                                           contentView:&contentView
+                              contentCenterXConstraint:&centerConstraint];
+        [shortcutItems addObject:item];
+        itemViewsByIndex[index] = item;
         if (contentView) [contentViews addObject:contentView];
         if (centerConstraint) [centerConstraints addObject:centerConstraint];
     }
+    self.shortcutItemViewsByIndex = [itemViewsByIndex copy];
 
     if (usesShortcutLayout) {
         UIColor *separatorColor = ApolloThemeSeparatorColor()
             ?: self.hostTableView.separatorColor
             ?: UIColor.separatorColor;
         NSArray<UILayoutGuide *> *layoutGuides = nil;
-        ApolloFeedShortcutInstallLayout(self.contentView,
-                                        shortcutItems,
-                                        contentViews,
-                                        centerConstraints,
-                                        layout,
-                                        separatorColor,
-                                        &layoutGuides);
+        self.shortcutSeparators = ApolloFeedShortcutInstallLayout(self.contentView,
+                                                                   shortcutItems,
+                                                                   contentViews,
+                                                                   centerConstraints,
+                                                                   layout,
+                                                                   separatorColor,
+                                                                   &layoutGuides);
         self.shortcutLayoutGuides = layoutGuides;
         return;
     }
+    self.shortcutSeparators = @[];
 
     UIStackView *previewStack = [[UIStackView alloc] initWithArrangedSubviews:shortcutItems];
     previewStack.axis = UILayoutConstraintAxisVertical;
@@ -273,17 +282,110 @@ static char kAboutSubredditIconTaskKey;
 }
 
 - (void)apollo_configurePreviewAnimated:(BOOL)animated {
-    if (!animated || self.contentView.subviews.count == 0) {
+    if (!animated || self.shortcutItemViewsByIndex.count == 0) {
         [self apollo_configurePreview];
         return;
     }
-    [UIView transitionWithView:self.contentView
-                      duration:0.25
-                       options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionBeginFromCurrentState
-                    animations:^{
-        [self apollo_configurePreview];
-        [self.contentView layoutIfNeeded];
-    } completion:nil];
+
+    if (self.previewAnimator.state == UIViewAnimatingStateActive) {
+        [self.previewAnimator stopAnimation:NO];
+        [self.previewAnimator finishAnimationAtPosition:UIViewAnimatingPositionCurrent];
+    }
+    self.previewAnimator = nil;
+
+    if (UIAccessibilityIsReduceMotionEnabled()) {
+        [UIView transitionWithView:self.contentView
+                          duration:0.18
+                           options:UIViewAnimationOptionTransitionCrossDissolve |
+                                   UIViewAnimationOptionBeginFromCurrentState |
+                                   UIViewAnimationOptionAllowUserInteraction
+                        animations:^{
+            [self apollo_configurePreview];
+            [self.hostTableView beginUpdates];
+            [self.hostTableView endUpdates];
+            [self.hostTableView layoutIfNeeded];
+        } completion:nil];
+        return;
+    }
+
+    [self.contentView layoutIfNeeded];
+    NSDictionary<NSNumber *, UIView *> *oldItems = self.shortcutItemViewsByIndex;
+    NSMutableDictionary<NSNumber *, NSValue *> *oldFrames =
+        [NSMutableDictionary dictionaryWithCapacity:oldItems.count];
+    for (NSNumber *index in oldItems) {
+        UIView *item = oldItems[index];
+        oldFrames[index] = [NSValue valueWithCGRect:[item convertRect:item.bounds toView:self.contentView]];
+    }
+
+    NSSet<NSNumber *> *newVisibleIndexes = [NSSet setWithArray:ApolloFeedShortcutVisibleIndexes()];
+    NSMutableArray<UIView *> *departingSnapshots = [NSMutableArray array];
+    for (NSNumber *index in oldItems) {
+        if ([newVisibleIndexes containsObject:index]) continue;
+        UIView *item = oldItems[index];
+        UIView *snapshot = [item snapshotViewAfterScreenUpdates:NO];
+        if (!snapshot) continue;
+        snapshot.frame = oldFrames[index].CGRectValue;
+        snapshot.userInteractionEnabled = NO;
+        [departingSnapshots addObject:snapshot];
+    }
+
+    NSMutableArray<UIView *> *separatorSnapshots = [NSMutableArray arrayWithCapacity:self.shortcutSeparators.count];
+    for (UIView *separator in self.shortcutSeparators) {
+        UIView *snapshot = [separator snapshotViewAfterScreenUpdates:NO];
+        if (!snapshot) continue;
+        snapshot.frame = [separator convertRect:separator.bounds toView:self.contentView];
+        snapshot.userInteractionEnabled = NO;
+        [separatorSnapshots addObject:snapshot];
+    }
+
+    [self apollo_configurePreview];
+    [self.contentView layoutIfNeeded];
+    for (UIView *snapshot in departingSnapshots) [self.contentView addSubview:snapshot];
+    for (UIView *snapshot in separatorSnapshots) [self.contentView addSubview:snapshot];
+
+    for (NSNumber *index in self.shortcutItemViewsByIndex) {
+        UIView *item = self.shortcutItemViewsByIndex[index];
+        NSValue *oldFrameValue = oldFrames[index];
+        if (oldFrameValue) {
+            CGRect oldFrame = oldFrameValue.CGRectValue;
+            CGRect newFrame = [item convertRect:item.bounds toView:self.contentView];
+            item.transform = CGAffineTransformMakeTranslation(CGRectGetMidX(oldFrame) - CGRectGetMidX(newFrame),
+                                                               CGRectGetMidY(oldFrame) - CGRectGetMidY(newFrame));
+        } else {
+            item.alpha = 0.0;
+            item.transform = CGAffineTransformMakeScale(0.88, 0.88);
+        }
+    }
+    for (UIView *separator in self.shortcutSeparators) separator.alpha = 0.0;
+
+    UISpringTimingParameters *timing = [[UISpringTimingParameters alloc] initWithDampingRatio:0.88];
+    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:0.34
+                                                                      timingParameters:timing];
+    __weak typeof(self) weakSelf = self;
+    __weak UIViewPropertyAnimator *weakAnimator = animator;
+    [animator addAnimations:^{
+        for (UIView *item in weakSelf.shortcutItemViewsByIndex.allValues) {
+            item.alpha = 1.0;
+            item.transform = CGAffineTransformIdentity;
+        }
+        for (UIView *separator in weakSelf.shortcutSeparators) separator.alpha = 1.0;
+        for (UIView *snapshot in departingSnapshots) {
+            snapshot.alpha = 0.0;
+            snapshot.transform = CGAffineTransformMakeScale(0.88, 0.88);
+        }
+        for (UIView *snapshot in separatorSnapshots) snapshot.alpha = 0.0;
+        [weakSelf.hostTableView beginUpdates];
+        [weakSelf.hostTableView endUpdates];
+        [weakSelf.hostTableView layoutIfNeeded];
+        [weakSelf.contentView layoutIfNeeded];
+    }];
+    [animator addCompletion:^(__unused UIViewAnimatingPosition finalPosition) {
+        for (UIView *snapshot in departingSnapshots) [snapshot removeFromSuperview];
+        for (UIView *snapshot in separatorSnapshots) [snapshot removeFromSuperview];
+        if (weakSelf.previewAnimator == weakAnimator) weakSelf.previewAnimator = nil;
+    }];
+    self.previewAnimator = animator;
+    [animator startAnimation];
 }
 
 @end
@@ -3938,15 +4040,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     }
 
     [cell apollo_configurePreviewAnimated:animated];
-    if (!animated) return;
-    [UIView animateWithDuration:0.28
-                          delay:0.0
-                        options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        [self.tableView beginUpdates];
-        [self.tableView endUpdates];
-        [self.tableView layoutIfNeeded];
-    } completion:nil];
 }
 
 - (void)hideMultiredditDescriptionsSwitchToggled:(UISwitch *)sender {
