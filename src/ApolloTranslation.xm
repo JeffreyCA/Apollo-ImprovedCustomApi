@@ -3336,10 +3336,17 @@ static void ApolloTranslateViaLibre(NSString *text,
                     instanceMessage = ((NSDictionary *)errorBody)[@"error"];
                 }
             }
+            // Same quota tagging as the Google and Microsoft legs so a throttled
+            // LibreTranslate instance also explains itself (issue #995). 429 is
+            // its rate limit; 403 is a rejected/exhausted key on the hosted
+            // instances, which the user experiences the same way.
+            BOOL quota = (status == 429 || status == 403);
             NSString *message = instanceMessage.length > 0
                 ? [NSString stringWithFormat:@"LibreTranslate: %@", instanceMessage]
                 : [NSString stringWithFormat:@"LibreTranslate request failed (HTTP %ld)", (long)status];
-            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:201 userInfo:@{NSLocalizedDescriptionKey: message}];
+            NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:message forKey:NSLocalizedDescriptionKey];
+            if (quota) info[kApolloTranslationQuotaErrorKey] = @YES;
+            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:201 userInfo:info];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, statusError); });
             return;
         }
@@ -4150,10 +4157,18 @@ static void ApolloNoteTranslationFailureForToast(NSError *error) {
         // The toast's detail line is single-line, middle-truncating (ApolloToast),
         // so this must stay short — the title carries "what happened" and the
         // detail carries only "what to do next".
-        BOOL canSuggestApple = IsAppleTranslationSupported() && ![sTranslationProvider isEqualToString:@"apple"];
-        NSString *detail = canSuggestApple
-            ? @"Try Apple (On-Device) in Translation settings"
-            : @"Add a Microsoft API key in Translation settings";
+        // Never suggest something the user already has. Apple is the only
+        // genuinely unlimited option, so it leads when it's available and isn't
+        // already selected; a Microsoft user who burned their monthly quota
+        // needs to know it renews, not to be told to add the key they have.
+        NSString *detail = nil;
+        if (IsAppleTranslationSupported() && ![sTranslationProvider isEqualToString:@"apple"]) {
+            detail = @"Try Apple (On-Device) in Translation settings";
+        } else if ([sTranslationProvider isEqualToString:@"microsoft"]) {
+            detail = @"Azure quota resets at the start of the month";
+        } else {
+            detail = @"Add a Microsoft API key in Translation settings";
+        }
         ApolloShowToastWithStyle(@"Translation Limit Reached", detail, ApolloToastStyleError, @"exclamationmark.triangle");
         return;
     }
@@ -4178,8 +4193,13 @@ void ApolloTranslationDebugProbe(NSString *spec) {
     if (text.length == 0) { ApolloLog(@"[Translation][Probe] no text given"); return; }
     NSString *target = ApolloResolvedTargetLanguageCode() ?: @"en";
     void (^report)(NSString *, NSError *) = ^(NSString *translated, NSError *error) {
-        ApolloLog(@"[Translation][Probe] leg=%@ target=%@ ok=%d translated='%@' error=%@",
-                  leg, target, translated.length > 0, translated ?: @"(nil)",
+        // quota= is the flag that decides whether the user sees the
+        // "Translation Limit Reached" notification rather than a generic
+        // failure, so surface it here — it isn't visible in the message text.
+        ApolloLog(@"[Translation][Probe] leg=%@ target=%@ ok=%d quota=%d translated='%@' error=%@",
+                  leg, target, translated.length > 0,
+                  [error.userInfo[kApolloTranslationQuotaErrorKey] boolValue],
+                  translated ?: @"(nil)",
                   error ? [NSString stringWithFormat:@"%@/%ld %@", error.domain, (long)error.code, error.localizedDescription] : @"none");
     };
     ApolloLog(@"[Translation][Probe] start leg=%@ target=%@ textLen=%lu provider=%@",
