@@ -32,6 +32,12 @@ void ApolloTranslationDiscardVoteBodySnapshot(id cellNode);
 // plain ObjC (.m) TUs, so it needs unmangled linkage.
 __BEGIN_DECLS
 NSString *ApolloNormalizedLibreTranslateURLSetting(NSString *stored);
+
+// True when LibreTranslate cannot work as currently configured: the effective
+// URL points at a keyed public instance and no API key is entered. Keyless
+// self-hosted instances return NO. Shared by the request leg's fail-fast, the
+// cross-provider fallback chooser, and the settings screen's key warning.
+BOOL ApolloLibreTranslateNeedsAPIKey(void);
 __END_DECLS
 
 #if APOLLO_SIM_BUILD

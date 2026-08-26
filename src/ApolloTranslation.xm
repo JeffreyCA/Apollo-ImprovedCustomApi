@@ -167,6 +167,31 @@ NSString *ApolloNormalizedLibreTranslateURLSetting(NSString *stored) {
     return trimmed;
 }
 
+// True when `host` is one of the KEYED public LibreTranslate instances (exact
+// host or a subdomain — dot-anchored so a self-hosted "mylibretranslate.com"
+// isn't swept in). Self-hosted instances run keyless by design.
+static BOOL ApolloLibreHostIsPublicInstance(NSString *host) {
+    NSString *lower = [host lowercaseString] ?: @"";
+    for (NSString *publicHost in @[ @"libretranslate.com", @"libretranslate.de" ]) {
+        if ([lower isEqualToString:publicHost] ||
+            [lower hasSuffix:[@"." stringByAppendingString:publicHost]]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// Single capability predicate for "LibreTranslate cannot work as configured":
+// a keyed public instance with no key entered. The request leg's fail-fast,
+// the cross-provider fallback chooser, and the settings screen's key warning
+// all route through this so they can never disagree about which configurations
+// are usable (a keyless SELF-HOSTED instance is fully valid).
+BOOL ApolloLibreTranslateNeedsAPIKey(void) {
+    if (sLibreTranslateAPIKey.length > 0) return NO;
+    NSURL *url = [NSURL URLWithString:ApolloNormalizedLibreTranslateURLSetting(sLibreTranslateURL)];
+    return ApolloLibreHostIsPublicInstance(url.host);
+}
+
 static NSCache<NSString *, NSString *> *sTranslationCache;
 // Language recognition is CPU-heavy enough to show up while rows enter the
 // viewport. Cache both successful and inconclusive detections for the session.
@@ -3103,9 +3128,49 @@ static void ApolloGoogleTranslateFetch(NSURL *url,
     [task resume];
 }
 
+// Time-boxed backoff for the gtx endpoint. Once it 429s, every request for the
+// backoff window goes straight to clients5 instead of re-paying the doomed gtx
+// attempt (a throttle storm is per-IP and lasts hours; without this, a chunked
+// long post serially burns a failed gtx round-trip — up to its full 12s
+// timeout — PER CHUNK). Main-thread only, like the toast counters: every
+// provider completion and translation entry point runs on main.
+static NSTimeInterval sGoogleGtxBackoffUntil = 0;
+static const NSTimeInterval kApolloGoogleGtxBackoffInterval = 120.0;
+
 static void ApolloTranslateViaGoogle(NSString *text,
                                      NSString *targetLanguage,
                                      void (^completion)(NSString *translated, NSError *error)) {
+    // One clients5 attempt, delivering `primaryError`'s quota tag even when the
+    // fallback fails for a DIFFERENT reason — the gtx 429 is what the user
+    // needs explained, and dropping it here would turn the purpose-built
+    // "Translation Limit Reached" toast back into a generic failure.
+    void (^runClients5)(NSError *) = ^(NSError *primaryError) {
+        NSURL *fallbackURL = ApolloGoogleTranslateFallbackURL(text, targetLanguage);
+        if (!fallbackURL) {
+            completion(nil, primaryError);
+            return;
+        }
+        ApolloGoogleTranslateFetch(fallbackURL, @"clients5", ^(NSString *retried, NSError *fallbackError) {
+            if ([retried isKindOfClass:[NSString class]] && retried.length > 0) {
+                completion(retried, nil);
+                return;
+            }
+            NSError *delivered = fallbackError ?: primaryError;
+            if (delivered && ![delivered.userInfo[kApolloTranslationQuotaErrorKey] boolValue] &&
+                [primaryError.userInfo[kApolloTranslationQuotaErrorKey] boolValue]) {
+                NSMutableDictionary *info = [delivered.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+                info[kApolloTranslationQuotaErrorKey] = @YES;
+                delivered = [NSError errorWithDomain:delivered.domain code:delivered.code userInfo:info];
+            }
+            completion(nil, delivered);
+        });
+    };
+
+    if ([NSDate timeIntervalSinceReferenceDate] < sGoogleGtxBackoffUntil) {
+        runClients5(nil);
+        return;
+    }
+
     NSURL *primaryURL = ApolloGoogleTranslatePrimaryURL(text, targetLanguage);
     if (!primaryURL) {
         NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:100 userInfo:@{NSLocalizedDescriptionKey: @"Failed to build Google Translate URL"}];
@@ -3117,21 +3182,37 @@ static void ApolloTranslateViaGoogle(NSString *text,
             completion(translated, nil);
             return;
         }
-        NSURL *fallbackURL = ApolloGoogleTranslateFallbackURL(text, targetLanguage);
-        if (!fallbackURL) {
-            completion(nil, primaryError);
-            return;
+        if ([primaryError.userInfo[kApolloTranslationQuotaErrorKey] boolValue]) {
+            sGoogleGtxBackoffUntil = [NSDate timeIntervalSinceReferenceDate] + kApolloGoogleGtxBackoffInterval;
+            ApolloLog(@"[Translation] gtx throttled — routing to clients5 for the next %.0fs", kApolloGoogleGtxBackoffInterval);
         }
         ApolloLog(@"[Translation] Google primary endpoint failed (%@) — retrying via clients5",
                   primaryError.localizedDescription ?: @"unknown error");
-        ApolloGoogleTranslateFetch(fallbackURL, @"clients5", ^(NSString *retried, NSError *fallbackError) {
-            if ([retried isKindOfClass:[NSString class]] && retried.length > 0) {
-                completion(retried, nil);
-            } else {
-                completion(nil, fallbackError ?: primaryError);
-            }
-        });
+        runClients5(primaryError);
     });
+}
+
+// Azure's supported-language list keys some languages by dialect/script code
+// where the app (and Google/Apple) use a bare ISO 639-1 code — bare "zh" and
+// "no" are simply absent from /languages?scope=translation and the translate
+// endpoint 400s on them, which would break the Microsoft provider outright for
+// those target languages (both are offered in the Target Language picker; the
+// rest arrive via Device Default locales). Map the knowns; anything else
+// passes through and, if Azure still rejects it, surfaces its own error.
+static NSString *ApolloMicrosoftTargetLanguageCode(NSString *code) {
+    static NSDictionary<NSString *, NSString *> *map;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        map = @{
+            @"zh": @"zh-Hans",   // Chinese — Azure only has zh-Hans/zh-Hant; Simplified matches Google's default
+            @"no": @"nb",        // Norwegian — Azure uses Bokmål's code
+            @"sr": @"sr-Cyrl",   // Serbian — Cyrillic matches Google's output script
+            @"tl": @"fil",       // Tagalog — Azure files it under Filipino
+            @"iw": @"he",        // legacy Hebrew code some locales still carry
+            @"mn": @"mn-Cyrl",   // Mongolian — Azure splits by script
+        };
+    });
+    return map[code] ?: code;
 }
 
 // Microsoft (Azure AI Translator), bring-your-own-key like LibreTranslate.
@@ -3155,7 +3236,7 @@ static void ApolloTranslateViaMicrosoft(NSString *text,
     components.path = @"/translate";
     components.queryItems = @[
         [NSURLQueryItem queryItemWithName:@"api-version" value:@"3.0"],
-        [NSURLQueryItem queryItemWithName:@"to" value:targetLanguage],
+        [NSURLQueryItem queryItemWithName:@"to" value:ApolloMicrosoftTargetLanguageCode(targetLanguage)],
     ];
     NSURL *url = components.URL;
     if (!url) {
@@ -3272,11 +3353,9 @@ static void ApolloTranslateViaLibre(NSString *text,
 
     // Every surviving PUBLIC instance requires a key, so a keyless request to one
     // is a guaranteed 400. Fail immediately with the actionable reason instead of
-    // burning a round-trip (issue #995). Self-hosted instances need no key, so
-    // only short-circuit for the known public hosts.
-    NSString *host = [url.host lowercaseString] ?: @"";
-    BOOL publicInstance = [host hasSuffix:@"libretranslate.com"] || [host hasSuffix:@"libretranslate.de"];
-    if (publicInstance && sLibreTranslateAPIKey.length == 0) {
+    // burning a round-trip (issue #995). Self-hosted instances need no key —
+    // the shared predicate leaves them alone.
+    if (ApolloLibreTranslateNeedsAPIKey()) {
         NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:204
                                          userInfo:@{NSLocalizedDescriptionKey: @"LibreTranslate needs an API key — add one in Translation settings, or use your own self-hosted server"}];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
@@ -4073,14 +4152,16 @@ static void ApolloTranslateTextWithFallback(NSString *text,
         // Pick the fallback that can actually succeed. A configured Microsoft
         // key is the most reliable option (official API, 2M chars/month), so it
         // wins when the user has one; otherwise the free legs cover each other.
-        // LibreTranslate without a key can't work at all on today's public
-        // instances, so never fall back into it blind.
+        // LibreTranslate qualifies whenever its configuration is usable — a
+        // keyed public instance OR a keyless self-hosted one (the same
+        // predicate the request leg's fail-fast uses, so the chooser can never
+        // rule out a configuration the leg itself would accept).
         NSString *other = nil;
         if (![primaryProvider isEqualToString:@"microsoft"] && sMicrosoftTranslateAPIKey.length > 0) {
             other = @"microsoft";
         } else if (![primaryProvider isEqualToString:@"google"]) {
             other = @"google";
-        } else if (sLibreTranslateAPIKey.length > 0) {
+        } else if (!ApolloLibreTranslateNeedsAPIKey()) {
             other = @"libre";
         }
         if (!other) {
@@ -4159,13 +4240,15 @@ static void ApolloNoteTranslationFailureForToast(NSError *error) {
         // detail carries only "what to do next".
         // Never suggest something the user already has. Apple is the only
         // genuinely unlimited option, so it leads when it's available and isn't
-        // already selected; a Microsoft user who burned their monthly quota
-        // needs to know it renews, not to be told to add the key they have.
+        // already selected. The Microsoft check is on KEY PRESENCE, not the
+        // selected provider: a Google-primary user with an Azure key reaches
+        // this toast only after that key's leg also failed, so telling them to
+        // "add a Microsoft API key" would suggest the thing they already have.
         NSString *detail = nil;
         if (IsAppleTranslationSupported() && ![sTranslationProvider isEqualToString:@"apple"]) {
             detail = @"Try Apple (On-Device) in Translation settings";
-        } else if ([sTranslationProvider isEqualToString:@"microsoft"]) {
-            detail = @"Azure quota resets at the start of the month";
+        } else if ([sTranslationProvider isEqualToString:@"microsoft"] || sMicrosoftTranslateAPIKey.length > 0) {
+            detail = @"Limits reset over time — Azure monthly";
         } else {
             detail = @"Add a Microsoft API key in Translation settings";
         }
@@ -4319,7 +4402,14 @@ static void ApolloRequestTranslation(NSString *cacheKey,
     NSDictionary<NSString *, NSString *> *protectedLinks = nil;
     NSString *requestText = ApolloProtectTranslationLinks(nameProtected, &protectedLinks);
 
-    void (^deliverTranslation)(NSString *, NSError *) = ^(NSString *translated, NSError *error) {
+    // providerRoundTrip distinguishes real provider deliveries from skip-path
+    // echoes (proper-noun/name-only text, skip-listed or already-target
+    // language). Only the former is evidence the provider is healthy: letting
+    // skip echoes reset the consecutive-failure counter meant a mixed feed —
+    // English posts interleaved with foreign ones — kept the counter below the
+    // toast threshold for an entire outage, silencing exactly the notification
+    // issue #995 added.
+    void (^deliverTranslationInternal)(NSString *, NSError *, BOOL) = ^(NSString *translated, NSError *error, BOOL providerRoundTrip) {
         NSString *restoredTranslation = ApolloRestoreTranslationLinks(translated, protectedLinks);
         restoredTranslation = ApolloRestoreTranslationNames(restoredTranslation, protectedNames);
         NSArray *callbacks = nil;
@@ -4333,7 +4423,7 @@ static void ApolloRequestTranslation(NSString *cacheKey,
             @synchronized (sTranslationFailureCooldowns) {
                 [sTranslationFailureCooldowns removeObjectForKey:ApolloTranslationFailureCooldownKey(cacheKey)];
             }
-            ApolloNoteTranslationSuccessForToast();
+            if (providerRoundTrip) ApolloNoteTranslationSuccessForToast();
         } else if (error) {
             ApolloRecordTranslationFailure(cacheKey, error);
             ApolloNoteTranslationFailureForToast(error);
@@ -4343,6 +4433,9 @@ static void ApolloRequestTranslation(NSString *cacheKey,
             void (^callback)(NSString *, NSError *) = callbackObj;
             callback(restoredTranslation, error);
         }
+    };
+    void (^deliverTranslation)(NSString *, NSError *) = ^(NSString *translated, NSError *error) {
+        deliverTranslationInternal(translated, error, YES);
     };
 
     // Skip the round-trip and hand back the original when the text is just name(s): either a
@@ -4369,7 +4462,15 @@ static void ApolloRequestTranslation(NSString *cacheKey,
     if (properNounTitle || onlyDetectedNames) {
         ApolloTranslationVerboseLog(@"[Translation] Skipping proper-noun text (titleHeuristic=%d nerOnly=%d): \"%@\"",
                                     properNounTitle, onlyDetectedNames, sourceText);
-        deliverTranslation(sourceText, nil);
+        deliverTranslationInternal(sourceText, nil, NO);
+        return;
+    }
+
+    // Front-run ApolloTranslateTextWithFallback's identical language-skip check
+    // (same text, same target) so the delivery carries providerRoundTrip=NO —
+    // through the provider path it would arrive flagged as a real success.
+    if (ApolloShouldSkipTranslationForText(requestText, targetLanguage)) {
+        deliverTranslationInternal(requestText, nil, NO);
         return;
     }
 

@@ -385,11 +385,12 @@ BOOL ApolloBackupRestoreRestoreFromZipURL(NSURL *zipURL, NSString **outErrorTitl
 
     NSString *libreAPIKey = [defaults stringForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = libreAPIKey.length > 0 ? libreAPIKey : nil;
-
-    NSString *msKey = [defaults stringForKey:UDKeyMicrosoftTranslateAPIKey];
-    sMicrosoftTranslateAPIKey = msKey.length > 0 ? msKey : nil;
-    NSString *msRegion = [defaults stringForKey:UDKeyMicrosoftTranslateRegion];
-    sMicrosoftTranslateRegion = msRegion.length > 0 ? msRegion : nil;
+    // The Microsoft key/region statics are deliberately NOT re-synced here:
+    // restore force-exits and %ctor re-reads everything on relaunch, and the
+    // re-sync list is intentionally partial (see src/settings/README.md). The
+    // provider chain above still needs its "microsoft" arm, though — the else
+    // branch persists "google" back to defaults, which would corrupt a restored
+    // Microsoft selection before the relaunch.
 
     // AI summary backend + per-provider cloud credentials (same sanitize rules
     // as the launch-time load in Tweak.xm: unknown provider → apple, empty → nil).

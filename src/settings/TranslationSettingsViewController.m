@@ -19,9 +19,12 @@ typedef NS_ENUM(NSInteger, TranslationTextFieldTag) {
     TranslationTextFieldTagMicrosoftRegion,
 };
 
-// The old libretranslate.de public instance shut down in 2026 (issue #995);
-// keep this in sync with kApolloDefaultLibreTranslateURL in ApolloTranslation.xm.
-static NSString *const kDefaultLibreTranslateURL = @"https://libretranslate.com/translate";
+// The default LibreTranslate URL is owned by ApolloTranslation.xm; deriving it
+// from the exported normalizer (empty → default) keeps this screen from ever
+// drifting out of sync with the engine's actual endpoint.
+static NSString *ApolloSettingsDefaultLibreTranslateURL(void) {
+    return ApolloNormalizedLibreTranslateURLSetting(@"");
+}
 
 // The three mutually-exclusive translation modes, derived from and persisted to
 // the sTapToTranslate / sAutoTranslateOnAppear defaults (no migration needed):
@@ -231,8 +234,8 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             UITableViewCell *cell = [weakSelf textFieldCellWithIdentifier:@"Cell_Translation_LibreURL"
                                                                     label:@"API URL"
-                                                              placeholder:kDefaultLibreTranslateURL
-                                                                     text:sLibreTranslateURL ?: kDefaultLibreTranslateURL
+                                                              placeholder:ApolloSettingsDefaultLibreTranslateURL()
+                                                                     text:sLibreTranslateURL ?: ApolloSettingsDefaultLibreTranslateURL()
                                                                       tag:TranslationTextFieldTagLibreURL
                                                               secureEntry:NO];
             return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
@@ -691,7 +694,9 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 - (void)warnIfProviderMissingAPIKey:(NSString *)provider {
     NSString *title = nil;
     NSString *message = nil;
-    if ([provider isEqualToString:@"libre"] && sLibreTranslateAPIKey.length == 0) {
+    // ApolloLibreTranslateNeedsAPIKey is URL-aware: a keyless SELF-HOSTED
+    // instance is a fully working configuration and must not be nagged.
+    if ([provider isEqualToString:@"libre"] && ApolloLibreTranslateNeedsAPIKey()) {
         title = @"API Key Required";
         message = @"LibreTranslate needs a key to work. Get one at portal.libretranslate.com, or point the API URL at your own server, which needs no key.";
     } else if ([provider isEqualToString:@"microsoft"] && sMicrosoftTranslateAPIKey.length == 0) {
@@ -820,7 +825,11 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     NSString *value = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
     if (textField.tag == TranslationTextFieldTagLibreURL) {
-        if (value.length == 0) value = kDefaultLibreTranslateURL;
+        // Route through the engine's chokepoint so the dead .de URL (or an
+        // empty field) can never be persisted/displayed here while requests
+        // silently go elsewhere — this save path is the one place a dead URL
+        // can newly enter the system.
+        value = ApolloNormalizedLibreTranslateURLSetting(value);
 
         sLibreTranslateURL = [value copy];
         [[NSUserDefaults standardUserDefaults] setObject:sLibreTranslateURL forKey:UDKeyLibreTranslateURL];
