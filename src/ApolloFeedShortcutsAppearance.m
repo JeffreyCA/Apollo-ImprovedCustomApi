@@ -379,7 +379,9 @@ CGFloat ApolloFeedShortcutPreviewRowItemHeight(UITraitCollection *traitCollectio
 CGFloat ApolloFeedShortcutDisplayIconSize(ApolloSubredditFeedIconStyle style,
                                           ApolloSubredditFeedLayout layout,
                                           NSUInteger itemCount) {
-    if (layout == ApolloSubredditFeedLayoutRows) return 34.0;
+    if (layout == ApolloSubredditFeedLayoutRows) {
+        return style == ApolloSubredditFeedIconStyleTinted ? 30.0 : 34.0;
+    }
     if (layout == ApolloSubredditFeedLayoutGrid) {
         return style == ApolloSubredditFeedIconStyleTinted ? 40.0 : 46.0;
     }
