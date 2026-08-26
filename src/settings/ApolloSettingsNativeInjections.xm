@@ -125,6 +125,8 @@ static const void *kApolloInjSavedCategoriesKey = &kApolloInjSavedCategoriesKey;
         return ApolloGeneralTableCellHasTitle(cell, @"Open Links in")
             || ApolloGeneralTableCellHasTitle(cell, @"Open Videos in YouTube App")
             || ApolloGeneralTableCellHasTitle(cell, @"Hide Username on Tab Bar")
-            || ApolloGeneralTableCellHasTitle(cell, @"Hide Subreddits Row");
+            || ApolloGeneralTableCellHasTitle(cell, @"Hide Subreddits Row")
+            || ApolloGeneralTableCellHasTitle(cell, @"Hide Subreddits Row...")
+            || ApolloGeneralTableCellHasTitle(cell, @"Hide Subreddits Row…");
     });
 }
