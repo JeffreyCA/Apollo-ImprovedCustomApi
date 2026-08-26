@@ -289,7 +289,7 @@
     modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
     ApolloSettingsSection *styleSection =
         [ApolloSettingsSection sectionWithTitle:@"List Style"
-                                         footer:@"The same toggles as the Subreddits screen — mirrored here so the preview shows what they change."
+                                         footer:@"Enhance the subreddit list, with modern accent-colored section dividers — the preview shows what they change."
                                            rows:@[ enhancements, modernDividers ]];
 
     return @[ previewSection, followingSection, orderSection, styleSection ];
