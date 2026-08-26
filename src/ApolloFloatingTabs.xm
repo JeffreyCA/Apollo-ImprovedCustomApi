@@ -1,10 +1,13 @@
 // Floating Post Tabs — chat-heads-style bubbles that keep up to 5 posts open.
 //
-// From the comments screen's "..." menu, "Keep in Floating Tab" turns the
-// current post into a small draggable bubble floating (face = the post's
+// From the comments screen's "..." menu — or a feed post's ••• / long-press
+// sheet, without ever opening the post — "Keep in Floating Tab" turns that
+// post into a small draggable bubble floating (face = the post's
 // thumbnail with a subreddit rim badge, or the subreddit icon for text posts
 // — see the "Bubble identity" section for the disambiguation rules)
-// above all of Apollo's UI, Messenger-chat-heads style. The bubble outlives
+// above all of Apollo's UI, Messenger-chat-heads style. A comments-screen
+// keep retains the live screen (exact-position restore); a feed keep is a
+// cold tab that opens through Apollo's URL router. The bubble outlives
 // navigation: browse anywhere, tap the bubble, and you're back on that post —
 // EXACTLY where you left it, because the tab retains the live
 // CommentsViewController and pops/pushes it back rather than reloading the
@@ -291,7 +294,9 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 
 - (void)updateTuckAppearance {
     BOOL tucked = self.tab.tucked;
-    self.chevronView.hidden = !tucked;
+    // In a tucked pile only the FRONT sliver wears the chevron — the back
+    // members peek below it as plain layered rims.
+    self.chevronView.hidden = !tucked || (self.tab.stackID && self.tab.stackOrder > 0);
     self.alpha = tucked ? 0.88 : 1.0;
     // The ~21pt sliver has no room for a rim badge.
     self.badgeContainer.hidden = tucked || !self.badgeConfigured;
@@ -431,6 +436,9 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 - (void)beginPreviewForTab:(ApolloFloatingTab *)tab atPoint:(CGPoint)point;
 - (void)updatePreviewWithLocation:(CGPoint)location;
 - (void)endPreviewCommitting:(BOOL)commit;
+// Shared tap ladder (tap handler + sim debug bridge): reveal a tucked
+// bubble/pile → fan a pile → open a single.
+- (void)performTapOnTab:(ApolloFloatingTab *)tab;
 @end
 
 static ApolloFloatingTabsController *sFTController = nil;
@@ -1046,10 +1054,13 @@ static ApolloFloatingTabsController *sFTController = nil;
     ApolloFloatingBubbleView *bubble = [self bubbleForTab:tab];
     bubble.layer.zPosition = 300;
     [self.rootViewController.view bringSubviewToFront:bubble];
-    // A tucked bubble un-tucks into the hand (dock state committed on release).
-    if (tab.tucked) {
-        tab.tucked = NO;
-        [bubble updateTuckAppearance];
+    // A tucked bubble (or pile — every member shares tuck state) un-tucks
+    // into the hand; the dock state is committed on release.
+    for (ApolloFloatingTab *member in group) {
+        if (member.tucked) {
+            member.tucked = NO;
+            [[self bubbleForTab:member] updateTuckAppearance];
+        }
     }
     [UIView animateWithDuration:0.15 animations:^{
         bubble.transform = CGAffineTransformIdentity;
@@ -1150,12 +1161,13 @@ static ApolloFloatingTabsController *sFTController = nil;
         projected.y += ApolloFTProjectOffset(velocity.y);
     }
 
-    // 3) Tuck intent (single bubbles only — a tucked pile would be an
-    //    unreadable stack of slivers): physically dragged past the edge, or a
-    //    decisive horizontally-dominant outward fling.
+    // 3) Tuck intent (singles AND piles — a tucked pile renders as layered
+    //    slivers via the stack peek offset, chevron on the front only):
+    //    physically dragged past the edge, or a decisive horizontally-dominant
+    //    outward fling.
     BOOL tucked = NO;
     NSInteger side;
-    if (group.count == 1) {
+    {
         BOOL horizontalFling = fabs(velocity.x) > kFTTuckVelocityThreshold && fabs(velocity.x) > fabs(velocity.y);
         if (center.x < 0 || (projected.x < 0 && horizontalFling && velocity.x < 0)) {
             tucked = YES;
@@ -1219,6 +1231,9 @@ static ApolloFloatingTabsController *sFTController = nil;
 - (void)fanOutStack:(NSString *)stackID {
     NSArray<ApolloFloatingTab *> *members = [self tabsInStack:stackID];
     if (members.count == 0) return;
+    // Defensive: fanning implies fully visible bubbles — never leave a member
+    // behind the edge as a stray tucked sliver.
+    for (ApolloFloatingTab *member in members) member.tucked = NO;
     UIView *container = self.rootViewController.view;
     CGRect bounds = container.bounds;
     UIEdgeInsets insets = container.safeAreaInsets;
@@ -1302,18 +1317,23 @@ static ApolloFloatingTabsController *sFTController = nil;
 - (void)handleTap:(UITapGestureRecognizer *)tap {
     if (tap.state != UIGestureRecognizerStateEnded) return;
     ApolloFloatingTab *tab = [self tabForBubble:tap.view];
-    if (!tab) return;
+    if (tab) [self performTapOnTab:tab];
+}
 
-    if (tab.stackID) {
-        // Tap on a pile = the pull-apart gesture (Messenger's fan-out).
-        [self fanOutStack:tab.stackID];
-        return;
-    }
+- (void)performTapOnTab:(ApolloFloatingTab *)tab {
+    // Tucked comes first: a tap on a tucked pile REVEALS it (untucks every
+    // member as one), it never fans out from behind the edge.
     if (tab.tucked) {
-        tab.tucked = NO;
+        NSArray<ApolloFloatingTab *> *members = tab.stackID ? [self tabsInStack:tab.stackID] : @[tab];
+        for (ApolloFloatingTab *member in members) member.tucked = NO;
         ApolloFTHapticImpact(UIImpactFeedbackStyleLight);
         [self layoutBubblesAnimated:YES];
         [self persist];
+        return;
+    }
+    if (tab.stackID) {
+        // Tap on a pile = the pull-apart gesture (Messenger's fan-out).
+        [self fanOutStack:tab.stackID];
         return;
     }
     [self openTab:tab];
@@ -1742,6 +1762,15 @@ static __weak id sApolloFTArmedVC = nil;
 static CFAbsoluteTime sApolloFTArmedAt = 0;
 static char kApolloFTMenuOwnerVCKey;
 
+// The FEED surface: tapping ••• (or long-pressing) on a post cell arms the
+// cell's RDKLink instead of a VC — the resulting tab is a cold tab (opens via
+// the URL router; there's no comments screen to retain yet). Same one-shot
+// claim pattern, separate arm so the two surfaces compose independently.
+static __weak id sApolloFTArmedLink = nil;
+static __weak UIViewController *sApolloFTArmedLinkPresenter = nil;  // cap-alert host
+static CFAbsoluteTime sApolloFTArmedLinkAt = 0;
+static char kApolloFTMenuOwnerLinkKey;
+
 static id ApolloFTIvarObject(id object, const char *name) {
     if (!object || !name) return nil;
     for (Class cls = [object class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
@@ -1770,6 +1799,25 @@ static id ApolloFTMenuOwnerForController(id actionController) {
     return vc;
 }
 
+static id ApolloFTMenuLinkForController(id actionController) {
+    if (!actionController) return nil;
+    NSHashTable *holder = objc_getAssociatedObject(actionController, &kApolloFTMenuOwnerLinkKey);
+    if (holder) return holder.anyObject;
+
+    id link = sApolloFTArmedLink;
+    if (!link) return nil;
+    if (CFAbsoluteTimeGetCurrent() - sApolloFTArmedLinkAt > 1.5) {
+        sApolloFTArmedLink = nil;
+        return nil;
+    }
+    holder = [NSHashTable weakObjectsHashTable];
+    [holder addObject:link];
+    objc_setAssociatedObject(actionController, &kApolloFTMenuOwnerLinkKey,
+                             holder, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    sApolloFTArmedLink = nil;
+    return link;
+}
+
 static NSString *ApolloFTStringFromSelector(id object, SEL selector) {
     if (!object || ![object respondsToSelector:selector]) return nil;
     id value = ((id (*)(id, SEL))objc_msgSend)(object, selector);
@@ -1796,11 +1844,10 @@ static NSString *ApolloFTThumbnailURLStringForLink(id link) {
     return urlString;
 }
 
-// Post identity + metadata for a CommentsViewController, from its RDKLink
-// ivar. linkKey (t3_xxx, lowercased) is required; the rest degrade gracefully.
-static BOOL ApolloFTLinkInfoForVC(id vc, NSString **outLinkKey, NSString **outPermalink,
-                                  NSString **outTitle, NSString **outSubreddit) {
-    id link = ApolloFTIvarObject(vc, "link");
+// Post identity + metadata from an RDKLink. linkKey (t3_xxx, lowercased) is
+// required; the rest degrade gracefully.
+static BOOL ApolloFTLinkInfoForLink(id link, NSString **outLinkKey, NSString **outPermalink,
+                                    NSString **outTitle, NSString **outSubreddit) {
     if (!link) return NO;
     NSString *fullName = ApolloFTStringFromSelector(link, @selector(fullName));
     if (fullName.length == 0) {
@@ -1825,14 +1872,34 @@ static BOOL ApolloFTLinkInfoForVC(id vc, NSString **outLinkKey, NSString **outPe
     return YES;
 }
 
-// Full row-state resolve, shared by matches/title/image/perform.
-static BOOL ApolloFTMenuResolveState(id actionController, id *outVC, NSString **outLinkKey) {
+// Same, from a CommentsViewController's RDKLink ivar.
+static BOOL ApolloFTLinkInfoForVC(id vc, NSString **outLinkKey, NSString **outPermalink,
+                                  NSString **outTitle, NSString **outSubreddit) {
+    return ApolloFTLinkInfoForLink(ApolloFTIvarObject(vc, "link"),
+                                   outLinkKey, outPermalink, outTitle, outSubreddit);
+}
+
+// Full row-state resolve, shared by matches/title/image/perform. Exactly one
+// of *outVC (comments surface — warm keep) / *outLink (feed surface — cold
+// keep) is set on success.
+static BOOL ApolloFTMenuResolveState(id actionController, id *outVC, id *outLink,
+                                     NSString **outLinkKey) {
     if (!sFloatingPostTabs) return NO;
     id vc = ApolloFTMenuOwnerForController(actionController);
-    if (!vc) return NO;
+    if (vc) {
+        NSString *linkKey = nil;
+        if (!ApolloFTLinkInfoForVC(vc, &linkKey, NULL, NULL, NULL)) return NO;
+        if (outVC) *outVC = vc;
+        if (outLink) *outLink = nil;
+        if (outLinkKey) *outLinkKey = linkKey;
+        return YES;
+    }
+    id link = ApolloFTMenuLinkForController(actionController);
+    if (!link) return NO;
     NSString *linkKey = nil;
-    if (!ApolloFTLinkInfoForVC(vc, &linkKey, NULL, NULL, NULL)) return NO;
-    if (outVC) *outVC = vc;
+    if (!ApolloFTLinkInfoForLink(link, &linkKey, NULL, NULL, NULL)) return NO;
+    if (outVC) *outVC = nil;
+    if (outLink) *outLink = link;
     if (outLinkKey) *outLinkKey = linkKey;
     return YES;
 }
@@ -1879,11 +1946,35 @@ static void ApolloFTKeepOrToggleForVC(id vc) {
                    viewController:(UIViewController *)vc];
 }
 
+// Feed-surface twin of ApolloFTKeepOrToggleForVC: no comments screen exists
+// yet, so the new tab is a cold tab (URL-router open) — but it still carries
+// the full identity (title, subreddit, thumbnail) straight off the RDKLink.
+static void ApolloFTKeepOrToggleForLink(id link) {
+    NSString *linkKey = nil, *permalink = nil, *title = nil, *subreddit = nil;
+    if (!ApolloFTLinkInfoForLink(link, &linkKey, &permalink, &title, &subreddit)) return;
+
+    ApolloFloatingTabsController *controller = [ApolloFloatingTabsController shared];
+    ApolloFloatingTab *existing = [controller tabForLinkKey:linkKey];
+    if (existing) {
+        [controller closeTabs:@[existing] animated:YES];
+        return;
+    }
+    if (controller.tabs.count >= kFTMaxTabs) {
+        ApolloLog(@"[FloatingTabs] Keep (feed) requested at cap (%d) — presenting full alert", (int)kFTMaxTabs);
+        ApolloFTPresentTabsFullAlert(sApolloFTArmedLinkPresenter);
+        return;
+    }
+    NSString *thumbnailURL = ApolloFTThumbnailURLStringForLink(link);
+    [controller addTabWithLinkKey:linkKey permalink:permalink title:title
+                        subreddit:subreddit thumbnailURL:thumbnailURL
+                   viewController:nil];
+}
+
 static void ApolloFTMenuPerform(id actionController) {
-    id vc = nil;
-    NSString *linkKey = nil;
-    if (!ApolloFTMenuResolveState(actionController, &vc, &linkKey)) return;
-    ApolloFTKeepOrToggleForVC(vc);
+    id vc = nil, link = nil;
+    if (!ApolloFTMenuResolveState(actionController, &vc, &link, NULL)) return;
+    if (vc) ApolloFTKeepOrToggleForVC(vc);
+    else if (link) ApolloFTKeepOrToggleForLink(link);
 }
 
 %hook _TtC6Apollo22CommentsViewController
@@ -1904,6 +1995,51 @@ static void ApolloFTMenuPerform(id actionController) {
     %orig;
     ApolloFloatingTabsController *controller = [ApolloFloatingTabsController sharedIfExists];
     if (controller) [controller refreshSnapshotForViewController:(UIViewController *)self];
+}
+
+%end
+
+// Feed surface: the per-post ••• button and the post long-press both present
+// the same actions sheet. Arm the tapped cell's RDKLink (plus its closest VC
+// for the cap alert) so the registered spec resolves on feed/search/profile
+// lists too — anywhere these cells render. (Both cells hold the link in a
+// plain ObjC `link` ivar — verified via Hopper .cxx_destruct.)
+static void ApolloFTArmFromPostCellNode(id node) {
+    if (!sFloatingPostTabs) return;
+    id link = ApolloFTIvarObject(node, "link");
+    if (!link) return;
+    sApolloFTArmedLink = link;
+    sApolloFTArmedLinkAt = CFAbsoluteTimeGetCurrent();
+    if ([node respondsToSelector:@selector(closestViewController)]) {
+        id vc = ((id (*)(id, SEL))objc_msgSend)(node, @selector(closestViewController));
+        if ([vc isKindOfClass:[UIViewController class]]) sApolloFTArmedLinkPresenter = vc;
+    }
+}
+
+%hook _TtC6Apollo17LargePostCellNode
+
+- (void)moreOptionsButtonTappedWithSender:(id)sender {
+    ApolloFTArmFromPostCellNode(self);
+    %orig;
+}
+
+- (void)longPressedWithGestureRecognizer:(UIGestureRecognizer *)recognizer {
+    ApolloFTArmFromPostCellNode(self);
+    %orig;
+}
+
+%end
+
+%hook _TtC6Apollo19CompactPostCellNode
+
+- (void)moreOptionsButtonTappedWithSender:(id)sender {
+    ApolloFTArmFromPostCellNode(self);
+    %orig;
+}
+
+- (void)longPressedWithGestureRecognizer:(UIGestureRecognizer *)recognizer {
+    ApolloFTArmFromPostCellNode(self);
+    %orig;
 }
 
 %end
@@ -1972,14 +2108,7 @@ void ApolloFloatingTabsDebugCommand(NSString *payload) {
     ApolloFloatingTab *tab = controller.tabs[index];
 
     if ([command isEqualToString:@"tap"]) {
-        if (tab.stackID) { [controller fanOutStack:tab.stackID]; return; }
-        if (tab.tucked) {
-            tab.tucked = NO;
-            [controller layoutBubblesAnimated:NO];
-            [controller persist];
-            return;
-        }
-        [controller openTab:tab];
+        [controller performTapOnTab:tab];
         return;
     }
     if ([command isEqualToString:@"close"]) {
@@ -2029,19 +2158,19 @@ void ApolloFloatingTabsDebugCommand(NSString *payload) {
 
     spec.matches = ^BOOL(id actionController, NSString *menuTitle) {
         (void)menuTitle;
-        return ApolloFTMenuResolveState(actionController, NULL, NULL);
+        return ApolloFTMenuResolveState(actionController, NULL, NULL, NULL);
     };
     spec.title = ^NSString *(id actionController, UITableViewCell *donor) {
         (void)donor;
         NSString *linkKey = nil;
-        if (!ApolloFTMenuResolveState(actionController, NULL, &linkKey)) return nil;
+        if (!ApolloFTMenuResolveState(actionController, NULL, NULL, &linkKey)) return nil;
         BOOL tabbed = [[ApolloFloatingTabsController sharedIfExists] tabForLinkKey:linkKey] != nil;
         return tabbed ? @"Remove Floating Tab" : @"Keep in Floating Tab";
     };
     spec.image = ^UIImage *(id actionController, UITableViewCell *donor) {
         (void)donor;
         NSString *linkKey = nil;
-        if (!ApolloFTMenuResolveState(actionController, NULL, &linkKey)) return nil;
+        if (!ApolloFTMenuResolveState(actionController, NULL, NULL, &linkKey)) return nil;
         BOOL tabbed = [[ApolloFloatingTabsController sharedIfExists] tabForLinkKey:linkKey] != nil;
         return [UIImage systemImageNamed:(tabbed ? @"pin.slash" : @"pin.circle")];
     };
