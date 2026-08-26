@@ -650,6 +650,22 @@ static ApolloFollowingMap *ApolloFollowingActiveMapForTable(UITableView *tableVi
     return map.active ? map : nil;
 }
 
+// The mapping the table is CURRENTLY PRESENTING — the associated snapshot,
+// deliberately NOT rebuilt even if Apollo's model has since changed. UIKit's
+// batch-update contract wants delete/reload paths in the PRE-update layout;
+// Apollo's animated unsubscribe (sub_100643894: remove name -> rebuild
+// sectionedSubreddits -> beginUpdates/deleteRows/endUpdates) mutates the model
+// BEFORE registering the delete, so a fresh map here would already be
+// post-update and mistranslate the outgoing row (the device crash behind this:
+// UITableView's Invalid_Number_Of_Rows_In_Section assertion).
+static ApolloFollowingMap *ApolloFollowingPresentedMapForTable(UITableView *tableView) {
+    if (!ApolloFollowingTableIsList(tableView)) return nil;
+    UIViewController *vc = (UIViewController *)tableView.dataSource;
+    ApolloFollowingMap *map = objc_getAssociatedObject(vc, &kApolloFollowingMapKey);
+    if (!map) map = ApolloFollowingMapFor(vc); // nothing presented yet
+    return map.active ? map : nil;
+}
+
 #pragma mark - The list VC hooks
 
 %group ApolloFollowingList
@@ -1008,16 +1024,37 @@ static ApolloFollowingMap *ApolloFollowingActiveMapForTable(UITableView *tableVi
     return %orig(visible);
 }
 
-// Translate Apollo's model-space row mutations back into visible space while a
-// point window is open. For the single-row favorites delete the row is
+// Translate Apollo's model-space row mutations back into visible space. Apollo
+// registers these both synchronously inside the point windows (favorite star,
+// multireddit expand) and from dispatched blocks: the animated unsubscribe /
+// unfollow (sub_100643894) removes the name from subscribedSubreddits,
+// REBUILDS sectionedSubreddits, then runs beginUpdates / deleteRows(passed
+// path) / endUpdates on the main queue.
+//
+// Per UIKit's batch-update contract, DELETE and RELOAD paths are interpreted
+// against the PRE-update layout — so they translate through the PRESENTED map
+// (never rebuilt here, even though Apollo has already swapped its model; a
+// fresh map no longer contains the removed row and mistranslates it, which is
+// what crashed the 2026-08-25 device build with UITableView's
+// Invalid_Number_Of_Rows_In_Section assertion when unfollowing from the list).
+// After registering a delete the presented snapshot is dropped so endUpdates'
+// row-count queries rebuild from the fresh model. INSERT paths speak the
+// POST-update layout and rebuild first (below).
+//
+// For the star window's single-row favorites delete, the row is additionally
 // recomputed from the tapped name against the pre-mutation favorites snapshot —
 // the same answer ApolloSubredditIndexPolish's off-by-one correction produces,
 // so the two hooks converge in either install order.
 - (void)deleteRowsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths withRowAnimation:(UITableViewRowAnimation)animation {
-    void *caller = __builtin_return_address(0);
+    // No caller gate here (unlike the lookup hooks above): row mutations on
+    // this table only ever ORIGINATE in Apollo's model-space code — UIKit
+    // never self-registers them and the tweak's other modules only rewrite
+    // in-flight paths — and the originating call can reach us through another
+    // module's hook on the same selector, which would defeat a return-address
+    // check (it did: the unfollow crash fix below never engaged behind
+    // ApolloSubredditIndexPolish's outer deleteRows hook).
     BOOL windowActive = sApolloFollowingWindowDepth > 0 && (UITableView *)self == sApolloFollowingWindowTable;
-    if (!windowActive && !ApolloFollowingCallerIsApolloBinary(caller)) { %orig; return; }
-    ApolloFollowingMap *map = ApolloFollowingActiveMapForTable((UITableView *)self);
+    ApolloFollowingMap *map = ApolloFollowingPresentedMapForTable((UITableView *)self);
     if (!map) { %orig; return; }
     NSMutableArray<NSIndexPath *> *translated = [NSMutableArray arrayWithCapacity:indexPaths.count];
     for (NSIndexPath *nativePath in indexPaths) {
@@ -1041,37 +1078,43 @@ static ApolloFollowingMap *ApolloFollowingActiveMapForTable(UITableView *tableVi
             }
         }
         NSIndexPath *visible = ApolloFollowingVisiblePathForNative(map, effectiveNative);
+        if (visible && (visible.section != effectiveNative.section || visible.row != effectiveNative.row)) {
+            ApolloLog(@"[FollowingSection] delete translate %ld/%ld -> %ld/%ld",
+                      (long)effectiveNative.section, (long)effectiveNative.row,
+                      (long)visible.section, (long)visible.row);
+        }
         [translated addObject:visible ?: effectiveNative];
     }
+    // The model behind this delete may already be post-update — drop the
+    // presented snapshot so endUpdates' count queries see the fresh state.
+    ApolloFollowingInvalidateMap((UIViewController *)((UITableView *)self).dataSource);
     %orig(translated, animation);
 }
 
 - (void)insertRowsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths withRowAnimation:(UITableViewRowAnimation)animation {
-    void *caller = __builtin_return_address(0);
-    BOOL windowActive = sApolloFollowingWindowDepth > 0 && (UITableView *)self == sApolloFollowingWindowTable;
-    if (!windowActive && !ApolloFollowingCallerIsApolloBinary(caller)) { %orig; return; }
+    if (!ApolloFollowingTableIsList((UITableView *)self)) { %orig; return; }
+    // Inserts speak the POST-update layout: rebuild from the current model
+    // first (Apollo mutates its model before registering the animation), so a
+    // newly added u/ profile resolves straight into the FOLLOWING section and
+    // collation rows get the compressed row index of the fresh layout.
+    ApolloFollowingInvalidateMap((UIViewController *)((UITableView *)self).dataSource);
     ApolloFollowingMap *map = ApolloFollowingActiveMapForTable((UITableView *)self);
     if (!map) { %orig; return; }
     NSMutableArray<NSIndexPath *> *translated = [NSMutableArray arrayWithCapacity:indexPaths.count];
     for (NSIndexPath *nativePath in indexPaths) {
-        // Inserts land at positions that don't exist pre-mutation, so only the
-        // SECTION needs mapping; row indices within the special sections are
-        // untouched by the remap. (Collation sections never receive inserts.)
-        NSInteger visibleSection = ApolloFollowingVisibleSectionForNative(map, nativePath.section);
-        if (visibleSection == NSNotFound || nativePath.section >= kApolloNativeSectionCollation) {
-            [translated addObject:nativePath];
-        } else {
-            [translated addObject:[NSIndexPath indexPathForRow:nativePath.row inSection:visibleSection]];
+        NSIndexPath *visible = ApolloFollowingVisiblePathForNative(map, nativePath);
+        if (visible && (visible.section != nativePath.section || visible.row != nativePath.row)) {
+            ApolloLog(@"[FollowingSection] insert translate %ld/%ld -> %ld/%ld",
+                      (long)nativePath.section, (long)nativePath.row,
+                      (long)visible.section, (long)visible.row);
         }
+        [translated addObject:visible ?: nativePath];
     }
     %orig(translated, animation);
 }
 
 - (void)reloadRowsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths withRowAnimation:(UITableViewRowAnimation)animation {
-    void *caller = __builtin_return_address(0);
-    BOOL windowActive = sApolloFollowingWindowDepth > 0 && (UITableView *)self == sApolloFollowingWindowTable;
-    if (!windowActive && !ApolloFollowingCallerIsApolloBinary(caller)) { %orig; return; }
-    ApolloFollowingMap *map = ApolloFollowingActiveMapForTable((UITableView *)self);
+    ApolloFollowingMap *map = ApolloFollowingPresentedMapForTable((UITableView *)self);
     if (!map) { %orig; return; }
     NSMutableArray<NSIndexPath *> *translated = [NSMutableArray arrayWithCapacity:indexPaths.count];
     for (NSIndexPath *nativePath in indexPaths) {
