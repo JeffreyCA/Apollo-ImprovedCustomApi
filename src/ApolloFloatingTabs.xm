@@ -86,6 +86,10 @@ static const CGFloat kFTCloseHitRadius = 64.0;      // drop-to-close capture dis
 static const CGFloat kFTFlingVelocityThreshold = 250.0;  // below this a release stays put (same as PiP)
 static const CGFloat kFTTuckVelocityThreshold = 300.0;   // outward fling speed that tucks (same as PiP)
 static const NSInteger kFTMaxTabs = 5;
+// After a fan-out (magnet on), how long members linger spread out before
+// springing back into the pile. Long enough to tap one open or start dragging
+// one away, short enough that the pile feels like it never really left.
+static const NSTimeInterval kFTRegatherDelay = 6.0;
 // Hold-to-preview (peek-and-pop): finger travel from the press point beyond
 // this radius flips the pending action from "release opens" to "cancelled"
 // (sliding back inside re-arms it). Roomy enough that the natural hold jitter
@@ -401,6 +405,12 @@ static void ApolloFTHapticImpact(UIImpactFeedbackStyle style) {
 @property (nonatomic, strong) ApolloFloatingTab *magnetCandidate;
 @property (nonatomic, assign) BOOL closeHovering;
 @property (nonatomic, assign) BOOL openInFlight;
+// Auto-regather: fanning a pile is a temporary spread — members not dragged
+// away during the window spring back into the pile (see fanOutStack).
+@property (nonatomic, strong) NSMutableArray<ApolloFloatingTab *> *regatherGroup;
+@property (nonatomic, assign) NSInteger regatherSide;
+@property (nonatomic, assign) CGFloat regatherYFrac;
+@property (nonatomic, assign) NSUInteger regatherGeneration;
 // Hold-to-preview state (one preview at a time; finger is down for its whole
 // lifetime, so all of this is torn down on the gesture's end/cancel)
 @property (nonatomic, strong) ApolloFloatingTab *previewTab;
@@ -663,6 +673,13 @@ static ApolloFloatingTabsController *sFTController = nil;
             }];
         } else {
             [bubble removeFromSuperview];
+        }
+    }
+    if (self.regatherGroup) {
+        [self.regatherGroup removeObjectsInArray:tabsToClose];
+        if (self.regatherGroup.count < 2) {
+            self.regatherGroup = nil;
+            self.regatherGeneration++;
         }
     }
     [self normalizeStacks];
@@ -1051,6 +1068,16 @@ static ApolloFloatingTabsController *sFTController = nil;
     self.magnetCandidate = nil;
     self.closeHovering = NO;
 
+    // Dragging a just-fanned member is the "keep this one out" gesture — it
+    // leaves the pending regather; the untouched rest still spring back.
+    if (self.regatherGroup) {
+        [self.regatherGroup removeObjectsInArray:group];
+        if (self.regatherGroup.count < 2) {
+            self.regatherGroup = nil;
+            self.regatherGeneration++;
+        }
+    }
+
     ApolloFloatingBubbleView *bubble = [self bubbleForTab:tab];
     bubble.layer.zPosition = 300;
     [self.rootViewController.view bringSubviewToFront:bubble];
@@ -1249,6 +1276,9 @@ static ApolloFloatingTabsController *sFTController = nil;
     CGFloat blockHeight = (CGFloat)(members.count - 1) * kFTFanSpacing;
     CGFloat startY = MAX(minY, MIN(maxY - blockHeight, anchorY - blockHeight / 2.0));
 
+    NSInteger anchorSide = anchor.side;
+    CGFloat anchorYFrac = anchor.yFrac;
+
     NSInteger i = 0;
     for (ApolloFloatingTab *tab in members) {
         tab.stackID = nil;
@@ -1260,6 +1290,54 @@ static ApolloFloatingTabsController *sFTController = nil;
     [self layoutBubblesAnimated:YES];
     [self persist];
     ApolloLog(@"[FloatingTabs] Fanned pile of %lu apart", (unsigned long)members.count);
+
+    // The fan is a peek, not a disband: after a beat the members spring back
+    // into the pile at its old anchor. Dragging a member away during the
+    // window keeps THAT one out (spatial intent); tap-to-open doesn't cancel
+    // — coming back from the post finds the pile re-formed. Magnet off keeps
+    // the old permanent-disband behavior.
+    self.regatherGeneration++;
+    if (sFloatingPostTabsMagnet && members.count >= 2) {
+        self.regatherGroup = [members mutableCopy];
+        self.regatherSide = anchorSide;
+        self.regatherYFrac = anchorYFrac;
+        NSUInteger generation = self.regatherGeneration;
+        __weak __typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kFTRegatherDelay * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [weakSelf performRegatherForGeneration:generation];
+        });
+    } else {
+        self.regatherGroup = nil;
+    }
+}
+
+// Spring the un-dragged remains of the last fan back into one pile.
+- (void)performRegatherForGeneration:(NSUInteger)generation {
+    if (generation != self.regatherGeneration) return;
+    NSMutableArray<ApolloFloatingTab *> *members = [NSMutableArray array];
+    for (ApolloFloatingTab *tab in self.regatherGroup) {
+        if ([self.tabs containsObject:tab] && !tab.stackID && !tab.tucked) [members addObject:tab];
+    }
+    self.regatherGroup = nil;
+    if (!sFloatingPostTabsMagnet || members.count < 2) return;
+    // A finger is down (drag or hold-preview): moving bubbles now would fight
+    // it — this fan window just ends without regathering.
+    if (self.dragGroup.count > 0 || self.previewTab) return;
+
+    NSString *stackID = [[NSUUID UUID] UUIDString];
+    NSInteger order = 0;
+    for (ApolloFloatingTab *tab in members) {
+        tab.stackID = stackID;
+        tab.stackOrder = order++;
+        tab.side = self.regatherSide;
+        tab.yFrac = self.regatherYFrac;
+    }
+    ApolloFTHapticImpact(UIImpactFeedbackStyleLight);
+    [self applyZOrder];
+    [self layoutBubblesAnimated:YES];
+    [self persist];
+    ApolloLog(@"[FloatingTabs] Regathered %lu tab(s) into a pile", (unsigned long)members.count);
 }
 
 - (void)fanOutAllStacks {
