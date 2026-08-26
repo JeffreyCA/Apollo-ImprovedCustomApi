@@ -132,7 +132,8 @@ static char kAboutSubredditIconTaskKey;
              contentCenterXConstraint:(NSLayoutConstraint **)contentCenterXConstraint {
     UIImageView *iconView = [[UIImageView alloc] initWithImage:ApolloFeedShortcutIconImage(index,
                                                                                            sSubredditFeedIconStyle,
-                                                                                           layout)];
+                                                                                           layout,
+                                                                                           itemCount)];
     iconView.contentMode = UIViewContentModeScaleAspectFit;
     iconView.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -155,25 +156,30 @@ static char kAboutSubredditIconTaskKey;
     }
 
     BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
+    BOOL iconDock = layout == ApolloSubredditFeedLayoutIconDock;
     BOOL usesFourItemSideBySideLayout = sideBySide && itemCount == 4;
     CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(sSubredditFeedIconStyle, layout, itemCount);
     [NSLayoutConstraint activateConstraints:@[
         [iconView.widthAnchor constraintEqualToConstant:iconSize],
         [iconView.heightAnchor constraintEqualToConstant:iconSize]
     ]];
-    UILabel *label = [UILabel new];
-    label.text = ApolloFeedShortcutShortTitle(index);
-    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-    label.textColor = UIColor.labelColor;
-    label.adjustsFontForContentSizeCategory = YES;
-    label.adjustsFontSizeToFitWidth = YES;
-    label.minimumScaleFactor = 0.5;
-    label.lineBreakMode = NSLineBreakByClipping;
-    label.textAlignment = NSTextAlignmentCenter;
-    [label setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
-                                          forAxis:UILayoutConstraintAxisHorizontal];
+    UILabel *label = nil;
+    if (!iconDock) {
+        label = [UILabel new];
+        label.text = ApolloFeedShortcutShortTitle(index);
+        label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        label.textColor = UIColor.labelColor;
+        label.adjustsFontForContentSizeCategory = YES;
+        label.adjustsFontSizeToFitWidth = YES;
+        label.minimumScaleFactor = 0.5;
+        label.lineBreakMode = NSLineBreakByClipping;
+        label.textAlignment = NSTextAlignmentCenter;
+        [label setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                              forAxis:UILayoutConstraintAxisHorizontal];
+    }
 
-    UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:@[ iconView, label ]];
+    NSArray<UIView *> *arrangedSubviews = iconDock ? @[ iconView ] : @[ iconView, label ];
+    UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:arrangedSubviews];
     content.translatesAutoresizingMaskIntoConstraints = NO;
     content.axis = sideBySide
         ? UILayoutConstraintAxisHorizontal
@@ -2391,6 +2397,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     switch (sSubredditFeedLayout) {
         case ApolloSubredditFeedLayoutSideBySide: return @"Side-by-Side";
         case ApolloSubredditFeedLayoutGrid: return @"Grid";
+        case ApolloSubredditFeedLayoutIconDock: return @"Icon Dock";
         default: return @"Rows";
     }
 }
@@ -2409,7 +2416,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 - (void)setSubredditFeedLayout:(NSInteger)layout {
     if (layout < ApolloSubredditFeedLayoutRows ||
-        layout > ApolloSubredditFeedLayoutSideBySide) {
+        layout > ApolloSubredditFeedLayoutIconDock) {
         layout = ApolloSubredditFeedLayoutRows;
     }
     sSubredditFeedLayout = layout;
@@ -2433,7 +2440,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)presentSubredditFeedLayoutPickerFromSourceView:(UIView *)sourceView {
     __weak typeof(self) weakSelf = self;
     ApolloSettingsPresentPicker(self, sourceView, @"Feed Layout",
-                                @[@"Rows", @"Grid", @"Side-by-Side"],
+                                @[@"Rows", @"Grid", @"Side-by-Side", @"Icon Dock"],
                                 sSubredditFeedLayout,
                                 ^(NSInteger pickedIndex) {
         [weakSelf setSubredditFeedLayout:pickedIndex];

@@ -4069,7 +4069,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
         [standardDefaults setInteger:sSubredditFeedIconStyle forKey:UDKeySubredditFeedIconStyle];
     }
     if (sSubredditFeedLayout < ApolloSubredditFeedLayoutRows ||
-        sSubredditFeedLayout > ApolloSubredditFeedLayoutSideBySide) {
+        sSubredditFeedLayout > ApolloSubredditFeedLayoutIconDock) {
         sSubredditFeedLayout = ApolloSubredditFeedLayoutRows;
         [standardDefaults setInteger:sSubredditFeedLayout forKey:UDKeySubredditFeedLayout];
     }

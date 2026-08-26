@@ -253,6 +253,7 @@ typedef NS_ENUM(NSInteger, ApolloSubredditFeedLayout) {
     ApolloSubredditFeedLayoutRows = 0,
     ApolloSubredditFeedLayoutGrid = 1,
     ApolloSubredditFeedLayoutSideBySide = 2,
+    ApolloSubredditFeedLayoutIconDock = 3,
 };
 // Home / Popular / All icon appearance and arrangement. Effective only with
 // the list master on.

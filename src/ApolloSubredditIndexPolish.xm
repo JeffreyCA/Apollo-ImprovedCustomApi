@@ -87,7 +87,9 @@ static ApolloSubredditFeedLayout ApolloMetaFeedEffectiveLayout(UITableView *tabl
 }
 
 static BOOL ApolloMetaFeedLayoutUsesShortcuts(ApolloSubredditFeedLayout layout) {
-    return layout == ApolloSubredditFeedLayoutGrid || layout == ApolloSubredditFeedLayoutSideBySide;
+    return layout == ApolloSubredditFeedLayoutGrid ||
+           layout == ApolloSubredditFeedLayoutSideBySide ||
+           layout == ApolloSubredditFeedLayoutIconDock;
 }
 
 static __unsafe_unretained UITableView *sApolloFavoriteMutationTable = nil;
@@ -214,6 +216,7 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
 
     NSString *title = ApolloFeedShortcutShortTitle(feedIndex);
     BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
+    BOOL iconDock = layout == ApolloSubredditFeedLayoutIconDock;
     _feedIndex = feedIndex;
     _feedIconStyle = sSubredditFeedIconStyle;
     self.isAccessibilityElement = YES;
@@ -225,7 +228,8 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
 
     _iconView = [[UIImageView alloc] initWithImage:ApolloFeedShortcutIconImage(feedIndex,
                                                                                (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
-                                                                               layout)];
+                                                                               layout,
+                                                                               itemCount)];
     _iconView.translatesAutoresizingMaskIntoConstraints = NO;
     _iconView.contentMode = UIViewContentModeScaleAspectFit;
 
@@ -246,19 +250,22 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
         [_iconView.heightAnchor constraintEqualToConstant:iconSize]
     ]];
 
-    _titleLabel = [UILabel new];
-    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _titleLabel.text = title;
-    _titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-    _titleLabel.adjustsFontForContentSizeCategory = YES;
-    _titleLabel.textAlignment = NSTextAlignmentCenter;
-    _titleLabel.numberOfLines = 1;
-    _titleLabel.adjustsFontSizeToFitWidth = YES;
-    _titleLabel.minimumScaleFactor = 0.5;
-    _titleLabel.lineBreakMode = NSLineBreakByClipping;
-    [_titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
-                                                 forAxis:UILayoutConstraintAxisHorizontal];
-    UIStackView *contentStack = [[UIStackView alloc] initWithArrangedSubviews:@[_iconBadgeView, _titleLabel]];
+    if (!iconDock) {
+        _titleLabel = [UILabel new];
+        _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _titleLabel.text = title;
+        _titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        _titleLabel.adjustsFontForContentSizeCategory = YES;
+        _titleLabel.textAlignment = NSTextAlignmentCenter;
+        _titleLabel.numberOfLines = 1;
+        _titleLabel.adjustsFontSizeToFitWidth = YES;
+        _titleLabel.minimumScaleFactor = 0.5;
+        _titleLabel.lineBreakMode = NSLineBreakByClipping;
+        [_titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                                     forAxis:UILayoutConstraintAxisHorizontal];
+    }
+    NSArray<UIView *> *arrangedSubviews = iconDock ? @[ _iconBadgeView ] : @[ _iconBadgeView, _titleLabel ];
+    UIStackView *contentStack = [[UIStackView alloc] initWithArrangedSubviews:arrangedSubviews];
     contentStack.translatesAutoresizingMaskIntoConstraints = NO;
     contentStack.axis = sideBySide ? UILayoutConstraintAxisHorizontal : UILayoutConstraintAxisVertical;
     contentStack.alignment = UIStackViewAlignmentCenter;
@@ -278,12 +285,13 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
     ]];
     BOOL preservesModeratorLabelWidth = sideBySide && itemCount == 3 && [title isEqualToString:@"Moderator"];
     if (!usesFourItemSideBySideLayout && !preservesModeratorLabelWidth) {
+        CGFloat horizontalMargin = sideBySide ? 6.0 : 4.0;
         [NSLayoutConstraint activateConstraints:@[
-            [contentStack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor constant:sideBySide ? 6.0 : 4.0],
-            [contentStack.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:sideBySide ? -6.0 : -4.0]
+            [contentStack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor constant:horizontalMargin],
+            [contentStack.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-horizontalMargin]
         ]];
     }
-    if (!sideBySide) {
+    if (!sideBySide && !iconDock) {
         [_titleLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.widthAnchor constant:-8.0].active = YES;
     }
 
@@ -313,7 +321,9 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
     minusView.translatesAutoresizingMaskIntoConstraints = NO;
     [_editDeleteBadgeView addSubview:minusView];
     [self addSubview:_editDeleteButton];
-    CGFloat titleWidth = ceil([title sizeWithAttributes:@{ NSFontAttributeName: _titleLabel.font }].width);
+    CGFloat titleWidth = sideBySide
+        ? ceil([title sizeWithAttributes:@{ NSFontAttributeName: _titleLabel.font }].width)
+        : 0.0;
     CGFloat targetCenterOffset = sideBySide
         ? -(iconSize + contentStack.spacing + titleWidth) / 2.0 + 1.0
         : -iconSize / 2.0 + 1.0;
@@ -349,7 +359,9 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
 - (void)apollo_applyColorsWithAccent:(UIColor *)accent textColor:(UIColor *)textColor {
     UIColor *interactionColor = self.iconBackgroundColor ?: accent;
     self.titleTextColor = textColor;
-    self.backgroundColor = self.highlighted ? [interactionColor colorWithAlphaComponent:0.10] : UIColor.clearColor;
+    self.backgroundColor = self.highlighted
+        ? [interactionColor colorWithAlphaComponent:0.10]
+        : UIColor.clearColor;
     self.iconBadgeView.backgroundColor = UIColor.clearColor;
     self.titleLabel.textColor = textColor;
 }
@@ -2847,7 +2859,8 @@ static void ApolloSubredditIndexApplyMetaFeedShortcuts(UITableView *tableView, U
         }
         UIImage *icon = ApolloFeedShortcutIconImage(feedIndex,
                                                     (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
-                                                    ApolloSubredditFeedLayoutRows);
+                                                    ApolloSubredditFeedLayoutRows,
+                                                    visibleFeedIndexes.count);
         if (icon) cell.imageView.image = icon;
         return;
     }

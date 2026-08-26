@@ -1,5 +1,8 @@
 #import "ApolloFeedShortcutsAppearance.h"
 
+#include <math.h>
+#include <stdlib.h>
+
 #import "ApolloCommon.h"
 #import "UserDefaultConstants.h"
 
@@ -17,12 +20,18 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
     stack.distribution = UIStackViewDistributionFillEqually;
     stack.spacing = 0.0;
     [hostView addSubview:stack];
+    CGFloat horizontalInset = layout == ApolloSubredditFeedLayoutIconDock ? 28.0 : 14.0;
     [NSLayoutConstraint activateConstraints:@[
-        [stack.leadingAnchor constraintEqualToAnchor:hostView.leadingAnchor constant:14.0],
-        [stack.trailingAnchor constraintEqualToAnchor:hostView.trailingAnchor constant:-14.0],
+        [stack.leadingAnchor constraintEqualToAnchor:hostView.leadingAnchor constant:horizontalInset],
+        [stack.trailingAnchor constraintEqualToAnchor:hostView.trailingAnchor constant:-horizontalInset],
         [stack.topAnchor constraintEqualToAnchor:hostView.topAnchor constant:8.0],
         [stack.bottomAnchor constraintEqualToAnchor:hostView.bottomAnchor constant:-8.0]
     ]];
+
+    if (layout == ApolloSubredditFeedLayoutIconDock) {
+        if (installedLayoutGuides) *installedLayoutGuides = @[];
+        return @[];
+    }
 
     BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
     NSMutableArray<UIView *> *separators =
@@ -144,32 +153,129 @@ static UIImage *ApolloFeedShortcutGlyph(NSInteger index) {
         imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
+static CGFloat ApolloFeedShortcutOpaqueMaxDimension(UIImage *image) {
+    CGImageRef imageRef = image.CGImage;
+    if (!imageRef) return MAX(image.size.width, image.size.height);
+
+    size_t width = CGImageGetWidth(imageRef);
+    size_t height = CGImageGetHeight(imageRef);
+    size_t bytesPerRow = width;
+    uint8_t *alpha = calloc(height, bytesPerRow);
+    if (!alpha) return MAX(image.size.width, image.size.height);
+
+    CGContextRef context = CGBitmapContextCreate(alpha,
+                                                  width,
+                                                  height,
+                                                  8,
+                                                  bytesPerRow,
+                                                  NULL,
+                                                  (CGBitmapInfo)kCGImageAlphaOnly);
+    if (!context) {
+        free(alpha);
+        return MAX(image.size.width, image.size.height);
+    }
+    CGContextDrawImage(context, CGRectMake(0.0, 0.0, width, height), imageRef);
+
+    size_t minX = width;
+    size_t minY = height;
+    size_t maxX = 0;
+    size_t maxY = 0;
+    BOOL foundOpaquePixel = NO;
+    for (size_t y = 0; y < height; y++) {
+        for (size_t x = 0; x < width; x++) {
+            if (alpha[y * bytesPerRow + x] == 0) continue;
+            foundOpaquePixel = YES;
+            minX = MIN(minX, x);
+            minY = MIN(minY, y);
+            maxX = MAX(maxX, x);
+            maxY = MAX(maxY, y);
+        }
+    }
+    CGContextRelease(context);
+    free(alpha);
+    if (!foundOpaquePixel) return MAX(image.size.width, image.size.height);
+
+    CGFloat opaqueWidth = (CGFloat)(maxX - minX + 1) / image.scale;
+    CGFloat opaqueHeight = (CGFloat)(maxY - minY + 1) / image.scale;
+    return MAX(opaqueWidth, opaqueHeight);
+}
+
+static UIImage *ApolloFeedShortcutRenderedBareGlyph(UIImage *glyph,
+                                                     UIColor *color,
+                                                     CGFloat canvasSize,
+                                                     CGFloat glyphSize) {
+    static const CGFloat referenceSize = 64.0;
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.opaque = NO;
+    UIImage *coloredGlyph = [glyph imageWithTintColor:color
+                                         renderingMode:UIImageRenderingModeAlwaysOriginal];
+    UIGraphicsImageRenderer *referenceRenderer = [[UIGraphicsImageRenderer alloc]
+        initWithSize:CGSizeMake(referenceSize, referenceSize)
+        format:format];
+    UIImage *referenceImage = [referenceRenderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        [coloredGlyph drawInRect:CGRectMake(0.0, 0.0, referenceSize, referenceSize)];
+    }];
+    CGFloat opaqueMaxDimension = ApolloFeedShortcutOpaqueMaxDimension(referenceImage);
+    CGFloat drawScale = opaqueMaxDimension > 0.0 ? glyphSize / opaqueMaxDimension : 1.0;
+    CGFloat drawSize = referenceSize * drawScale;
+
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
+        initWithSize:CGSizeMake(canvasSize, canvasSize)
+        format:format];
+    UIImage *icon = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        CGRect drawRect = CGRectMake((canvasSize - drawSize) / 2.0,
+                                     (canvasSize - drawSize) / 2.0,
+                                     drawSize,
+                                     drawSize);
+        [referenceImage drawInRect:drawRect];
+    }];
+    return [icon imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+}
+
+static NSNumber *ApolloFeedShortcutIconCacheKey(NSInteger index,
+                                                ApolloSubredditFeedIconStyle style,
+                                                CGFloat canvasSize,
+                                                CGFloat glyphMetric) {
+    static const NSInteger kBucketStride = 128;
+    static const NSInteger kFeedCount = 4;
+    NSInteger canvasBucket = (NSInteger)lround(canvasSize * 2.0);
+    NSInteger glyphBucket = (NSInteger)lround(glyphMetric * 2.0);
+    NSInteger key = ((((NSInteger)style * kBucketStride + canvasBucket) * kBucketStride + glyphBucket) *
+                     kFeedCount) + index;
+    return @(key);
+}
+
 UIImage *ApolloFeedShortcutIconImage(NSInteger index,
                                      ApolloSubredditFeedIconStyle style,
-                                     ApolloSubredditFeedLayout layout) {
+                                     ApolloSubredditFeedLayout layout,
+                                     NSUInteger itemCount) {
     if (style == ApolloSubredditFeedIconStyleClassic) {
         return [ApolloSubredditClassicMetaFeedIcon(index) imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
     }
 
+    BOOL tinted = style == ApolloSubredditFeedIconStyleTinted;
+    CGFloat canvasSize = tinted
+        ? ApolloFeedShortcutDisplayIconSize(style, layout, itemCount)
+        : (layout == ApolloSubredditFeedLayoutRows ? 34.0 : 40.0);
+    CGFloat glyphMetric = tinted
+        ? canvasSize - (layout == ApolloSubredditFeedLayoutGrid ? 6.0 : 4.0)
+        : (layout == ApolloSubredditFeedLayoutRows ? 6.0 : 7.0);
     static NSMutableDictionary<NSNumber *, UIImage *> *cache = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{ cache = [NSMutableDictionary dictionary]; });
-    NSNumber *cacheKey = @(index + style * 10 + layout * 100);
+    NSNumber *cacheKey = ApolloFeedShortcutIconCacheKey(index, style, canvasSize, glyphMetric);
     UIImage *cached = cache[cacheKey];
     if (cached) return cached;
 
     UIImage *glyph = ApolloFeedShortcutGlyph(index);
     if (!glyph) return nil;
     UIColor *color = ApolloFeedShortcutColor(index);
-    if (style == ApolloSubredditFeedIconStyleTinted &&
-        layout == ApolloSubredditFeedLayoutSideBySide) {
-        UIImage *icon = [glyph imageWithTintColor:color renderingMode:UIImageRenderingModeAlwaysOriginal];
+    if (tinted) {
+        UIImage *icon = ApolloFeedShortcutRenderedBareGlyph(glyph, color, canvasSize, glyphMetric);
         cache[cacheKey] = icon;
         return icon;
     }
 
-    CGFloat canvasSize = layout == ApolloSubredditFeedLayoutRows ? 34.0 : 40.0;
-    CGFloat glyphInset = layout == ApolloSubredditFeedLayoutRows ? 6.0 : 7.0;
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
     format.opaque = NO;
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
@@ -181,22 +287,22 @@ UIImage *ApolloFeedShortcutIconImage(NSInteger index,
         BOOL usesTile = style == ApolloSubredditFeedIconStyleSoftTile ||
                         style == ApolloSubredditFeedIconStyleSolidTile;
         if (usesCircle || usesTile) {
-            UIColor *fillColor = style == ApolloSubredditFeedIconStyleSoftTile
-                ? [color colorWithAlphaComponent:0.14]
-                : color;
-            [fillColor setFill];
             UIBezierPath *path = usesTile
                 ? [UIBezierPath bezierPathWithRoundedRect:bounds cornerRadius:canvasSize * 0.25]
                 : [UIBezierPath bezierPathWithOvalInRect:bounds];
+            UIColor *fillColor = color;
+            if (style == ApolloSubredditFeedIconStyleSoftTile) {
+                fillColor = [color colorWithAlphaComponent:0.14];
+            }
+            [fillColor setFill];
             [path fill];
         }
-        UIColor *glyphColor = (style == ApolloSubredditFeedIconStyleTinted ||
-                               style == ApolloSubredditFeedIconStyleSoftTile)
+        UIColor *glyphColor = style == ApolloSubredditFeedIconStyleSoftTile
             ? color
             : UIColor.whiteColor;
         UIImage *coloredGlyph = [glyph imageWithTintColor:glyphColor
                                              renderingMode:UIImageRenderingModeAlwaysOriginal];
-        [coloredGlyph drawInRect:CGRectInset(bounds, glyphInset, glyphInset)];
+        [coloredGlyph drawInRect:CGRectInset(bounds, glyphMetric, glyphMetric)];
     }];
     icon = [icon imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
     cache[cacheKey] = icon;
@@ -218,7 +324,7 @@ ApolloSubredditFeedLayout ApolloFeedShortcutEffectiveLayout(ApolloSubredditFeedL
         return ApolloSubredditFeedLayoutRows;
     }
 
-    if (availableWidth > 0.0 && itemCount >= 2) {
+    if (availableWidth > 0.0) {
         UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody
                                   compatibleWithTraitCollection:traitCollection];
         CGFloat iconWidth = ApolloFeedShortcutDisplayIconSize(iconStyle,
@@ -243,6 +349,8 @@ ApolloSubredditFeedLayout ApolloFeedShortcutEffectiveLayout(ApolloSubredditFeedL
 
 CGFloat ApolloFeedShortcutLayoutHeight(ApolloSubredditFeedLayout layout,
                                        UITraitCollection *traitCollection) {
+    if (layout == ApolloSubredditFeedLayoutIconDock) return 64.0;
+
     UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody
                               compatibleWithTraitCollection:traitCollection];
     if (layout == ApolloSubredditFeedLayoutSideBySide) {
@@ -272,12 +380,16 @@ CGFloat ApolloFeedShortcutDisplayIconSize(ApolloSubredditFeedIconStyle style,
                                           ApolloSubredditFeedLayout layout,
                                           NSUInteger itemCount) {
     if (layout == ApolloSubredditFeedLayoutRows) return 34.0;
-    if (layout == ApolloSubredditFeedLayoutGrid) return 46.0;
-    if (style == ApolloSubredditFeedIconStyleTinted) return 22.0;
+    if (layout == ApolloSubredditFeedLayoutGrid) {
+        return style == ApolloSubredditFeedIconStyleTinted ? 40.0 : 46.0;
+    }
+    if (layout == ApolloSubredditFeedLayoutIconDock) return 34.0;
+    if (style == ApolloSubredditFeedIconStyleTinted) return itemCount == 4 ? 28.0 : 30.0;
     return itemCount == 4 ? 30.0 : 32.0;
 }
 
 CGFloat ApolloFeedShortcutContentSpacing(ApolloSubredditFeedLayout layout, NSUInteger itemCount) {
     if (layout == ApolloSubredditFeedLayoutSideBySide) return itemCount == 4 ? 3.5 : 7.0;
+    if (layout == ApolloSubredditFeedLayoutIconDock) return 0.0;
     return 4.0;
 }

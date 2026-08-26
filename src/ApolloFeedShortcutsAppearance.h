@@ -21,7 +21,8 @@ NSString *ApolloFeedShortcutDetail(NSInteger index);
 UIColor *ApolloFeedShortcutColor(NSInteger index);
 UIImage *ApolloFeedShortcutIconImage(NSInteger index,
                                      ApolloSubredditFeedIconStyle style,
-                                     ApolloSubredditFeedLayout layout);
+                                     ApolloSubredditFeedLayout layout,
+                                     NSUInteger itemCount);
 
 ApolloSubredditFeedLayout ApolloFeedShortcutEffectiveLayout(ApolloSubredditFeedLayout preferredLayout,
                                                              NSArray<NSNumber *> *visibleIndexes,
