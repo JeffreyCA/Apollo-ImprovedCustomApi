@@ -156,6 +156,16 @@ static NSString *const kApolloDeadLibreTranslateURL = @"https://libretranslate.d
 // about it, instead of a generic "translation failed" (issue #995).
 static NSString *const kApolloTranslationQuotaErrorKey = @"ApolloTranslationQuotaError";
 
+// userInfo marker on errors from the on-device Apple leg. Apple failures are
+// routine per-item conditions — an undetectable short title, a language model
+// Apple retries or prompts to download itself — that by contract leave the
+// original text, never evidence of the network-provider outage the failure
+// toast exists to explain. Without this, browsing an ENGLISH feed with Apple
+// selected tripped "Translation Failed" off three undetectable titles, with
+// network advice (keys, quotas) that means nothing to an Apple user (#995
+// device testing). The toast counter ignores errors carrying this marker.
+static NSString *const kApolloTranslationAppleLegErrorKey = @"ApolloTranslationAppleLegError";
+
 // Single chokepoint mapping the stored LibreTranslate URL setting to a usable
 // endpoint — %ctor, backup-restore, and the settings screen all route through
 // this so the dead .de default migrates everywhere at once.
@@ -3786,7 +3796,8 @@ static void ApolloTranslateViaAppleWithSource(NSString *text,
         // Could not confidently fingerprint the full input — do not guess (a wrong source
         // makes Apple prompt for the wrong language and fail). Leave the original text.
         NSError *err = [NSError errorWithDomain:@"ApolloTranslation" code:301
-            userInfo:@{NSLocalizedDescriptionKey: @"Apple: source language undetected"}];
+            userInfo:@{NSLocalizedDescriptionKey: @"Apple: source language undetected",
+                       kApolloTranslationAppleLegErrorKey: @YES}];
         if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, err); });
         return;
     }
@@ -3802,8 +3813,16 @@ static void ApolloTranslateViaAppleWithSource(NSString *text,
                                 from:source
                                   to:targetLanguage
                           completion:^(NSString *translated, NSError *error) {
-        // The Swift shim already delivers on the main thread.
-        if (completion) completion(translated, error);
+        // The Swift shim already delivers on the main thread. Stamp forwarded
+        // failures as Apple-leg so the outage-toast counter ignores them (see
+        // kApolloTranslationAppleLegErrorKey).
+        NSError *tagged = error;
+        if (error && ![error.userInfo[kApolloTranslationAppleLegErrorKey] boolValue]) {
+            NSMutableDictionary *info = [error.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+            info[kApolloTranslationAppleLegErrorKey] = @YES;
+            tagged = [NSError errorWithDomain:error.domain code:error.code userInfo:info];
+        }
+        if (completion) completion(translated, tagged);
     }];
 #else
     NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:300
@@ -4225,6 +4244,9 @@ static void ApolloNoteTranslationFailureForToast(NSError *error) {
     // Cooldown replays are the same failure re-delivered to rebuilt cells, not
     // new evidence that the provider is down.
     if ([error.userInfo[kApolloTranslationCooldownReplayKey] boolValue]) return;
+    // On-device Apple failures leave the original text by design and are not
+    // outage evidence — never count them (see kApolloTranslationAppleLegErrorKey).
+    if ([error.userInfo[kApolloTranslationAppleLegErrorKey] boolValue]) return;
     sConsecutiveTranslationFailures++;
     if (sConsecutiveTranslationFailures < kApolloTranslationFailureToastThreshold) return;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -4279,9 +4301,10 @@ void ApolloTranslationDebugProbe(NSString *spec) {
         // quota= is the flag that decides whether the user sees the
         // "Translation Limit Reached" notification rather than a generic
         // failure, so surface it here — it isn't visible in the message text.
-        ApolloLog(@"[Translation][Probe] leg=%@ target=%@ ok=%d quota=%d translated='%@' error=%@",
+        ApolloLog(@"[Translation][Probe] leg=%@ target=%@ ok=%d quota=%d apple=%d translated='%@' error=%@",
                   leg, target, translated.length > 0,
                   [error.userInfo[kApolloTranslationQuotaErrorKey] boolValue],
+                  [error.userInfo[kApolloTranslationAppleLegErrorKey] boolValue],
                   translated ?: @"(nil)",
                   error ? [NSString stringWithFormat:@"%@/%ld %@", error.domain, (long)error.code, error.localizedDescription] : @"none");
     };
@@ -4297,6 +4320,15 @@ void ApolloTranslationDebugProbe(NSString *spec) {
         ApolloTranslateViaLibre(text, target, report);
     } else if ([leg isEqualToString:@"microsoft"]) {
         ApolloTranslateViaMicrosoft(text, target, report);
+    } else if ([leg isEqualToString:@"apple"]) {
+        ApolloTranslateViaApple(text, target, report);
+    } else if ([leg isEqualToString:@"appletoast"]) {
+        // Drives the noter with an Apple-leg-tagged error: the counter must NOT
+        // move (regression check for the English-feed false "Translation Failed").
+        ApolloNoteTranslationFailureForToast([NSError errorWithDomain:@"ApolloTranslation" code:301
+                                                             userInfo:@{NSLocalizedDescriptionKey: text,
+                                                                        kApolloTranslationAppleLegErrorKey: @YES}]);
+        ApolloLog(@"[Translation][Probe] appletoast consecutive=%lu", (unsigned long)sConsecutiveTranslationFailures);
     } else if ([leg isEqualToString:@"quotatoast"]) {
         // Drives the quota-specific notification path (issue #995).
         ApolloNoteTranslationFailureForToast([NSError errorWithDomain:@"ApolloTranslation" code:110
