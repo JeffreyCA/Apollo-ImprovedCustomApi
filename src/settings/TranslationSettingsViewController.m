@@ -283,7 +283,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     NSMutableArray<ApolloSettingsSection *> *sections = [NSMutableArray array];
     [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"General"
-                                         footer:@"Translates comments in place, and optionally post titles. Translation Mode sets how it kicks in:\n\n• Automatic — opens everything already translated.\n• Tap to Translate — keeps the original language and shows a tappable \"Translate\" line under comments plus a language marker next to post stats; tap to translate that item, tap again to switch back.\n• Manual (Globe) — nothing is translated until you tap the globe per feed or thread.\n\nThe Details toggles control the \"Translated from …\" lines and language markers. Match App Colour tints them with your theme's accent instead of green.\n\nPrimary Provider picks who does the translating:\n\n• Google — free, no setup, but it limits how much one connection may translate; heavy use can be cut off until it resets.\n• Apple (On-Device) — private, offline and unlimited, and never falls back to a network provider. Downloads each language once (iOS 18+).\n• Microsoft — needs a free Azure key (2 million characters a month) and is the most reliable network option.\n• LibreTranslate — needs an API key, or your own self-hosted server.\n\nIf a network provider fails, the tweak automatically tries another one that's configured."
+                                         footer:@"Translates comments and post titles in place.\n\nAutomatic translates on open. Tap to Translate adds a per-item tap. Manual waits for the globe.\n\nDetails rows add \"Translated from …\" labels.\n\nGoogle is free but rate-limits heavy use. Apple is offline and unlimited (iOS 18+). Microsoft and LibreTranslate need their own keys, set up below."
                                            rows:@[ enableBulk, translationMode, translateTitles, showDetails, titleDetails, markerColor, targetLanguage, provider ]]];
 
     // Apollo's own Translate button (the native action-sheet item on comment/post
@@ -301,7 +301,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                                       onToggle:^(UISwitch *sender) { [weakSelf appleTranslateSheetSwitchToggled:sender]; }];
         [sections addObject:
             [ApolloSettingsSection sectionWithTitle:@"Context Menu"
-                                             footer:@"Opens iOS's native Translate sheet on the Translate action instead of a Google Translate page. Unlike the Apple provider above, this isn't always on-device; iOS may send text to Apple's servers unless offline-only translation is enabled in the system Translate app."
+                                             footer:@"Opens iOS's Translate sheet instead of a Google Translate page. Not always on-device — iOS may send text to Apple's servers unless offline mode is on in the Translate app."
                                                rows:@[ appleSheet ]]];
     }
 #endif
@@ -312,11 +312,11 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                                            rows:skipRows]];
     [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"Microsoft"
-                                         footer:@"Microsoft (Azure AI Translator) needs your own free API key. Create a free Azure account, add a Translator resource on the free F0 plan (2 million characters per month, renewed monthly), then paste one of its keys here. Region is the resource's location — leave it empty only if your resource is Global."
+                                         footer:@"Free Azure key — 2 million characters a month. Add a Translator resource on the F0 plan in the Azure portal, then paste a key here. Region is the resource's location; leave empty only if it's Global."
                                            rows:@[ microsoftAPIKey, microsoftRegion ]]];
     [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"LibreTranslate"
-                                         footer:@"An API key is REQUIRED — LibreTranslate's free public instances shut down, and every remaining public instance (including the default URL) rejects requests without a key. Get one at portal.libretranslate.com, or point the URL at your own self-hosted instance, which needs no key. Without a key LibreTranslate cannot translate anything."
+                                         footer:@"A key is required — the free public instances shut down. Get one at portal.libretranslate.com, or point the URL at your own server, which needs no key."
                                            rows:@[ libreURL, libreAPIKey ]]];
 
     return sections;
@@ -693,10 +693,10 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     NSString *message = nil;
     if ([provider isEqualToString:@"libre"] && sLibreTranslateAPIKey.length == 0) {
         title = @"API Key Required";
-        message = @"LibreTranslate won't translate anything until you enter an API key below.\n\nThe free public instances have shut down, and the ones that remain require a key from portal.libretranslate.com. If you run your own LibreTranslate server, set the API URL to it instead — self-hosted instances don't need a key.";
+        message = @"LibreTranslate needs a key to work. Get one at portal.libretranslate.com, or point the API URL at your own server, which needs no key.";
     } else if ([provider isEqualToString:@"microsoft"] && sMicrosoftTranslateAPIKey.length == 0) {
         title = @"API Key Required";
-        message = @"Microsoft won't translate anything until you enter an API key below.\n\nCreate a free Azure account, add a Translator resource on the free F0 plan (2 million characters a month), then paste one of its keys into the Microsoft section. Enter the resource's region too, unless it's Global.";
+        message = @"Microsoft needs a key to work. Add a Translator resource on Azure's free F0 plan, then paste a key below along with its region.";
     }
     if (!title) return;
 
