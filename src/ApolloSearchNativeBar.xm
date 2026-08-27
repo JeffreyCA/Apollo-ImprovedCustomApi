@@ -250,7 +250,9 @@ static UIViewController *NSBFeedVCForView(UIView *view) {
 
 // MARK: - Driving Apollo's pipeline
 
-static void NSBFinishScrollBack(void); // defined with the tween, below
+// Both defined with the tween, below.
+static void NSBFinishScrollBack(void);
+static void NSBScrollBackAfterClear(UIViewController *vc, BOOL animated);
 
 static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     UITextField *field = (UITextField *)ApolloNSBObjectIvar(vc, "searchTextField");
@@ -272,22 +274,22 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     if ([vc respondsToSelector:@selector(textFieldEditingChangedWithSender:)]) {
         ((void (*)(id, SEL, id))objc_msgSend)(vc, @selector(textFieldEditingChangedWithSender:), field);
     }
-    // Query cleared while the session stays active: the surfaced offset would
-    // otherwise linger, leaving the freshly re-shown header's tail ghosting
-    // through the glass nav. Park back at rest now and once more after
-    // Apollo's reload settles; a new keystroke or a user drag supersedes it.
+    // Query cleared while the session stays active — the field's own clear
+    // button, which leaves the bar focused. The surfaced offset would otherwise
+    // linger, leaving the freshly re-shown header's tail ghosting through the
+    // glass nav. This is the same restore the cancel performs, and it has to be
+    // a SCROLL for the same reason: the chrome is parked hundreds of points off
+    // the top, and dropping a banner-sized header back into place in one frame
+    // reads as a flash rather than a transition. A second pass after Apollo's
+    // reload settles catches whatever it left out of place; a new keystroke or
+    // a user drag supersedes both.
     if (text.length == 0) {
-        UIScrollView *table = NSBTableForVC(vc);
-        void (^park)(void) = ^{
-            UIScrollView *sv = NSBTableForVC(vc);
-            if (!sv || sv != sNSBSessionTable || sNSBUserScrolled) return;
-            if (sv.isDragging || sv.isDecelerating || sv.isTracking) return;
-            if (NSBSessionQueryText().length > 0) return; // user typed again
-            CGFloat rest = -sv.adjustedContentInset.top;
-            if (sv.contentOffset.y > rest + 1.0) [sv setContentOffset:CGPointMake(0.0, rest) animated:NO];
-        };
-        if (table) park();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), park);
+        NSBScrollBackAfterClear(vc, YES);
+        __weak UIViewController *weakVC = vc;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            NSBScrollBackAfterClear(weakVC, NO);
+        });
     }
 }
 
@@ -388,6 +390,37 @@ static BOOL NSBTweenHoldsOffset(UIScrollView *sv, CGFloat *y) {
 }
 
 static void NSBRestoreHeaderForTable(UIScrollView *sv);
+
+// Restore the feed after the query is cleared with the bar left focused.
+// `animated` runs the same 0.32s scroll-back the cancel uses; the delayed
+// backstop passes NO and only snaps whatever Apollo's reload left out of
+// place, never while a scroll-back still owns the offset.
+static void NSBScrollBackAfterClear(UIViewController *vc, BOOL animated) {
+    if (!vc) return;
+    UIScrollView *sv = NSBTableForVC(vc);
+    if (!sv || sv != sNSBSessionTable || sNSBUserScrolled) return;
+    if (sv.isDragging || sv.isDecelerating || sv.isTracking) return;
+    if (NSBSessionQueryText().length > 0) return;   // user typed again
+    if (sNSBTween && sNSBTween.link) return;        // a scroll-back already owns it
+    CGFloat rest = -sv.adjustedContentInset.top;
+    if (sv.contentOffset.y <= rest + 1.0) return;
+    // The banner has to be on screen to be seen sliding in; the surfacing pins
+    // are already down (the query is empty), so nothing re-hides it.
+    NSBRestoreHeaderForTable(sv);
+    if (!animated) {
+        [sv setContentOffset:CGPointMake(0.0, rest) animated:NO];
+        return;
+    }
+    ApolloNSBScrollTween *tween = [[ApolloNSBScrollTween alloc] init];
+    tween.scrollView = sv;
+    tween.fromY = sv.contentOffset.y;
+    tween.toY = rest;
+    tween.duration = 0.32;
+    tween.completion = ^{ sNSBTween = nil; };
+    sNSBTween = tween;
+    [tween start];
+}
+
 static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc);
 static void NSBApolloDismissNow(UIViewController *vc);
 
