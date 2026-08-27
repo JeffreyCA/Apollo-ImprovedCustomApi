@@ -352,6 +352,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sFeedVideoScrubber forKey:UDKeyFeedVideoScrubber];
 }
 
+- (void)forwardSwipeForgetSwitchToggled:(UISwitch *)sender {
+    sForwardSwipeForgetAfterScrolling = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sForwardSwipeForgetAfterScrolling
+                                            forKey:UDKeyForwardSwipeForgetAfterScrolling];
+}
+
 - (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
         case ImageUploadProviderReddit:   return @"Reddit";
@@ -1388,6 +1394,12 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return sFeedVideoScrubber; }
                                   onToggle:^(UISwitch *sender) { [weakSelf feedVideoScrubberSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *forwardSwipeForget =
+        [ApolloSettingsRow switchRowWithID:@"gen.forwardSwipeForget"
+                                     title:@"Forget Forward Swipe After Scrolling"
+                                      isOn:^BOOL { return sForwardSwipeForgetAfterScrolling; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf forwardSwipeForgetSwitchToggled:sender]; }];
+
     ApolloSettingsRow *blockAnnouncements =
         [ApolloSettingsRow switchRowWithID:@"gen.blockAnnouncements"
                                      title:@"Block Announcements"
@@ -1416,8 +1428,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list. Feed Video Scrubber: drag the progress bar at the bottom of a video — in the feed or on the post itself — to scrub it without opening the video. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
-                                              rows:@[ textPostThumbnails, infoRow, feedScrubber, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
+                                            footer:@"Small tweaks for the post list.\n\nFeed Video Scrubber: drag the bar under a video to scrub it without opening it.\n\nForget Forward Swipe After Scrolling: Apollo's forward swipe re-opens the post you last swiped back from, however long ago that was. This forgets it once you've scrolled a few posts on, so a stray swipe can't jump to an old post.\n\nLive Interactive Posts: shows Reddit Developer Platform posts as their real widget — live scores, market tickers, predictions, brackets, polls, games — instead of placeholder text. Always on in comments; Show in Feed adds them to large feed cards and keeps a pinned one in the feed instead of Community Highlights."
+                                              rows:@[ textPostThumbnails, infoRow, feedScrubber, forwardSwipeForget, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -1744,7 +1756,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                   onToggle:^(UISwitch *sender) { [weakSelf swipeUpCommentsSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Browsing"
-                                            footer:@"Swipe through Reddit image galleries without leaving the feed. With Swipe Past Gallery to Navigate, continuing to swipe at a gallery's first or last image goes back or forward to the previous page instead of bouncing. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
+                                            footer:@"Swipe Through Feed Galleries: page through a gallery post's images without leaving the feed.\n\nSwipe Past Gallery to Navigate: keep swiping at the first or last image to go back or forward a page instead of bouncing. Off by default.\n\nSwipe Up for Comments: in the fullscreen media viewer, swipe up or tap the comments button to open comments over the media."
                                               rows:@[ feedGalleries, edgeSwipeNav, swipeComments ]];
 }
 
