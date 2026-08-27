@@ -24,6 +24,8 @@
 // away with the feed and a pull at the top reveals it (attach visible, flip
 // hidesSearchBarWhenScrolling once the first layout is done — plain YES on
 // attach parks the bar off-screen because these screens have no large title).
+// It also COMPRESSES with the drag the way Settings does, which needs UIKit to
+// own the feed's top inset — see "Continuous collapse" below.
 // The old "Keep Search Bar In Place" toggle is retired: the in-place
 // ACTIVATION it used to opt into is simply how glass search works now.
 //
@@ -79,6 +81,14 @@ static BOOL ApolloNSBWriteBoolIvar(id object, const char *name, BOOL value) {
     return YES;
 }
 
+// Apollo computes "the top of the feed" as -contentInset.top — its tab-bar
+// scroll-to-top does, and so do its re-parks after a search teardown. Once
+// UIKit owns the top inset that number is 0, and those parks land a whole nav
+// bar too low with the first row cut off underneath it. Retarget a settled
+// programmatic park that lands exactly on Apollo's idea of the top; a drag,
+// a decelerating flick, and every other destination are left alone.
+static BOOL NSBRetargetApolloTopPark(UIScrollView *sv, CGFloat *y);
+
 // MARK: - Session state
 //
 // Only one feed search is ever active at a time; the session is keyed to the
@@ -109,12 +119,94 @@ static CGFloat sNSBDismissTargetTop = 0.0;
 static const void *kNSBBridgeKey     = &kNSBBridgeKey;      // VC -> bridge delegate object
 static const void *kNSBFeedTableKey  = &kNSBFeedTableKey;   // ASTableView -> @YES (native-managed feed)
 static CGFloat sNSBToolbarBand = 45.0; // Apollo's resting toolbar height (the band its inset reserves)
-// Widest band Apollo has been seen to add above the bar (45pt fresh, 37pt on a
-// restored feed). Comfortably clear of the pull-to-refresh spinner's delta.
+// How far above the safe area a resting write may sit and still count as one:
+// the toolbar band (45pt fresh, 37pt on a feed restored after a post) plus
+// room for the taller values Apollo computes mid nav-morph.
 static const CGFloat kNSBBandSlack = 60.0;
+
+// MARK: - Continuous collapse
+//
+// UIKit only compresses the search palette with the drag when it owns the
+// feed's top inset through the safe area. The Settings search has always had
+// that (contentInsetAdjustmentBehavior Automatic, contentInset.top 0,
+// adjustedContentInset.top 116) and squeezes smoothly; Apollo's feed table
+// ships as Never with a manual 176pt top inset, and with no coupling UIKit can
+// only animate a discrete collapse — measured as the bar stepping 60 -> 49.8
+// -> 30 -> 0 through four plateaus while the safe area interpolated on its own
+// timeline.
+//
+// So the managed feed tables are flipped to Automatic and Apollo's absolute
+// inset writes are rewritten as deltas above the safe area, which puts
+// adjustedContentInset.top on exactly the number Apollo used to write into
+// contentInset.top. Measured after: 60 -> 56.7 -> 50 -> 43.3 -> 36.7 -> 30 ->
+// 23.3 -> 16.5 -> 10 -> 3.3 -> 0, one step per frame, matching the drag 1:1.
+//
+// Everything downstream reads adjustedContentInset, which is the same number
+// in both ownership models, so the rest of the module did not have to fork.
+//
+// APOLLO_NSB_TRACE=1 logs every inset write and every scroll frame with the
+// bar's height — that trace is what measured the plateaus above, and it is the
+// fastest way to re-check this geometry after an Apollo update.
+static BOOL NSBTraceEnabled(void) {
+    static BOOL enabled = NO;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *env = getenv("APOLLO_NSB_TRACE");
+        enabled = (env && env[0] == '1');
+    });
+    return enabled;
+}
+
+// Convert Apollo's absolute inset writes into the deltas Automatic expects.
+//
+// Apollo sizes the feed as "safe area, plus a band for its own — now hidden —
+// toolbar" (measured: an exact +45 against the table's own safeAreaInsets.top,
+// on every single write). It keeps doing that no matter who owns the inset, so
+// left alone every write would stack on top of the safe area UIKit already
+// provides. The conversion has to be stateless: UIKit and Texture echo our own
+// output back at us, and an earlier subtract-and-floor attempt compounded on
+// those echoes.
+static void NSBRelativizeInset(UIScrollView *sv, UIEdgeInsets *inset) {
+    UIEdgeInsets safe = sv.safeAreaInsets;
+
+    // Top. A write within a band's reach of the safe area is a resting write —
+    // that covers the settled shape, the smaller value Apollo runs while a
+    // search is active (159 against a 176 safe area), and the transiently tall
+    // ones computed mid nav-morph (213) — and it collapses to a flush rest.
+    // Anything taller keeps its surplus, so a growth Apollo does own (a
+    // spinner) still gets its room. Idempotent: 0 maps back to 0.
+    if (safe.top > 1.0 && inset->top >= safe.top - kNSBBandSlack) {
+        CGFloat extra = inset->top - safe.top;
+        inset->top = (extra <= kNSBBandSlack) ? 0.0 : (extra - sNSBToolbarBand);
+        if (inset->top < 0.0) inset->top = 0.0;
+    }
+
+    // Bottom. Apollo sizes it for the tab bar, which the safe area now also
+    // provides (measured: an exact 83 against an 83pt safe area), and stacking
+    // the two would open a gap under the last row. Converted only when the
+    // result is small enough that it cannot read as absolute on the way back
+    // in — that is what keeps the echoes from walking this down to zero.
+    if (safe.bottom > 1.0 && inset->bottom >= safe.bottom - 1.0) {
+        CGFloat rel = inset->bottom - safe.bottom;
+        if (rel < 0.0) rel = 0.0;
+        if (rel < safe.bottom - 1.0) inset->bottom = rel;
+    }
+}
 
 BOOL ApolloNativeFeedSearchEnabled(void) {
     return IsLiquidGlass();
+}
+
+static BOOL NSBRetargetApolloTopPark(UIScrollView *sv, CGFloat *y) {
+    if (!sv) return NO;
+    if (objc_getAssociatedObject(sv, kNSBFeedTableKey) == nil) return NO;
+    if (sv.isDragging || sv.isTracking || sv.isDecelerating) return NO;
+    CGFloat apolloTop = -sv.contentInset.top;        // where Apollo thinks the top is
+    CGFloat realTop   = -sv.adjustedContentInset.top; // where it actually is
+    if (realTop >= apolloTop - 0.5) return NO;        // UIKit is adding nothing
+    if (fabs(*y - apolloTop) > 0.5) return NO;        // not a park at Apollo's top
+    *y = realTop;
+    return YES;
 }
 
 static NSString *NSBSessionQueryText(void) {
@@ -183,7 +275,7 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
             if (!sv || sv != sNSBSessionTable || sNSBUserScrolled) return;
             if (sv.isDragging || sv.isDecelerating || sv.isTracking) return;
             if (NSBSessionQueryText().length > 0) return; // user typed again
-            CGFloat rest = -sv.contentInset.top;
+            CGFloat rest = -sv.adjustedContentInset.top;
             if (sv.contentOffset.y > rest + 1.0) [sv setContentOffset:CGPointMake(0.0, rest) animated:NO];
         };
         if (table) park();
@@ -334,28 +426,16 @@ static void NSBApolloDismissNow(UIViewController *vc) {
     // Two checks because the re-park lands at slightly different times.
     NSUInteger gen = ++sNSBDismissGen;
     __weak UIScrollView *weakTable = table;
-    __weak UIViewController *weakVC = vc;
     void (^settle)(void) = ^{
         UIScrollView *sv = weakTable;
         if (!sv || gen != sNSBDismissGen || sNSBSessionTyped ||
             sNSBDismissScrolling || sNSBAwaitingScroll) return;
         if (sv.isDragging || sv.isDecelerating || sv.isTracking) return;
-        // The cancel morph animates the nav, so Apollo's restore write lands
-        // computed against a TRANSIENT nav height and passes the hot-path match
-        // rule band-and-all (e.g. 213 when the settled shape is 176+45). At
-        // settle, collapse any resting inset in the dead band just above the
-        // nav bottom down to it. The net stops short of the pull-to-refresh
-        // spinner delta so an in-flight refresh is never clamped.
-        UIViewController *svc = weakVC;
-        if (svc) {
-            CGFloat want = NSBNavBottomForTable(sv, svc);
-            UIEdgeInsets cur = sv.contentInset;
-            if (want > 1.0 && cur.top > want + 2.0 && cur.top <= want + kNSBBandSlack) {
-                cur.top = want;
-                sv.contentInset = cur;
-            }
-        }
-        CGFloat rest = -sv.contentInset.top;
+        // The inset needs no correction here any more: writes landing mid
+        // nav-morph are computed against a transient height, but relativizing
+        // them against the safe area collapses every one of them to the same
+        // flush rest, so only the offset can still be out of place.
+        CGFloat rest = -sv.adjustedContentInset.top;
         CGFloat y = sv.contentOffset.y;
         // Unbounded above: a surfaced subreddit search parks hundreds of points
         // down (header height); dismiss always returns to the resting top, the
@@ -391,20 +471,24 @@ static BOOL NSBManagedHeader(UIScrollView *sv) {
 }
 
 static CGFloat NSBDesiredOffsetY(UIScrollView *sv) {
-    CGFloat rest = -sv.contentInset.top; // contentInsetAdjustmentBehavior == Never on the feed
+    // adjustedContentInset, not contentInset: it is the full chrome above the
+    // first row in either inset-ownership mode (they are equal while the feed
+    // runs behavior Never, and only the adjusted value is right once UIKit
+    // owns the top through the safe area).
+    CGFloat rest = -sv.adjustedContentInset.top;
     if (!NSBManagedHeader(sv)) return rest;
     if (NSBSessionQueryText().length == 0) return rest;
     UIView *hdr = [(UITableView *)sv tableHeaderView];
     CGFloat height = CGRectGetHeight(hdr.frame);
     if (height <= 1.0) return rest;
-    CGFloat surfaced = height - sv.contentInset.top;
+    CGFloat surfaced = height - sv.adjustedContentInset.top;
     return surfaced > rest ? surfaced : rest;
 }
 
 static BOOL NSBIsSurfaced(UIScrollView *sv) {
     if (!sv || sv != sNSBSessionTable || !sNSBSessionTyped || sNSBUserScrolled) return NO;
     if (NSBSessionQueryText().length == 0) return NO;
-    return NSBDesiredOffsetY(sv) > (-sv.contentInset.top + 1.0);
+    return NSBDesiredOffsetY(sv) > (-sv.adjustedContentInset.top + 1.0);
 }
 
 static void NSBSetHeaderHidden(UIScrollView *sv, BOOL hidden) {
@@ -529,6 +613,15 @@ static void NSBAttachNativeSearch(UIViewController *vc) {
         if (@available(iOS 15.0, *)) {
             [vc setContentScrollView:table forEdge:NSDirectionalRectEdgeTop];
         }
+        // Hand the top inset to UIKit so the palette can compress with the
+        // drag instead of animating a discrete collapse. Apollo's own inset
+        // writes are relativized in setContentInset: below.
+        if (table.contentInsetAdjustmentBehavior != UIScrollViewContentInsetAdjustmentAutomatic) {
+            table.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAutomatic;
+            UIEdgeInsets cur = table.contentInset;
+            NSBRelativizeInset(table, &cur);
+            table.contentInset = cur;
+        }
     }
     ApolloLog(@"[NativeSearch] attached search controller to %s", object_getClassName(vc));
 }
@@ -572,7 +665,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
     UINavigationItem *navItem = vc.navigationItem;
     UISearchController *sc = navItem.searchController;
     if (!sc || sc.active || !navItem.hidesSearchBarWhenScrolling) return;
-    if (table.contentOffset.y > -table.contentInset.top + 2.0) return; // not at the top rest
+    if (table.contentOffset.y > -table.adjustedContentInset.top + 2.0) return; // not at the top rest
     if (CGRectGetHeight(sc.searchBar.bounds) > 1.0) return;            // already revealed
     sNSBRevealInFlight = YES;
     navItem.hidesSearchBarWhenScrolling = NO;
@@ -584,7 +677,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
     dispatch_async(dispatch_get_main_queue(), ^{
         UIScrollView *sv = weakTable;
         if (!sv || sv.isDragging || sv.isTracking || sv.isDecelerating) return;
-        CGFloat top = -sv.contentInset.top;
+        CGFloat top = -sv.adjustedContentInset.top;
         if (sv.contentOffset.y > top && sv.contentOffset.y < top + 120.0) {
             sv.contentOffset = CGPointMake(sv.contentOffset.x, top);
         }
@@ -673,19 +766,6 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
         NSBSetHeaderHidden(table, NSBIsSurfaced(table));
     }
     NSBEnsureBarRevealedAtTop((UIViewController *)self, table);
-    // If the last inset write landed while the palette was mid-animation (so
-    // the match rule saw a transient nav height and passed it through), correct
-    // it once things settle: a resting inset in the dead band just above the
-    // settled nav bottom collapses down to it. The net stops short of the
-    // pull-to-refresh spinner delta so an in-flight refresh is never clamped.
-    if (table && !table.isDragging && !table.isDecelerating && !sNSBSessionTyped) {
-        CGFloat want = NSBNavBottomForTable(table, (UIViewController *)self);
-        UIEdgeInsets cur = table.contentInset;
-        if (want > 1.0 && cur.top > want + 2.0 && cur.top <= want + kNSBBandSlack) {
-            cur.top = want;
-            table.contentInset = cur;
-        }
-    }
 }
 
 %end
@@ -714,11 +794,11 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 
 // MARK: - Feed geometry
 //
-// Inset: floor the feed's top inset to the nav bar's bottom (which includes the
-// expanded search palette) so content rests below the native bar. A floor, not
-// an exact set: Apollo grows the inset for pull-to-refresh, and when the bar
-// collapses (scroll-away) the nav bottom shrinks below Apollo's own resting
-// inset and the floor becomes a no-op — self-correcting in both directions.
+// Inset: UIKit owns the top through the safe area (see "Continuous collapse"
+// above), so Apollo's absolute writes are relativized on the way in and
+// adjustedContentInset.top carries the real resting chrome height. Nothing
+// here has to chase the palette any more — it tracks expand, collapse and
+// overscroll stretch for free, which is the whole point of the arrangement.
 //
 // Offset: while a query is live, clamp Apollo's programmatic re-parks so the
 // results stay put (and, with a full subreddit header, hold the chrome scrolled
@@ -730,69 +810,40 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 - (void)setContentInset:(UIEdgeInsets)inset {
     if (ApolloNativeFeedSearchEnabled() &&
         objc_getAssociatedObject(self, kNSBFeedTableKey) != nil) {
-        UIViewController *vc = NSBFeedVCForView((UIView *)self);
-        if (vc) {
-            // Apollo's resting formula is safeAreaTop + its toolbar band; with
-            // the toolbar hidden, exactly that shape must lose the band so
-            // content rests flush under the palette. Rewrite ONLY a write that
-            // matches the formula against the CURRENT nav bottom — everything
-            // else (echoes of our own value re-applied by UIKit/Texture,
-            // pull-to-refresh spinner deltas computed off the current inset,
-            // writes mid palette-stretch where the nav is transiently tall)
-            // passes through untouched. Stateless on purpose: an earlier
-            // subtract-and-floor version compounded on echoes and baked the
-            // rubber-band-stretched palette height into the inset.
-            CGFloat want = NSBNavBottomForTable((UIScrollView *)self, vc);
-            // Apollo sizes the feed's top inset as "where the bar ends, plus a
-            // band for its own — now hidden — toolbar". That band is not a
-            // constant (45pt measured on a fresh feed, 37pt on one restored
-            // after returning from a post), so matching an exact value left the
-            // odd path with a visible gap under the search bar. Collapse any
-            // resting inset that sits within a band's reach above the bar
-            // instead. The window stops well short of the pull-to-refresh
-            // spinner's much larger delta, and a dragging or decelerating feed
-            // is left alone, so a refresh in flight is never clipped.
-            UIScrollView *sv2 = (UIScrollView *)self;
-            BOOL settled = !sv2.isDragging && !sv2.isTracking && !sv2.isDecelerating;
-            // Only while the search palette is actually laid out: with the bar
-            // collapsed the nav bottom is the bare nav, and trimming to that
-            // would tell UIKit the feed already rests correctly — leaving the
-            // bar collapsed with a gap where it should have re-revealed.
-            BOOL barExpanded = CGRectGetHeight(vc.navigationItem.searchController.searchBar.bounds) > 1.0;
-            if (want > 1.0 && settled && barExpanded &&
-                inset.top > want + 2.0 && inset.top <= want + kNSBBandSlack) {
-                inset.top = want;
-            }
-            // While a search session is live, hold the inset AT the nav bottom.
-            // Apollo runs a slightly smaller value then (measured 159 against a
-            // 176 nav bottom), and correcting that at cancel time — a
-            // contentInset write mid-teardown — makes another module's
-            // scroll-to-top fire and teleports the feed before anything can
-            // animate. Keeping it right for the whole session means cancel has
-            // no inset change to make. Gated to a settled, non-dragging feed so
-            // it can never bake a rubber-band-stretched palette into the inset.
-            if (sNSBSessionTyped && want > 1.0 && inset.top < want && settled) {
-                inset.top = want;
-            }
-            // Cancel in flight: land every re-park at the known final rest on
-            // the SAME frame it is written (the settle timers are only a
-            // backstop). Net bounded away from the pull-to-refresh delta.
-            if (sNSBDismissWindow && (UIScrollView *)self == sNSBSessionTable &&
-                fabs(inset.top - sNSBDismissTargetTop) > 0.5 &&
-                inset.top <= sNSBDismissTargetTop + kNSBBandSlack) {
-                // Hold the final inset for the whole window: Apollo writes its
-                // active-search value (smaller) and its resting value during
-                // the teardown, and either one moving under the animation is a
-                // visible hop.
-                inset.top = sNSBDismissTargetTop;
-            }
+        UIScrollView *sv = (UIScrollView *)self;
+        UIEdgeInsets was = inset;
+        NSBRelativizeInset(sv, &inset);
+        if (NSBTraceEnabled()) {
+            UIViewController *vc = NSBFeedVCForView((UIView *)self);
+            ApolloLog(@"[NSBTrace] inset in=(%.1f,%.1f) out=(%.1f,%.1f) safe=(%.1f,%.1f) "
+                       "navBottom=%.1f adjTop=%.1f offY=%.1f bar=%.1f",
+                      was.top, was.bottom, inset.top, inset.bottom,
+                      sv.safeAreaInsets.top, sv.safeAreaInsets.bottom,
+                      vc ? NSBNavBottomForTable(sv, vc) : 0.0, sv.adjustedContentInset.top,
+                      sv.contentOffset.y,
+                      CGRectGetHeight(vc.navigationItem.searchController.searchBar.bounds));
         }
     }
     %orig(inset);
 }
 
+// Apollo re-asserts Never on its own layout passes; hold Automatic for the
+// tables we manage or the coupling would be lost the first time it does.
+- (void)setContentInsetAdjustmentBehavior:(UIScrollViewContentInsetAdjustmentBehavior)behavior {
+    if (ApolloNativeFeedSearchEnabled() &&
+        objc_getAssociatedObject(self, kNSBFeedTableKey) != nil) {
+        behavior = UIScrollViewContentInsetAdjustmentAutomatic;
+    }
+    %orig(behavior);
+}
+
 - (void)setContentOffset:(CGPoint)offset {
     UIScrollView *sv = (UIScrollView *)self;
+    if (ApolloNativeFeedSearchEnabled() && NSBRetargetApolloTopPark(sv, &offset.y) &&
+        NSBTraceEnabled()) {
+        ApolloLog(@"[NSBTrace] retarget offset -> %.1f (inTop=%.1f adjTop=%.1f)",
+                  offset.y, sv.contentInset.top, sv.adjustedContentInset.top);
+    }
     if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow &&
         !sNSBDismissScrolling && !sNSBAwaitingScroll &&
         sv == sNSBSessionTable && !sv.isDragging && !sv.isTracking && !sv.isDecelerating &&
@@ -807,7 +858,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
         if (sv.isDragging) sNSBUserScrolled = YES;
         else if (offset.y <= target + 1.0) sNSBUserScrolled = NO;
         if (!sv.isDragging && !sv.isDecelerating && !sNSBUserScrolled) {
-            if (NSBManagedHeader(sv) && target > -sv.contentInset.top + 1.0) {
+            if (NSBManagedHeader(sv) && target > -sv.adjustedContentInset.top + 1.0) {
                 offset.y = target;          // surfaced: chrome held off the top
             } else if (offset.y > target) {
                 offset.y = target;          // clamp keystroke re-parks; keep pull-to-refresh
@@ -820,6 +871,23 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 
 - (void)setBounds:(CGRect)bounds {
     UIScrollView *sv = (UIScrollView *)self;
+    if (NSBTraceEnabled() && ApolloNativeFeedSearchEnabled() &&
+        objc_getAssociatedObject(self, kNSBFeedTableKey) != nil &&
+        fabs(bounds.origin.y - sv.bounds.origin.y) > 0.01) {
+        UIViewController *tvc = NSBFeedVCForView((UIView *)self);
+        UISearchBar *tbar = tvc.navigationItem.searchController.searchBar;
+        // The signal that says whether the collapse tracks the drag: bar
+        // heights stepping through intermediate values are a compression,
+        // a single 60 -> 0 jump is the snap.
+        ApolloLog(@"[NSBTrace] scroll y=%.1f bar=%.1f safeTop=%.1f adjTop=%.1f inTop=%.1f drag=%d",
+                  bounds.origin.y, CGRectGetHeight(tbar.bounds), sv.safeAreaInsets.top,
+                  sv.adjustedContentInset.top, sv.contentInset.top, (int)sv.isDragging);
+    }
+    if (ApolloNativeFeedSearchEnabled() && NSBRetargetApolloTopPark(sv, &bounds.origin.y) &&
+        NSBTraceEnabled()) {
+        ApolloLog(@"[NSBTrace] retarget bounds -> %.1f (inTop=%.1f adjTop=%.1f)",
+                  bounds.origin.y, sv.contentInset.top, sv.adjustedContentInset.top);
+    }
     if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow &&
         !sNSBDismissScrolling && !sNSBAwaitingScroll &&
         sv == sNSBSessionTable && !sv.isDragging && !sv.isTracking && !sv.isDecelerating &&
@@ -910,6 +978,14 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 %hook UIScrollView
 
 - (void)setContentOffset:(CGPoint)offset animated:(BOOL)animated {
+    // The animated entry point is how Apollo's tab-bar scroll-to-top travels;
+    // retarget it here so the whole animation aims at the real rest rather
+    // than landing short and being corrected afterwards.
+    if (ApolloNativeFeedSearchEnabled() &&
+        NSBRetargetApolloTopPark((UIScrollView *)self, &offset.y) && NSBTraceEnabled()) {
+        ApolloLog(@"[NSBTrace] retarget animated -> %.1f (inTop=%.1f adjTop=%.1f)",
+                  offset.y, self.contentInset.top, self.adjustedContentInset.top);
+    }
     if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow &&
         (UIScrollView *)self == sNSBSessionTable &&
         !self.isDragging && !self.isTracking) {
