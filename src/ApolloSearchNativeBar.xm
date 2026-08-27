@@ -631,6 +631,25 @@ static CGFloat NSBDesiredOffsetY(UIScrollView *sv) {
     CGFloat height = CGRectGetHeight(hdr.frame);
     if (height <= 1.0) return rest;
     CGFloat surfaced = height - sv.adjustedContentInset.top;
+    // Never surface further than the results can actually fill.
+    //
+    // Surfacing exists so the first result sits right under the bar. When the
+    // query returns nothing — or too little to reach the bottom of the screen —
+    // there is no result to bring up, and scrolling the banner off the top just
+    // replaces it with black. The restore on dismiss then sweeps a bright,
+    // banner-sized header down over that blackness, which reads as a flash even
+    // though it is a correct 0.32s scroll (measured: 18 smooth frames, and it
+    // still looked wrong).
+    //
+    // So cap the target at the highest offset the content legally supports.
+    // With no results that cap lands at or below the resting top, so the feed
+    // simply never surfaces and dismissing has nothing to restore — the same
+    // "nothing moved, so nothing flashes" behaviour you get when you open the
+    // search bar and close it without typing. With a full result list the cap
+    // is far above the target and this changes nothing.
+    CGFloat maxLegal = sv.contentSize.height - CGRectGetHeight(sv.bounds) +
+                       sv.adjustedContentInset.bottom;
+    if (surfaced > maxLegal) surfaced = maxLegal;
     return surfaced > rest ? surfaced : rest;
 }
 
