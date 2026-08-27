@@ -6,23 +6,27 @@
 // link, bold, italics, subreddit, user, more — plus the GIF chip this tweak
 // injects (ApolloMarkdownToolbarGif).
 //
-// Apollo tints those seven from its own stock-theme accent table: one Swift
-// method reads the live `ThemeManager.appColorTheme` byte, builds that theme's
-// accent hex, and pushes it onto each button with -setTintColor:. Nothing else
-// re-tints them afterwards, so whenever that read disagrees with the accent the
-// rest of the app is drawing — a custom theme whose donor hijack hasn't reached
-// the live byte, a toolbar built before the theme settled — the icons keep the
-// stock DEFAULT accent (#007AFF light / #2399FF dark) while everything around
-// them is themed. That is the reported bug: every icon stuck "Apollo blue" next
-// to a correctly-themed GIF chip, which is tweak-drawn and therefore already
-// sources ApolloThemeAccentColor().
+// Where the stale colour actually lives (revised after reproducing the bug in
+// the sim with a signed-in settings backup): each icon button renders a
+// TEMPLATE image inside a UIImageView, and Apollo sets an explicit tintColor
+// on that IMAGE VIEW — observed stuck at Apollo classic blue (#0088FF, which
+// is not any entry in the stock accent table). An explicit subview tint beats
+// anything set on the button, so the glyph stays blue even while the BUTTON's
+// own tintColor correctly carries the theme accent (inherited or set by
+// Apollo's awakeFromNib pass, which setTintColor:s the seven buttons from its
+// stock-theme table). That split is why the first version of this fix — which
+// wrote and guarded the BUTTON tint only — shipped as a no-op: its guard read
+// the button's already-correct tint, concluded the bar was fine, and never
+// touched the image views that actually draw. The injected GIF chip is
+// tweak-drawn (no UIImageView) and already sources ApolloThemeAccentColor(),
+// which is why it stays correctly themed next to seven blue icons.
 //
-// Rather than chase Apollo's read back into sync, the tweak takes ownership of
-// this bar's tint and drives it from the same accent seam every other
-// tweak-drawn surface uses. On a stock theme that is a no-op by construction
-// (kStockThemes in ApolloThemeRuntime was recovered from the very table Apollo
-// consults, so the two agree colour-for-colour); on a custom theme it pins the
-// icons to the custom accent; and in the broken state it repairs them.
+// So the tweak takes ownership of this bar's tint at BOTH levels — the icon
+// buttons and their image views — and drives it from the same accent seam
+// every other tweak-drawn surface uses. The guard compares the first icon
+// IMAGE VIEW's effective tint (the colour that actually renders) against the
+// accent, so the steady state is a couple of colour resolutions and the fix
+// self-heals if Apollo ever re-stamps either level with a stale colour.
 
 #import <UIKit/UIKit.h>
 
@@ -35,11 +39,11 @@
 // picks out exactly the seven native icons — no identifier lists to keep in
 // sync, and the GIF chip stays owned by ApolloMarkdownToolbarGif (which also
 // has to repaint its chip border, not just a tint).
-static BOOL ApolloComposerToolbarIsIconButton(UIButton *button) {
+static UIImageView *ApolloComposerToolbarIconImageView(UIButton *button) {
     for (UIView *subview in button.subviews) {
-        if ([subview isKindOfClass:[UIImageView class]]) return YES;
+        if ([subview isKindOfClass:[UIImageView class]]) return (UIImageView *)subview;
     }
-    return NO;
+    return nil;
 }
 
 static void ApolloComposerToolbarCollectIconButtons(UIView *view,
@@ -51,7 +55,7 @@ static void ApolloComposerToolbarCollectIconButtons(UIView *view,
     if ([view isKindOfClass:[UICollectionView class]]) return;
     (*budget)--;
     if ([view isKindOfClass:[UIButton class]] &&
-        ApolloComposerToolbarIsIconButton((UIButton *)view)) {
+        ApolloComposerToolbarIconImageView((UIButton *)view) != nil) {
         [out addObject:(UIButton *)view];
         return;
     }
@@ -91,14 +95,26 @@ static void ApolloComposerToolbarApplyAccent(UIView *toolbar, NSString *reason) 
     ApolloComposerToolbarCollectIconButtons(toolbar, buttons, &budget);
     if (buttons.count == 0) return;
 
-    // Apollo sets all seven in one pass, so the first button's tint tells us
-    // whether the bar is already correct. Checking the live tint rather than a
-    // cached stamp keeps this self-healing: if Apollo ever re-applies its own
-    // (stale) accent, the next layout pass notices and repairs it.
+    // Apollo stamps all seven icons in one pass, so the first icon's colour
+    // tells us whether the bar is already correct. The colour that renders is
+    // the IMAGE VIEW's effective tint (an explicit subview tint beats the
+    // button's), so that is what the guard must read — reading the button's
+    // tint here is exactly the bug that made the first version of this fix a
+    // silent no-op. Checking the live tint rather than a cached stamp keeps
+    // this self-healing: if Apollo ever re-applies its stale colour at either
+    // level, the next layout pass notices and repairs it.
     UITraitCollection *traits = toolbar.traitCollection;
-    if (ApolloComposerToolbarColorsMatch(buttons.firstObject.tintColor, accent, traits)) return;
+    UIImageView *firstIcon = ApolloComposerToolbarIconImageView(buttons.firstObject);
+    if (ApolloComposerToolbarColorsMatch(firstIcon.tintColor, accent, traits)) return;
 
-    for (UIButton *button in buttons) button.tintColor = accent;
+    for (UIButton *button in buttons) {
+        button.tintColor = accent;
+        // The image view's explicit tint is what the template glyph renders
+        // with — overwrite it too, or the button-level accent stays invisible.
+        for (UIView *subview in button.subviews) {
+            if ([subview isKindOfClass:[UIImageView class]]) subview.tintColor = accent;
+        }
+    }
 
     UIColor *resolved = [accent resolvedColorWithTraitCollection:traits];
     CGFloat r = 0, g = 0, b = 0, a = 0;
