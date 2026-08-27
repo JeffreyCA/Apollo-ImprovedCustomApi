@@ -647,9 +647,16 @@ static CGFloat NSBDesiredOffsetY(UIScrollView *sv) {
     // "nothing moved, so nothing flashes" behaviour you get when you open the
     // search bar and close it without typing. With a full result list the cap
     // is far above the target and this changes nothing.
-    CGFloat maxLegal = sv.contentSize.height - CGRectGetHeight(sv.bounds) +
-                       sv.adjustedContentInset.bottom;
-    if (surfaced > maxLegal) surfaced = maxLegal;
+    //
+    // Texture measures contentSize asynchronously, so a reload can report it as
+    // zero for a beat. Ignore the cap until there is a real measurement, or the
+    // target would drop to rest mid-keystroke and un-hide the banner for a
+    // frame — the very thing this is here to prevent.
+    if (sv.contentSize.height > 1.0) {
+        CGFloat maxLegal = sv.contentSize.height - CGRectGetHeight(sv.bounds) +
+                           sv.adjustedContentInset.bottom;
+        if (surfaced > maxLegal) surfaced = maxLegal;
+    }
     return surfaced > rest ? surfaced : rest;
 }
 
