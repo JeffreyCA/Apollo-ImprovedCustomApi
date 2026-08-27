@@ -2404,17 +2404,14 @@ static CGFloat ApolloSubredditIndexHeightForRowHook(id self, SEL _cmd, UITableVi
                 ? ApolloMetaFeedEffectiveLayout(tableView, visibleIndexes)
                 : ApolloSubredditFeedLayoutRows;
 
-            // Rows keep the same two-line height when their subtitle is hidden.
-            // Do not wait for every feed cell to be vended and validated here:
-            // a short viewport or large Dynamic Type can leave part of the feed
-            // prefix off-screen, which otherwise falls back to Apollo's native
-            // self-sizing and compresses subtitle-free rows.
+            // Keep Rows at their two-line height even without a subtitle. This
+            // runs before full validation because off-screen rows may not exist yet.
             if (layout == ApolloSubredditFeedLayoutRows) {
                 return ApolloFeedShortcutRowHeight(tableView.traitCollection);
             }
 
-            // Replacing several native rows with one custom layout is more
-            // invasive, so keep the complete feed-prefix validation for it.
+            // Custom layouts collapse multiple native rows, so validate the
+            // complete feed prefix before replacing them.
             if (sSubredditListEnhancements &&
                 ApolloMetaFeedLayoutUsesShortcuts(layout) &&
                 ApolloSubredditIndexMetaFeedRowsValidated(tableView, visibleIndexes)) {
@@ -2644,11 +2641,8 @@ static void ApolloSubredditIndexRaiseNativeIndexAboveHeaders(UITableView *tableV
 // the only rows in the subreddit list that use _TtC6Apollo27ApolloSubtitleTableViewCell
 // (regular subreddit rows are RedditListTableViewCell), so inside
 // RedditListViewController's data source that cell class alone identifies them.
-// Clearing detailTextLabel.text right after Apollo configures the cell removes
-// the description before display. Rows use the stable height supplied above,
-// so the missing subtitle does not compress them. The original string is
-// stashed on the cell so the toggle can restore it even if Apollo only set the
-// text once per cell.
+// Clear the description after Apollo configures the cell. The fixed Rows height
+// prevents compression; stashing the text lets the toggle restore it later.
 
 static char kApolloSubredditDescriptionStashKey;
 
