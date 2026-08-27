@@ -543,9 +543,10 @@ static NSString *const UDKeyFeedGalleryEdgeSwipeNav = @"FeedGalleryEdgeSwipeNavi
 // re-opens the screen you last swiped back from, and that memory natively
 // survives unlimited feed scrolling. With this on, scrolling the feed a few
 // posts away from where you popped back drops the stale forward memory, so a
-// much-later accidental swipe doesn't teleport to an old post. Default YES.
-// Read live per scroll tick, so no change notification is needed. See
-// ApolloForwardSwipeExpiry.xm.
+// much-later accidental swipe doesn't teleport to an old post. Default NO:
+// forward-swipe is a common enough gesture that changing what it does is
+// opt-in (#996 review). Read live per scroll tick, so no change notification
+// is needed. See ApolloForwardSwipeExpiry.xm.
 static NSString *const UDKeyForwardSwipeForgetAfterScrolling = @"ForwardSwipeForgetAfterScrolling";
 // In the fullscreen viewer for post-backed images, galleries, GIFs, and video,
 // an upward vertical flick or comments-button tap opens a media-owned comments

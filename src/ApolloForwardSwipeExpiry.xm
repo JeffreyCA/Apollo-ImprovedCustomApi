@@ -32,6 +32,11 @@
 // wiping. Only user-driven scrolling (tracking/dragging/decelerating) is
 // counted, so pull-to-refresh inserts and programmatic restores neither
 // anchor nor expire.
+//
+// Off by default (Posts & Feeds -> "Forget Forward Swipe After Scrolling").
+// Forward-swipe is a common enough gesture that changing what it does is
+// opt-in, so the off path is also the fast path: the setContentOffset: hook
+// early-outs on the global before touching associated objects.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -120,6 +125,8 @@ static id ApolloForwardExpiryPoppedStack(UINavigationController *navigationContr
 }
 
 static void ApolloForwardExpiryHandleScroll(UIViewController *feedController, UIScrollView *scrollView) {
+    // Also checked by the caller's early-out; kept so the function is safe to
+    // call from anywhere.
     if (!sForwardSwipeForgetAfterScrolling) return;
     // Only user-driven motion counts, in both directions of the state machine.
     if (!scrollView.isTracking && !scrollView.isDragging && !scrollView.isDecelerating) return;
@@ -257,6 +264,12 @@ static void ApolloForwardExpiryMarkTable(UIViewController *feedController) {
 
 - (void)setContentOffset:(CGPoint)contentOffset {
     %orig(contentOffset);
+    // Cheapest possible early-out first: this runs for EVERY scroll view in
+    // the app on every frame of every scroll, and the setting is off by
+    // default, so the off case must cost one global read and nothing more.
+    // The global is written live by the toggle, so turning it on takes effect
+    // on the next scroll without waiting for the feed to reappear.
+    if (!sForwardSwipeForgetAfterScrolling) return;
     ApolloForwardExpiryOwnerBox *box = objc_getAssociatedObject(self, kApolloForwardExpiryOwnerKey);
     UIViewController *owner = box ? box.owner : nil;
     if (owner) ApolloForwardExpiryHandleScroll(owner, self);
