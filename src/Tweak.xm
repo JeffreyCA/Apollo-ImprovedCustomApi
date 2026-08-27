@@ -3662,7 +3662,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyFeedTextPostThumbnails: @YES,
                                     UDKeyFeedGalleryCarousel: @YES,
-                                    UDKeyFeedGalleryEdgeSwipeNav: @YES,
+                                    UDKeyFeedGalleryEdgeSwipeNav: @NO,
                                     UDKeyForwardSwipeForgetAfterScrolling: @NO,
                                     UDKeySwipeUpForComments: @YES,
                                     UDKeySportsClipsInlineVideo: @YES,

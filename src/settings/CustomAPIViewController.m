@@ -1756,7 +1756,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                   onToggle:^(UISwitch *sender) { [weakSelf swipeUpCommentsSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Browsing"
-                                            footer:@"Swipe through Reddit image galleries without leaving the feed. With Swipe Past Gallery to Navigate, continuing to swipe at a gallery's first or last image goes back or forward to the previous page instead of bouncing. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
+                                            footer:@"Swipe Through Feed Galleries: page through a gallery post's images without leaving the feed.\n\nSwipe Past Gallery to Navigate: keep swiping at the first or last image to go back or forward a page instead of bouncing. Off by default.\n\nSwipe Up for Comments: in the fullscreen media viewer, swipe up or tap the comments button to open comments over the media."
                                               rows:@[ feedGalleries, edgeSwipeNav, swipeComments ]];
 }
 

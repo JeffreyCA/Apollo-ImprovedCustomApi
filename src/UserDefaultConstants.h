@@ -535,9 +535,11 @@ static NSString *const ApolloFeedGalleryCarouselChangedNotification = @"ApolloFe
 // When the feed gallery carousel sits on its first (or last) image, continuing
 // to swipe toward the edge hands the drag to Apollo's swipe-back (or
 // swipe-forward) page navigation instead of rubber-banding, but only when a
-// previous (or forward) page actually exists. Default YES. Read live at
-// gesture time, so no change notification is needed (same reasoning as
-// UDKeySwipeUpForComments below). See ApolloFeedGalleryCarousel.xm.
+// previous (or forward) page actually exists. Default NO: handing a gallery
+// swipe to page navigation surprises people who only meant to bounce, so it's
+// opt-in (#996 review). Read live at gesture time, so no change notification
+// is needed (same reasoning as UDKeySwipeUpForComments below). See
+// ApolloFeedGalleryCarousel.xm.
 static NSString *const UDKeyFeedGalleryEdgeSwipeNav = @"FeedGalleryEdgeSwipeNavigation";
 // Apollo's forward-swipe (right edge, plus the gallery edge-swipe hand-off)
 // re-opens the screen you last swiped back from, and that memory natively
