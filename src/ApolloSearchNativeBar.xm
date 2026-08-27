@@ -250,6 +250,8 @@ static UIViewController *NSBFeedVCForView(UIView *view) {
 
 // MARK: - Driving Apollo's pipeline
 
+static void NSBFinishScrollBack(void); // defined with the tween, below
+
 static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     UITextField *field = (UITextField *)ApolloNSBObjectIvar(vc, "searchTextField");
     if (![field isKindOfClass:[UITextField class]]) return;
@@ -258,6 +260,12 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     // down the session the user just re-entered.
     sNSBDismissWindow = NO;
     ++sNSBDismissGen;
+    // End the scroll-back outright rather than letting it run out its clock:
+    // it holds the offset against every other writer (NSBTweenHoldsOffset), so
+    // left alive it would drag the feed to rest under the query the user is
+    // typing and hand over to the surfacing pin only when it finished. The gen
+    // bump above already made its completion a no-op.
+    NSBFinishScrollBack();
     ApolloNSBWriteBoolIvar(vc, "isSearching", YES);
     sNSBSessionTyped = YES;
     if (![field.text isEqualToString:(text ?: @"")]) field.text = text ?: @"";
@@ -297,6 +305,9 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
 @property (nonatomic, assign) CFTimeInterval startTime;
 @property (nonatomic, assign) CFTimeInterval duration;
 @property (nonatomic, strong) CADisplayLink *link;
+// The offset this tween last asked for. Its own writes match it, so it doubles
+// as the value the pin below re-asserts against everyone else's.
+@property (nonatomic, assign) CGFloat currentY;
 @property (nonatomic, copy) void (^completion)(void);
 @end
 
@@ -304,6 +315,10 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
 
 - (void)start {
     self.startTime = 0.0;
+    // Armed before the link so the pin holds the starting offset over the gap
+    // between here and the first frame — the teardown's first re-clamp lands
+    // inside it (measured ~62ms in, first frame ~118ms in).
+    self.currentY = self.fromY;
     self.link = [CADisplayLink displayLinkWithTarget:self selector:@selector(step:)];
     [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
@@ -320,6 +335,7 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     CGFloat y = self.fromY + (self.toY - self.fromY) * e;
     // The user grabbing the feed mid-restore wins outright.
     if (sv.isDragging || sv.isTracking) { [self finish]; return; }
+    self.currentY = y;
     sv.contentOffset = CGPointMake(sv.contentOffset.x, y);
     if (t >= 1.0) [self finish];
 }
@@ -335,6 +351,41 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
 @end
 
 static ApolloNSBScrollTween *sNSBTween = nil;
+
+// End a scroll-back early (a new query supersedes it). Safe on nil, and on a
+// tween that already finished — -finish clears its own link and completion.
+static void NSBFinishScrollBack(void) {
+    [sNSBTween finish];
+}
+
+// A running scroll-back owns its table's offset outright.
+//
+// The surfaced offset is deliberately PAST the end of the results content:
+// the header is hundreds of points tall and the results are often a single
+// row, so nothing but the session pins — which rewrite the offset every frame
+// — keeps the feed up there. While they are up, UIKit's periodic re-clamp is
+// invisible, because the very next frame forces the offset back.
+//
+// The teardown stands those pins down (session cleared, sNSBAwaitingScroll
+// set) so the scroll-back has room to travel, and that is exactly when the
+// clamp becomes visible. Any inset or row-count change during the dismissal
+// runs -[UIScrollView _adjustContentOffsetIfNecessary], which drags the offset
+// back to the content's legal maximum in one frame — the chrome pops fully
+// into place, and the tween's next frame yanks it back to where it was. That
+// one-frame pop was the cancel flash (traced from setContentInset: and from
+// the reload's _restoreOrAdjustContentOffsetWithRowCount:, ~62ms after the
+// tap; measured as a lone +8.9 mean-brightness spike between two dark frames).
+//
+// So while the tween runs it is the only writer that counts: re-assert its
+// current value over everything else. A user grab still wins — the tween
+// bails on it in -step: and the pin stands down here.
+static BOOL NSBTweenHoldsOffset(UIScrollView *sv, CGFloat *y) {
+    ApolloNSBScrollTween *tween = sNSBTween;
+    if (!tween || !tween.link || tween.scrollView != sv) return NO;
+    if (sv.isDragging || sv.isTracking) return NO;
+    *y = tween.currentY;
+    return YES;
+}
 
 static void NSBRestoreHeaderForTable(UIScrollView *sv);
 static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc);
@@ -866,6 +917,16 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
         }
         NSBSetHeaderHidden(sv, NSBIsSurfaced(sv));
     }
+    // Last: a live scroll-back outranks every pin above it (see
+    // NSBTweenHoldsOffset).
+    CGFloat tweenY = 0.0;
+    if (ApolloNativeFeedSearchEnabled() && NSBTweenHoldsOffset(sv, &tweenY) &&
+        fabs(offset.y - tweenY) > 0.5) {
+        if (NSBTraceEnabled()) {
+            ApolloLog(@"[NSBTrace] tween hold: %.1f -> %.1f", offset.y, tweenY);
+        }
+        offset.y = tweenY;
+    }
     %orig(offset);
 }
 
@@ -899,6 +960,13 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
         CGFloat want = NSBDesiredOffsetY(sv);
         if (fabs(bounds.origin.y - want) > 0.5) bounds.origin.y = want;
         NSBSetHeaderHidden(sv, YES);
+    }
+    // bounds.origin IS contentOffset and Texture re-parks through setBounds:
+    // too, so the tween hold has to carry on both setters or it doesn't hold.
+    CGFloat tweenY = 0.0;
+    if (ApolloNativeFeedSearchEnabled() && NSBTweenHoldsOffset(sv, &tweenY) &&
+        fabs(bounds.origin.y - tweenY) > 0.5) {
+        bounds.origin.y = tweenY;
     }
     %orig(bounds);
 }
