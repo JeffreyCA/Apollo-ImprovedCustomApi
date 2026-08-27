@@ -20,11 +20,12 @@
 // delayed block). All verified against Apollo 1.15.11 with lldb before this was
 // written.
 //
-// The "Keep Search Bar Visible" toggle (sKeepSearchBarInPlace) becomes literal:
-// ON  -> hidesSearchBarWhenScrolling = NO (bar pinned under the nav)
-// OFF -> native scroll-away + pull-to-reveal (attach visible, flip once the
-//        first layout is done — the #975 recipe; plain YES on attach parks the
-//        bar off-screen because these screens have no large title).
+// Resting behavior is the same as the Settings search (#975): the bar scrolls
+// away with the feed and a pull at the top reveals it (attach visible, flip
+// hidesSearchBarWhenScrolling once the first layout is done — plain YES on
+// attach parks the bar off-screen because these screens have no large title).
+// The old "Keep Search Bar In Place" toggle is retired: the in-place
+// ACTIVATION it used to opt into is simply how glass search works now.
 //
 // Non-glass is untouched: every entry point gates on IsLiquidGlass(), and the
 // legacy module keeps full ownership there.
@@ -151,6 +152,7 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
 }
 
 static void NSBRestoreHeaderForTable(UIScrollView *sv);
+static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc);
 
 static NSUInteger sNSBDismissGen = 0; // stale-timer guard for the settle snap
 
@@ -174,10 +176,26 @@ static void NSBApolloDismiss(UIViewController *vc) {
     // Two checks because the re-park lands at slightly different times.
     NSUInteger gen = ++sNSBDismissGen;
     __weak UIScrollView *weakTable = table;
+    __weak UIViewController *weakVC = vc;
     void (^settle)(void) = ^{
         UIScrollView *sv = weakTable;
         if (!sv || gen != sNSBDismissGen || sNSBSessionTyped) return;
         if (sv.isDragging || sv.isDecelerating || sv.isTracking) return;
+        // The cancel morph animates the nav, so Apollo's restore write lands
+        // computed against a TRANSIENT nav height and passes the hot-path match
+        // rule band-and-all (e.g. 213 when the settled shape is 176+45). At
+        // settle, collapse any resting inset in the dead band just above the
+        // nav bottom down to it. The net stops short of the pull-to-refresh
+        // spinner delta so an in-flight refresh is never clamped.
+        UIViewController *svc = weakVC;
+        if (svc) {
+            CGFloat want = NSBNavBottomForTable(sv, svc);
+            UIEdgeInsets cur = sv.contentInset;
+            if (want > 1.0 && cur.top > want + 2.0 && cur.top <= want + sNSBToolbarBand + 15.0) {
+                cur.top = want;
+                sv.contentInset = cur;
+            }
+        }
         CGFloat rest = -sv.contentInset.top;
         CGFloat y = sv.contentOffset.y;
         // Unbounded above: a surfaced subreddit search parks hundreds of points
@@ -187,6 +205,7 @@ static void NSBApolloDismiss(UIViewController *vc) {
     };
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), settle);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), settle);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), settle);
 }
 
 // MARK: - Results surfacing (subreddit chrome)
@@ -342,9 +361,13 @@ static void NSBAttachNativeSearch(UIViewController *vc) {
 static void NSBHideApolloToolbar(UIViewController *vc) {
     UIView *toolbar = (UIView *)ApolloNSBObjectIvar(vc, "upperToolbar");
     if (![toolbar isKindOfClass:[UIView class]]) return;
-    CGFloat h = CGRectGetHeight(toolbar.bounds);
-    if (h > 1.0 && h < 100.0) sNSBToolbarBand = h;
-    if (!toolbar.hidden) toolbar.hidden = YES;
+    if (!toolbar.hidden) {
+        // Measure the band ONLY from the live (pre-hide) toolbar — once hidden
+        // its layout drifts to junk heights that must not update the band.
+        CGFloat h = CGRectGetHeight(toolbar.bounds);
+        if (h > 1.0 && h < 100.0) sNSBToolbarBand = h;
+        toolbar.hidden = YES;
+    }
 }
 
 // Nav-bar bottom (including the search palette, which is part of the bar's
@@ -356,6 +379,36 @@ static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc) {
     CGFloat navBottomW = CGRectGetMaxY([nav convertRect:nav.bounds toView:nil]);
     CGFloat tableTopW = [table.superview convertPoint:table.frame.origin toView:nil].y;
     return navBottomW - tableTopW;
+}
+
+// Resting at the very top with the palette collapsed is a dead-end state: it
+// is reached through pull-to-refresh spring-backs and programmatic snaps (the
+// collapse tracking only re-expands on a settling drag), and it leaves the bar
+// unreachable without another pull. When the feed settles exactly at its top
+// rest with the bar away, force the reveal with the #975 flip: expand via
+// hidesSearchBarWhenScrolling = NO, then restore the scroll-away policy a beat
+// later. No-op while the search is active or a reveal is already in flight.
+static BOOL sNSBRevealInFlight = NO;
+static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table) {
+    if (sNSBRevealInFlight || !vc || !table) return;
+    if (table.isDragging || table.isDecelerating || table.isTracking) return;
+    UINavigationItem *navItem = vc.navigationItem;
+    UISearchController *sc = navItem.searchController;
+    if (!sc || sc.active || !navItem.hidesSearchBarWhenScrolling) return;
+    if (table.contentOffset.y > -table.contentInset.top + 2.0) return; // not at the top rest
+    if (CGRectGetHeight(sc.searchBar.bounds) > 1.0) return;            // already revealed
+    sNSBRevealInFlight = YES;
+    navItem.hidesSearchBarWhenScrolling = NO;
+    __weak UIViewController *weakVC = vc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        sNSBRevealInFlight = NO;
+        UIViewController *strongVC = weakVC;
+        if (!strongVC) return;
+        if (!strongVC.navigationItem.hidesSearchBarWhenScrolling) {
+            strongVC.navigationItem.hidesSearchBarWhenScrolling = YES;
+        }
+    });
 }
 
 %hook _TtC6Apollo21ASTableViewController
@@ -392,12 +445,9 @@ static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc) {
     UINavigationItem *navItem = [(UIViewController *)self navigationItem];
     if (!navItem.searchController) return;
     // Scroll-away policy. Flipped here, after the first layout, so the bar is
-    // never parked off-screen on arrival (#975's lesson). "Keep Search Bar
-    // Visible" pins it; otherwise it collapses with the scroll and a pull at
-    // the top reveals it again.
-    BOOL wantScrollAway = !sKeepSearchBarInPlace;
-    if (navItem.hidesSearchBarWhenScrolling != wantScrollAway) {
-        navItem.hidesSearchBarWhenScrolling = wantScrollAway;
+    // never parked off-screen on arrival (#975's lesson).
+    if (!navItem.hidesSearchBarWhenScrolling) {
+        navItem.hidesSearchBarWhenScrolling = YES;
     }
     // Safety net for the return-to-live-query path: if Apollo's search-active
     // layout hid the nav bar before the guard armed, put it back.
@@ -431,6 +481,20 @@ static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc) {
     UIScrollView *table = NSBTableForVC((UIViewController *)self);
     if (table && table == sNSBSessionTable) {
         NSBSetHeaderHidden(table, NSBIsSurfaced(table));
+    }
+    NSBEnsureBarRevealedAtTop((UIViewController *)self, table);
+    // If the last inset write landed while the palette was mid-animation (so
+    // the match rule saw a transient nav height and passed it through), correct
+    // it once things settle: a resting inset in the dead band just above the
+    // settled nav bottom collapses down to it. The net stops short of the
+    // pull-to-refresh spinner delta so an in-flight refresh is never clamped.
+    if (table && !table.isDragging && !table.isDecelerating && !sNSBSessionTyped) {
+        CGFloat want = NSBNavBottomForTable(table, (UIViewController *)self);
+        UIEdgeInsets cur = table.contentInset;
+        if (want > 1.0 && cur.top > want + 2.0 && cur.top <= want + sNSBToolbarBand + 15.0) {
+            cur.top = want;
+            table.contentInset = cur;
+        }
     }
 }
 
@@ -478,16 +542,19 @@ static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc) {
         objc_getAssociatedObject(self, kNSBFeedTableKey) != nil) {
         UIViewController *vc = NSBFeedVCForView((UIView *)self);
         if (vc) {
-            // Apollo's inset formula tracks the safe area (which now includes the
-            // search palette) but still reserves the band for its own — hidden —
-            // toolbar. Remove that dead band; Apollo's formula then follows the
-            // palette expanding/collapsing on its own. Floor at the nav bottom so
-            // content can never rest under the bar; growth beyond the resting
-            // shape (pull-to-refresh spinner) passes through untouched.
+            // Apollo's resting formula is safeAreaTop + its toolbar band; with
+            // the toolbar hidden, exactly that shape must lose the band so
+            // content rests flush under the palette. Rewrite ONLY a write that
+            // matches the formula against the CURRENT nav bottom — everything
+            // else (echoes of our own value re-applied by UIKit/Texture,
+            // pull-to-refresh spinner deltas computed off the current inset,
+            // writes mid palette-stretch where the nav is transiently tall)
+            // passes through untouched. Stateless on purpose: an earlier
+            // subtract-and-floor version compounded on echoes and baked the
+            // rubber-band-stretched palette height into the inset.
             CGFloat want = NSBNavBottomForTable((UIScrollView *)self, vc);
-            if (inset.top > sNSBToolbarBand) {
-                inset.top -= sNSBToolbarBand;
-                if (want > 1.0 && inset.top < want) inset.top = want;
+            if (want > 1.0 && fabs(inset.top - (want + sNSBToolbarBand)) < 2.0) {
+                inset.top = want;
             }
         }
     }
