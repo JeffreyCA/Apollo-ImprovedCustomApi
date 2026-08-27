@@ -335,7 +335,8 @@ def write_preview_imagesets(xcassets_path):
     missing = []
     for entry in registry.get("icons", []):
         icon_id = entry["id"]
-        for variant in PREVIEW_VARIANTS:
+        variants = ["default"] if entry.get("standardPack") else PREVIEW_VARIANTS
+        for variant in variants:
             src = os.path.join(ICONS_ROOT, icon_id, f"{variant}.png")
             if not os.path.isfile(src):
                 missing.append(src)
@@ -540,6 +541,7 @@ def load_icon_packages():
         registry = json.load(fp)
 
     packages = []
+    appearance_packages = []
     for entry in registry.get("icons", []):
         icon_id = entry["id"]
         pkg = os.path.join(ICONS_ROOT, icon_id, f"{icon_id}.icon")
@@ -547,7 +549,12 @@ def load_icon_packages():
             print(f"✗ missing .icon package: {pkg}", file=sys.stderr)
             return None
         packages.append(pkg)
-    return packages + _build_static_icon_packages(packages)
+        # Standard-pack additions follow the system appearance just like
+        # Apollo's built-in Standard icons. Only Liquid Glass group icons get
+        # the build-only static Light and Dark choices.
+        if entry.get("group") is not None:
+            appearance_packages.append(pkg)
+    return packages + _build_static_icon_packages(appearance_packages)
 
 
 def _find_xcode_26_0_1():

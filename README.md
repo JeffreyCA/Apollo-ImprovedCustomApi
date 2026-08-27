@@ -93,7 +93,7 @@ Finally, **don't copy these examples verbatim**. If everyone adopts the same "sa
 
 - New Comments Highlightifier
 - Saved Categories
-- App Icons + Wallpapers (Community Icon Pack, SPCA Animals, Ultra Icons, "sekrit" app icons)
+- App Icons + Wallpapers (Community and Ultra packs, the SPCA icon, and "sekrit" app icons)
 - Pixel Pals (including hidden "Artificial Superintelligence")
 - Themes (including hidden "Chumbus" theme)
 

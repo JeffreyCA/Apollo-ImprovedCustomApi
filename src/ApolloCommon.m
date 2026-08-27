@@ -1083,6 +1083,71 @@ static UIImage *ApolloCachedBundledPNGNamed(NSString *resourceName) {
     return image;
 }
 
+UIImage *ApolloBundledPDFTemplateImage(NSString *baseName, CGSize maxSize) {
+    if (baseName.length == 0) return nil;
+
+    static NSMutableDictionary<NSString *, UIImage *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSMutableDictionary dictionary];
+    });
+
+    NSString *key = [NSString stringWithFormat:@"%@|%.2fx%.2f", baseName, maxSize.width, maxSize.height];
+    @synchronized (cache) {
+        UIImage *cached = cache[key];
+        if (cached) return cached;
+    }
+
+    NSString *path = ApolloBundledResourcePath(baseName, @"pdf");
+    if (path.length == 0) return nil;
+
+    CGPDFDocumentRef document = CGPDFDocumentCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path]);
+    if (!document) {
+        ApolloLog(@"[Common] Bundled PDF %@ failed to open at %@", baseName, path);
+        return nil;
+    }
+
+    // Page 1 only: these are single-artboard icon exports, not documents.
+    CGPDFPageRef page = CGPDFDocumentGetPage(document, 1);
+    CGRect box = page ? CGPDFPageGetBoxRect(page, kCGPDFCropBox) : CGRectZero;
+    if (!page || box.size.width <= 0.0 || box.size.height <= 0.0) {
+        CGPDFDocumentRelease(document);
+        ApolloLog(@"[Common] Bundled PDF %@ has no usable first page", baseName);
+        return nil;
+    }
+
+    CGSize size = box.size;
+    if (maxSize.width > 0.0 && maxSize.height > 0.0) {
+        CGFloat fit = MIN(maxSize.width / size.width, maxSize.height / size.height);
+        // Only ever scale down — upscaling a small icon to fill the box would
+        // make it heavier than the ones it sits next to.
+        if (fit < 1.0) size = CGSizeMake(round(size.width * fit), round(size.height * fit));
+    }
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *rendererContext) {
+        CGContextRef context = rendererContext.CGContext;
+        // PDF space is y-up with the crop box's own origin; UIKit's context is
+        // y-down from (0,0), so flip and shift the page into it.
+        CGContextTranslateCTM(context, 0.0, size.height);
+        CGContextScaleCTM(context, size.width / box.size.width, -size.height / box.size.height);
+        CGContextTranslateCTM(context, -box.origin.x, -box.origin.y);
+        CGContextDrawPDFPage(context, page);
+    }];
+    CGPDFDocumentRelease(document);
+    if (!image) return nil;
+
+    // Contributed icons are drawn in Apollo blue; template mode keeps only the
+    // alpha so the row tints with the active theme accent like every other icon.
+    image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    @synchronized (cache) {
+        cache[key] = image;
+    }
+    return image;
+}
+
 static UIImage *ApolloRoundedPNGSettingsIcon(UIImage *source, CGFloat size) {
     if (!source) return nil;
     if (size <= 0.0) size = 29.0;

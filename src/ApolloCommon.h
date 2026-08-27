@@ -108,6 +108,14 @@ NSAttributedString *ApolloSymbolAttachment(NSString *symbolName, UIFont *font, U
 // inject-deb-local.sh). Returns nil if no layout has the file.
 NSString *ApolloBundledResourcePath(NSString *baseName, NSString *extension);
 
+// Renders a bundled single-page PDF (`baseName`.pdf in Resources/) into a
+// template UIImage at the device scale, so contributed vector icons stay crisp
+// on every screen instead of shipping as fixed-scale PNGs. `maxSize` bounds the
+// result while preserving aspect ratio; pass CGSizeZero for the PDF's natural
+// size. Results are cached per name+size. Returns nil when the resource isn't
+// staged in this install layout, so callers can fall back to an SF Symbol.
+UIImage *ApolloBundledPDFTemplateImage(NSString *baseName, CGSize maxSize);
+
 // Monotonic milliseconds (CACurrentMediaTime-based); ~ns-cheap. Used by the
 // trailing-debounce relayout schedulers (InlineImages, LinkPreviews).
 double ApolloPerfNowMs(void);
