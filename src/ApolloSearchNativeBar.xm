@@ -271,13 +271,18 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     // down the session the user just re-entered.
     sNSBDismissWindow = NO;
     ++sNSBDismissGen;
+    // Bump the clear generation BEFORE ending the scroll-back. -finish runs the
+    // tween's completion SYNCHRONOUSLY, and that completion is the one carrying
+    // the deferred reload — so with the bump after, its `clearGen != sNSBClearGen`
+    // guard still compared equal and a superseded clear fired an empty-query
+    // reload immediately before the real one, doubling the work on the very path
+    // the deferral exists to keep clear.
+    NSUInteger clearGen = ++sNSBClearGen;
     // End the scroll-back outright rather than letting it run out its clock:
     // it holds the offset against every other writer (NSBTweenHoldsOffset), so
     // left alive it would drag the feed to rest under the query the user is
-    // typing and hand over to the surfacing pin only when it finished. The gen
-    // bump above already made its completion a no-op.
+    // typing and hand over to the surfacing pin only when it finished.
     NSBFinishScrollBack();
-    NSUInteger clearGen = ++sNSBClearGen;
     ApolloNSBWriteBoolIvar(vc, "isSearching", YES);
     sNSBSessionTyped = YES;
     if (![field.text isEqualToString:(text ?: @"")]) field.text = text ?: @"";
