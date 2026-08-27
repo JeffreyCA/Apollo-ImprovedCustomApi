@@ -118,6 +118,7 @@ static CGFloat sNSBDismissTargetTop = 0.0;
 
 static const void *kNSBBridgeKey     = &kNSBBridgeKey;      // VC -> bridge delegate object
 static const void *kNSBFeedTableKey  = &kNSBFeedTableKey;   // ASTableView -> @YES (native-managed feed)
+static const void *kNSBAppearedKey   = &kNSBAppearedKey;    // VC -> @YES once it has appeared at least once
 static CGFloat sNSBToolbarBand = 45.0; // Apollo's resting toolbar height (the band its inset reserves)
 // How far above the safe area a resting write may sit and still count as one:
 // the toolbar band (45pt fresh, 37pt on a feed restored after a post) plus
@@ -778,6 +779,27 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
     });
 }
 
+// The reveal above only ever ran from the controller's layout pass, and a
+// programmatic scroll — the tab-bar scroll-to-top, a pull-to-refresh settling —
+// does not trigger one, so the bar stayed collapsed at the top until the user
+// pulled it down by hand. The feed's own geometry setters DO run on those
+// paths, so ask from there as well, coalesced to one check per runloop turn.
+static BOOL sNSBRevealCheckPending = NO;
+static void NSBScheduleRevealCheck(UIScrollView *table) {
+    if (sNSBRevealCheckPending || !table || sNSBRevealInFlight) return;
+    if (objc_getAssociatedObject(table, kNSBFeedTableKey) == nil) return;
+    if (table.isDragging || table.isTracking) return; // a live drag reveals on its own
+    sNSBRevealCheckPending = YES;
+    __weak UIScrollView *weakTable = table;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sNSBRevealCheckPending = NO;
+        UIScrollView *sv = weakTable;
+        if (!sv || sv.isDecelerating || sv.isDragging || sv.isTracking) return;
+        UIViewController *vc = NSBFeedVCForView(sv);
+        if (vc) NSBEnsureBarRevealedAtTop(vc, sv);
+    });
+}
+
 %hook _TtC6Apollo21ASTableViewController
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -809,6 +831,11 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
     %orig;
     if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchFeedVC(self)) return;
     sNSBTransitioning = NO;
+    // Record the appearance before anything can bail: the scroll-away policy is
+    // applied from the layout pass too (see below), and on the paths where the
+    // search controller is attached late this is the only thing that tells that
+    // pass the first appearance is behind us.
+    objc_setAssociatedObject(self, kNSBAppearedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UINavigationItem *navItem = [(UIViewController *)self navigationItem];
     if (!navItem.searchController) return;
     // Scroll-away policy. Flipped here, after the first layout, so the bar is
@@ -845,6 +872,20 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
     // lazily here too (idempotent — bails once a searchController exists).
     NSBAttachNativeSearch((UIViewController *)self);
     NSBHideApolloToolbar((UIViewController *)self);
+    // Apply the scroll-away policy here as well as in viewDidAppear. The
+    // controller is attached lazily on some paths (the toolbar ivars can still
+    // be nil at willAppear), so viewDidAppear can run before there is anything
+    // to configure and leave the bar pinned. It then still collapses — UIKit
+    // owns the inset now, so the palette compresses with the scroll either way
+    // — but every path that puts it back is gated on the scroll-away policy
+    // being on, so the bar would stay collapsed until pulled down by hand.
+    UINavigationItem *policyItem = [(UIViewController *)self navigationItem];
+    if (policyItem.searchController && !policyItem.hidesSearchBarWhenScrolling &&
+        objc_getAssociatedObject(self, kNSBAppearedKey) != nil &&
+        !sNSBRevealInFlight && !sNSBDismissWindow) {
+        policyItem.hidesSearchBarWhenScrolling = YES;
+    }
+
     UIScrollView *table = NSBTableForVC((UIViewController *)self);
     if (table && table == sNSBSessionTable) {
         NSBSetHeaderHidden(table, NSBIsSurfaced(table));
@@ -923,6 +964,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 
 - (void)setContentOffset:(CGPoint)offset {
     UIScrollView *sv = (UIScrollView *)self;
+    if (ApolloNativeFeedSearchEnabled()) NSBScheduleRevealCheck(sv);
     if (ApolloNativeFeedSearchEnabled() && NSBRetargetApolloTopPark(sv, &offset.y) &&
         NSBTraceEnabled()) {
         ApolloLog(@"[NSBTrace] retarget offset -> %.1f (inTop=%.1f adjTop=%.1f)",
@@ -965,6 +1007,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 
 - (void)setBounds:(CGRect)bounds {
     UIScrollView *sv = (UIScrollView *)self;
+    if (ApolloNativeFeedSearchEnabled()) NSBScheduleRevealCheck(sv);
     if (NSBTraceEnabled() && ApolloNativeFeedSearchEnabled() &&
         objc_getAssociatedObject(self, kNSBFeedTableKey) != nil &&
         fabs(bounds.origin.y - sv.bounds.origin.y) > 0.01) {
