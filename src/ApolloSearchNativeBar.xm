@@ -259,7 +259,9 @@ static UIViewController *NSBFeedVCForView(UIView *view) {
 
 // Both defined with the tween, below.
 static void NSBFinishScrollBack(void);
-static void NSBScrollBackAfterClear(UIViewController *vc, BOOL animated, void (^completion)(void));
+static void NSBDissolveSwap(UIScrollView *table);
+static void NSBScrollBackAfterClear(UIViewController *vc, BOOL animated,
+                                    void (^completion)(BOOL didScroll));
 
 static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     UITextField *field = (UITextField *)ApolloNSBObjectIvar(vc, "searchTextField");
@@ -316,8 +318,9 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     // flash in its worst form: no scroll at all. A drag DURING the restore still
     // wins; the tween bails on it in -step:.
     sNSBUserScrolled = NO;
-    NSBScrollBackAfterClear(vc, YES, ^{
+    NSBScrollBackAfterClear(vc, YES, ^(BOOL didScroll) {
         if (clearGen != sNSBClearGen) return;  // typed again, or dismissed
+        if (!didScroll) NSBDissolveSwap(NSBTableForVC(weakVC));
         reload();
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)),
@@ -425,13 +428,46 @@ static BOOL NSBTweenHoldsOffset(UIScrollView *sv, CGFloat *y) {
 
 static void NSBRestoreHeaderForTable(UIScrollView *sv);
 
+// Dissolve the row swap when there is no scroll to hide it behind.
+//
+// Dismissing a search puts the feed's own posts back in place of the results.
+// When the restore scrolls — a subreddit whose chrome was surfaced — that swap
+// happens off-screen behind the moving header and nobody sees it. When there is
+// nothing to scroll, it is a straight cut, and on a query that returned NOTHING
+// it is a cut from a BLACK screen to a full feed: measured 13.9 -> 45.8 -> 87.0
+// in two frames. That is the flash people actually report, and it has nothing to
+// do with the header — it happens on Home, and on any feed whose header is not
+// surfaced.
+//
+// So in exactly those cases, cover the table with a snapshot of what is on
+// screen, let Apollo swap the rows underneath, and fade the snapshot out. The
+// nav bar is not covered, so the bar's own dismissal is untouched.
+static void NSBDissolveSwap(UIScrollView *table) {
+    if (!table) return;
+    UIView *host = table.superview;
+    if (!host || CGRectIsEmpty(table.bounds)) return;
+    UIView *snap = [table snapshotViewAfterScreenUpdates:NO];
+    if (!snap) return;
+    snap.frame = table.frame;
+    snap.userInteractionEnabled = NO;
+    [host addSubview:snap];
+    // Linear: an eased alpha spends most of the change in a couple of frames,
+    // which is the thing being removed. Measured with ease-in-out the swap still
+    // landed 23.5 -> 50.3 in one frame; linear spreads it across the whole fade.
+    [UIView animateWithDuration:0.30 delay:0.0
+                        options:UIViewAnimationOptionCurveLinear |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ snap.alpha = 0.0; }
+                     completion:^(BOOL finished) { [snap removeFromSuperview]; }];
+}
+
 // Restore the feed after the query is cleared with the bar left focused.
 // `animated` runs the same 0.32s scroll-back the cancel uses; the delayed
 // backstop passes NO and only snaps whatever Apollo's reload left out of
 // place, never while a scroll-back still owns the offset.
 static void NSBScrollBackAfterClear(UIViewController *vc, BOOL animated,
-                                    void (^completion)(void)) {
-    void (^done)(void) = ^{ if (completion) completion(); };
+                                    void (^completion)(BOOL didScroll)) {
+    void (^done)(void) = ^{ if (completion) completion(NO); };
     if (!vc) { done(); return; }
     UIScrollView *sv = NSBTableForVC(vc);
     if (NSBTraceEnabled()) {
@@ -463,7 +499,7 @@ static void NSBScrollBackAfterClear(UIViewController *vc, BOOL animated,
     tween.fromY = sv.contentOffset.y;
     tween.toY = rest;
     tween.duration = 0.32;
-    tween.completion = ^{ sNSBTween = nil; done(); };
+    tween.completion = ^{ sNSBTween = nil; if (completion) completion(YES); };
     sNSBTween = tween;
     [tween start];
 }
@@ -539,6 +575,8 @@ static void NSBApolloDismiss(UIViewController *vc) {
         return;
     }
 
+    // No scroll-back on this path — dissolve the row swap instead of cutting it.
+    NSBDissolveSwap(table);
     NSBApolloDismissNow(vc);
 }
 
@@ -655,7 +693,13 @@ static CGFloat NSBDesiredOffsetY(UIScrollView *sv) {
     if (sv.contentSize.height > 1.0) {
         CGFloat maxLegal = sv.contentSize.height - CGRectGetHeight(sv.bounds) +
                            sv.adjustedContentInset.bottom;
-        if (surfaced > maxLegal) surfaced = maxLegal;
+        // All or nothing. Clamping DOWN to maxLegal would leave the header part
+        // way off the top on a short result list — and the alpha hide is
+        // all-or-nothing, so a partly-visible header gets blanked and renders as
+        // an empty slice under the nav, a state that did not exist before this
+        // cap. If the results cannot carry the whole header past the top, do not
+        // surface at all.
+        if (surfaced > maxLegal) return rest;
     }
     return surfaced > rest ? surfaced : rest;
 }
