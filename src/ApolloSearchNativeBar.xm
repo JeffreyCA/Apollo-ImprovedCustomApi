@@ -90,6 +90,14 @@ static __weak UINavigationBar  *sNSBSessionNav   = nil;
 static BOOL sNSBSessionTyped   = NO;
 static BOOL sNSBTransitioning  = NO;  // feed VC is disappearing (push/pop in flight)  // Apollo's isSearching was engaged (needs a real dismiss)
 static BOOL sNSBUserScrolled   = NO;  // user dragged the results — stop pinning so they can browse
+// Dismiss window: for ~1.4s after cancel, Apollo's model-reset re-parks the
+// inset/offset for ITS resting shape (and mid-morph values). The final
+// geometry is already known when the X is tapped — the nav bar (palette
+// included) does not move during the cancel — so correct every re-park write
+// INLINE to the captured target. Without this the reload renders at the wrong
+// rest and the settle timers hop it into place a visible beat later.
+static BOOL    sNSBDismissWindow    = NO;
+static CGFloat sNSBDismissTargetTop = 0.0;
 
 static const void *kNSBBridgeKey     = &kNSBBridgeKey;      // VC -> bridge delegate object
 static const void *kNSBFeedTableKey  = &kNSBFeedTableKey;   // ASTableView -> @YES (native-managed feed)
@@ -143,6 +151,7 @@ static UIViewController *NSBFeedVCForView(UIView *view) {
 static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     UITextField *field = (UITextField *)ApolloNSBObjectIvar(vc, "searchTextField");
     if (![field isKindOfClass:[UITextField class]]) return;
+    sNSBDismissWindow = NO; // a new query supersedes any in-flight dismiss correction
     ApolloNSBWriteBoolIvar(vc, "isSearching", YES);
     sNSBSessionTyped = YES;
     if (![field.text isEqualToString:(text ?: @"")]) field.text = text ?: @"";
@@ -164,6 +173,8 @@ static void NSBApolloDismiss(UIViewController *vc) {
     sNSBSessionTyped = NO;
     sNSBUserScrolled = NO;
     if (table) NSBRestoreHeaderForTable(table);
+    sNSBDismissTargetTop = table ? NSBNavBottomForTable(table, vc) : 0.0;
+    sNSBDismissWindow = (sNSBDismissTargetTop > 1.0);
     id field = ApolloNSBObjectIvar(vc, "searchTextField");
     if ([vc respondsToSelector:@selector(dismissSearchBarButtonTappedWithSender:)]) {
         ((void (*)(id, SEL, id))objc_msgSend)(vc, @selector(dismissSearchBarButtonTappedWithSender:), field);
@@ -205,7 +216,10 @@ static void NSBApolloDismiss(UIViewController *vc) {
     };
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), settle);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), settle);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.20 * NSEC_PER_SEC)), dispatch_get_main_queue(), settle);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.40 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gen == sNSBDismissGen) sNSBDismissWindow = NO;
+        settle();
+    });
 }
 
 // MARK: - Results surfacing (subreddit chrome)
@@ -556,6 +570,14 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
             if (want > 1.0 && fabs(inset.top - (want + sNSBToolbarBand)) < 2.0) {
                 inset.top = want;
             }
+            // Cancel in flight: land every re-park at the known final rest on
+            // the SAME frame it is written (the settle timers are only a
+            // backstop). Net bounded away from the pull-to-refresh delta.
+            if (sNSBDismissWindow && (UIScrollView *)self == sNSBSessionTable &&
+                inset.top > sNSBDismissTargetTop + 2.0 &&
+                inset.top <= sNSBDismissTargetTop + sNSBToolbarBand + 15.0) {
+                inset.top = sNSBDismissTargetTop;
+            }
         }
     }
     %orig(inset);
@@ -563,6 +585,11 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 
 - (void)setContentOffset:(CGPoint)offset {
     UIScrollView *sv = (UIScrollView *)self;
+    if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow && sv == sNSBSessionTable &&
+        !sv.isDragging && !sv.isTracking &&
+        offset.y > -sNSBDismissTargetTop + 0.5) {
+        offset.y = -sNSBDismissTargetTop; // dismissal re-park -> straight to the final rest
+    }
     if (ApolloNativeFeedSearchEnabled() && sv == sNSBSessionTable &&
         sNSBSessionTyped && NSBSessionQueryText().length > 0) {
         CGFloat target = NSBDesiredOffsetY(sv);
@@ -582,6 +609,11 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 
 - (void)setBounds:(CGRect)bounds {
     UIScrollView *sv = (UIScrollView *)self;
+    if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow && sv == sNSBSessionTable &&
+        !sv.isDragging && !sv.isTracking &&
+        bounds.origin.y > -sNSBDismissTargetTop + 0.5) {
+        bounds.origin.y = -sNSBDismissTargetTop;
+    }
     if (ApolloNativeFeedSearchEnabled() && sv == sNSBSessionTable &&
         !sv.isDragging && !sv.isDecelerating && NSBIsSurfaced(sv)) {
         CGFloat want = NSBDesiredOffsetY(sv);
