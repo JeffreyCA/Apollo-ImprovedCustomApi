@@ -394,7 +394,8 @@ static NSUInteger ApolloGalleryMenuInsertionIndex(NSArray<UIMenuElement *> *chil
     };
     spec.image = ^UIImage *(id actionController, UITableViewCell *donor) {
         (void)actionController; (void)donor;
-        return [UIImage systemImageNamed:kApolloGalleryMenuSymbol];
+        return ApolloActionMenuSymbolIcon(kApolloGalleryMenuSymbol)
+            ?: [UIImage systemImageNamed:kApolloGalleryMenuSymbol];
     };
     spec.perform = ^(id actionController) {
         ApolloGalleryMenuOpenForController(actionController);
@@ -408,8 +409,13 @@ static NSUInteger ApolloGalleryMenuInsertionIndex(NSArray<UIMenuElement *> *chil
         NSString *listingIdentifier = ApolloGalleryMenuListingIdentifierForController(actionController);
         if (listingIdentifier.length == 0) return;
         __weak id weakController = actionController;
+        // ApolloActionMenuSymbolIcon, not a raw symbol: UIMenu restyles raw
+        // symbol images through its own smaller configuration, which left this
+        // row's glyph ~15pt next to the ~24pt native rasters (#985 review).
+        UIImage *galleryIcon = ApolloActionMenuSymbolIcon(kApolloGalleryMenuSymbol)
+            ?: [UIImage systemImageNamed:kApolloGalleryMenuSymbol];
         UIAction *galleryAction = [UIAction actionWithTitle:kApolloGalleryMenuTitle
-                                                      image:[UIImage systemImageNamed:kApolloGalleryMenuSymbol]
+                                                      image:galleryIcon
                                                  identifier:nil
                                                     handler:^(__unused __kindof UIAction *sender) {
             ApolloGalleryMenuOpenForController(weakController);
@@ -418,8 +424,10 @@ static NSUInteger ApolloGalleryMenuInsertionIndex(NSArray<UIMenuElement *> *chil
 
         // Profiles carry the Hidden & Deleted browser in the same group.
         if ([listingIdentifier hasPrefix:@"u/"]) {
+            UIImage *hiddenIcon = ApolloActionMenuSymbolIcon(kApolloGalleryMenuHiddenSymbol)
+                ?: [UIImage systemImageNamed:kApolloGalleryMenuHiddenSymbol];
             UIAction *hidden = [UIAction actionWithTitle:kApolloGalleryMenuHiddenTitle
-                                                   image:[UIImage systemImageNamed:kApolloGalleryMenuHiddenSymbol]
+                                                   image:hiddenIcon
                                               identifier:nil
                                                  handler:^(__unused __kindof UIAction *sender) {
                 ApolloGalleryMenuOpenHiddenContentForController(weakController);
@@ -460,7 +468,8 @@ static NSUInteger ApolloGalleryMenuInsertionIndex(NSArray<UIMenuElement *> *chil
     };
     hiddenSpec.image = ^UIImage *(id actionController, UITableViewCell *donor) {
         (void)actionController; (void)donor;
-        return [UIImage systemImageNamed:kApolloGalleryMenuHiddenSymbol];
+        return ApolloActionMenuSymbolIcon(kApolloGalleryMenuHiddenSymbol)
+            ?: [UIImage systemImageNamed:kApolloGalleryMenuHiddenSymbol];
     };
     hiddenSpec.perform = ^(id actionController) {
         ApolloGalleryMenuOpenHiddenContentForController(actionController);

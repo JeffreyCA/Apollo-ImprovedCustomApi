@@ -55,6 +55,104 @@ void ApolloActionMenuRegister(ApolloActionMenuSpec *spec) {
     [sApolloActionMenuRegistry addObject:spec];
 }
 
+UIImage *ApolloActionMenuSymbolIcon(NSString *symbolName) {
+    if (symbolName.length == 0) return nil;
+
+    static NSMutableDictionary<NSString *, UIImage *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSMutableDictionary dictionary];
+    });
+    @synchronized (cache) {
+        UIImage *cached = cache[symbolName];
+        if (cached) return cached;
+    }
+
+    // Apollo's option-* art fills its canvas edge-to-edge, while an SF Symbol
+    // image carries baseline/side padding inside its bounds — so matching
+    // image sizes still leaves the symbol's GLYPH visibly lighter than the
+    // rasters next to it. Match the glyphs instead: render the symbol large,
+    // find the drawn pixels' bounding box, and scale so that box's long edge
+    // is exactly the shared icon-box side, the same rule
+    // ApolloNativeActionMenuSizedIcon applies to the assets.
+    UIImageSymbolConfiguration *configuration =
+        [UIImageSymbolConfiguration configurationWithPointSize:40.0
+                                                        weight:UIImageSymbolWeightRegular];
+    UIImage *symbol = [UIImage systemImageNamed:symbolName withConfiguration:configuration];
+    if (!symbol) return nil;
+    UIImage *drawableSymbol = [symbol imageWithTintColor:UIColor.blackColor
+                                           renderingMode:UIImageRenderingModeAlwaysOriginal];
+
+    CGSize symbolSize = symbol.size;
+    if (symbolSize.width <= 0.0 || symbolSize.height <= 0.0) return nil;
+
+    // One probe render at 1px/pt to locate the glyph within the padded image.
+    // Rendered through UIGraphicsImageRenderer and blitted with
+    // CGContextDrawImage so buffer row 0 is unambiguously the image's TOP —
+    // the bounding box below is directly in UIKit-oriented points.
+    NSInteger probeWidth = (NSInteger)ceil(symbolSize.width);
+    NSInteger probeHeight = (NSInteger)ceil(symbolSize.height);
+    UIGraphicsImageRendererFormat *probeFormat = [UIGraphicsImageRendererFormat preferredFormat];
+    probeFormat.opaque = NO;
+    probeFormat.scale = 1.0;
+    UIGraphicsImageRenderer *probeRenderer =
+        [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(probeWidth, probeHeight)
+                                               format:probeFormat];
+    UIImage *probeImage = [probeRenderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        [drawableSymbol drawInRect:CGRectMake(0, 0, probeWidth, probeHeight)];
+    }];
+    CGImageRef probeCGImage = probeImage.CGImage;
+    if (!probeCGImage) return nil;
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    NSMutableData *probe = [NSMutableData dataWithLength:(NSUInteger)(probeWidth * probeHeight * 4)];
+    CGContextRef probeContext = CGBitmapContextCreate(probe.mutableBytes,
+                                                      (size_t)probeWidth, (size_t)probeHeight,
+                                                      8, (size_t)(probeWidth * 4), colorSpace,
+                                                      kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(colorSpace);
+    if (!probeContext) return nil;
+    CGContextDrawImage(probeContext, CGRectMake(0, 0, probeWidth, probeHeight), probeCGImage);
+    CGContextRelease(probeContext);
+
+    const uint8_t *pixels = (const uint8_t *)probe.bytes;
+    NSInteger minX = probeWidth, minY = probeHeight, maxX = -1, maxY = -1;
+    for (NSInteger y = 0; y < probeHeight; y++) {
+        for (NSInteger x = 0; x < probeWidth; x++) {
+            if (pixels[(y * probeWidth + x) * 4 + 3] > 16) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    if (maxX < 0) return nil;
+    CGRect glyphBox = CGRectMake(minX, minY, maxX - minX + 1, maxY - minY + 1);
+
+    CGFloat scale = ApolloActionMenuIconBoxSide / MAX(glyphBox.size.width, glyphBox.size.height);
+    CGSize canvasSize = CGSizeMake(round(glyphBox.size.width * scale),
+                                   round(glyphBox.size.height * scale));
+    CGRect drawRect = CGRectMake(-glyphBox.origin.x * scale,
+                                 -glyphBox.origin.y * scale,
+                                 probeWidth * scale,
+                                 probeHeight * scale);
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer =
+        [[UIGraphicsImageRenderer alloc] initWithSize:canvasSize format:format];
+    UIImage *image = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        [drawableSymbol drawInRect:drawRect];
+    }];
+    image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+
+    @synchronized (cache) {
+        cache[symbolName] = image;
+    }
+    return image;
+}
+
 #pragma mark - Per-controller slot memoization
 
 @interface ApolloActionMenuSlotState : NSObject
@@ -188,8 +286,26 @@ static UIView *ApolloActionMenuFirstSubviewOfClass(UIView *root, Class cls, BOOL
     CGRect bounds = self.contentView.bounds;
 
     if (!CGRectIsEmpty(self.apolloIconFrame)) {
-        CGRect iconFrame = self.apolloIconFrame;
-        iconFrame.origin.y = (bounds.size.height - iconFrame.size.height) / 2.0;
+        // The donor frame is row 0's icon frame — the right COLUMN anchor, but
+        // the wrong SIZE to force on our image: Apollo sizes each row's icon
+        // view to its own icon, so row 0 can be a narrow glyph (the comments
+        // sheet leads with Upvote's slim arrow) and fitting into it shrank
+        // every injected icon below its ~24pt neighbours (#985 review). Show
+        // the image at its own size — specs pre-normalize their icons to
+        // ApolloActionMenuIconBoxSide — centered on the donor column; the
+        // box-side cap is just a guard against an oversized stray.
+        CGRect anchorFrame = self.apolloIconFrame;
+        CGRect iconFrame = anchorFrame;
+        CGSize imageSize = self.apolloIconView.image.size;
+        if (imageSize.width > 0.5 && imageSize.height > 0.5) {
+            CGFloat fit = MIN(1.0, ApolloActionMenuIconBoxSide / MAX(imageSize.width, imageSize.height));
+            CGSize displaySize = CGSizeMake(imageSize.width * fit, imageSize.height * fit);
+            iconFrame = CGRectMake(round(CGRectGetMidX(anchorFrame) - displaySize.width / 2.0),
+                                   round((bounds.size.height - displaySize.height) / 2.0),
+                                   displaySize.width, displaySize.height);
+        } else {
+            iconFrame.origin.y = (bounds.size.height - iconFrame.size.height) / 2.0;
+        }
         self.apolloIconView.frame = iconFrame;
         self.apolloIconView.hidden = NO;
     } else {
