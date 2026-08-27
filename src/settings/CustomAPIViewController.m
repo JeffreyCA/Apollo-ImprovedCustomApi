@@ -2353,15 +2353,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     // Sub-option: only exists while Subreddit List Enhancements is on.
     modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
 
-    // Sibling of Hide Feed Descriptions for the MULTIREDDITS section's rows
-    // (which otherwise show a custom description, or the joined subreddit
-    // list). Also independent of the enhancements master.
-    ApolloSettingsRow *hideMultiredditDescriptions =
-        [ApolloSettingsRow switchRowWithID:@"sub.hideMultiredditDescriptions"
-                                     title:@"Hide Multireddit Descriptions"
-                                      isOn:^BOOL { return sHideMultiredditDescriptions; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
-
     // Pushes the dedicated Subreddit Layout screen — the single customize
     // screen for everything subreddit-page-related: Density (New, Classic, or
     // Apollo's native header), the Apollo Reborn header show switches, and
@@ -2376,8 +2367,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Multireddits show their contents or a custom description; Hide Multireddit Descriptions removes that line."
-                                              rows:@[ enhancements, feedShortcuts, modernDividers, hideMultiredditDescriptions, subredditLayout ]];
+                                            footer:nil
+                                              rows:@[ enhancements, feedShortcuts, modernDividers, subredditLayout ]];
 }
 
 - (ApolloSettingsSection *)buildFeedShortcutsPreviewSection {
@@ -2471,18 +2462,31 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     };
 
-    ApolloSettingsRow *hideDescriptions =
+    return [ApolloSettingsSection sectionWithTitle:@"Appearance"
+                                            footer:nil
+                                              rows:@[ feedIconStyle, feedLayout ]];
+}
+
+- (ApolloSettingsSection *)buildFeedShortcutsDescriptionsSection {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *hideFeedDescriptions =
         [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
                                      title:@"Hide Feed Descriptions"
                                       isOn:^BOOL { return sHideSubredditListDescriptions; }
                                   onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
-    hideDescriptions.visible = ^BOOL {
+    hideFeedDescriptions.visible = ^BOOL {
         return sSubredditFeedLayout == ApolloSubredditFeedLayoutRows;
     };
 
-    return [ApolloSettingsSection sectionWithTitle:@"Appearance"
-                                            footer:nil
-                                              rows:@[ feedIconStyle, feedLayout, hideDescriptions ]];
+    ApolloSettingsRow *hideMultiredditDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideMultiredditDescriptions"
+                                     title:@"Hide Multireddit Descriptions"
+                                      isOn:^BOOL { return sHideMultiredditDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Descriptions"
+                                            footer:@"Hide Feed Descriptions is available only with Rows. Multireddit descriptions show a custom description or the included subreddits."
+                                              rows:@[ hideFeedDescriptions, hideMultiredditDescriptions ]];
 }
 
 - (NSString *)subredditFeedIconStyleText {
@@ -4423,7 +4427,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildFeedShortcutsPreviewSection],
               [self buildFeedShortcutsVisibilitySection],
-              [self buildFeedShortcutsControlsSection] ];
+              [self buildFeedShortcutsControlsSection],
+              [self buildFeedShortcutsDescriptionsSection] ];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
