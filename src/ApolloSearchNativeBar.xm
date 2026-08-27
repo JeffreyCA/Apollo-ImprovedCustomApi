@@ -98,7 +98,12 @@ static NSUInteger sNSBDismissGen = 0; // stale-timer guard for the settle snap
 // INLINE to the captured target. Without this the reload renders at the wrong
 // rest and the settle timers hop it into place a visible beat later.
 static BOOL    sNSBDismissWindow    = NO;
-static BOOL    sNSBDismissScrolling = NO;  // YES while the pre-dismiss scroll-back animates
+static BOOL    sNSBDismissScrolling = NO;  // YES while the retargeted scroll-back animates
+// YES between the cancel tap and Apollo's scroll-back actually running. The
+// per-frame pins must stay down for that gap: firing one early snaps the feed
+// to the rest in a single frame, and Apollo's animation then has nothing left
+// to travel — the teleport we are trying to remove.
+static BOOL    sNSBAwaitingScroll    = NO;
 static CGFloat sNSBDismissTargetTop = 0.0;
 
 static const void *kNSBBridgeKey     = &kNSBBridgeKey;      // VC -> bridge delegate object
@@ -183,6 +188,59 @@ static void NSBDriveApolloQuery(UIViewController *vc, NSString *text) {
     }
 }
 
+// MARK: - Scroll tween
+//
+// ASTableView applies both -setContentOffset:animated: and a contentOffset set
+// inside a UIView animation block INSTANTLY (verified: one-frame teleports in
+// both cases), so the chrome restore has to be driven frame by frame. A short
+// display-link tween gives us a real, predictable scroll that lands exactly on
+// the target.
+@interface ApolloNSBScrollTween : NSObject
+@property (nonatomic, weak) UIScrollView *scrollView;
+@property (nonatomic, assign) CGFloat fromY;
+@property (nonatomic, assign) CGFloat toY;
+@property (nonatomic, assign) CFTimeInterval startTime;
+@property (nonatomic, assign) CFTimeInterval duration;
+@property (nonatomic, strong) CADisplayLink *link;
+@property (nonatomic, copy) void (^completion)(void);
+@end
+
+@implementation ApolloNSBScrollTween
+
+- (void)start {
+    self.startTime = 0.0;
+    self.link = [CADisplayLink displayLinkWithTarget:self selector:@selector(step:)];
+    [self.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+}
+
+- (void)step:(CADisplayLink *)link {
+    UIScrollView *sv = self.scrollView;
+    if (!sv) { [self finish]; return; }
+    if (self.startTime == 0.0) self.startTime = link.timestamp;
+    CGFloat t = (CGFloat)((link.timestamp - self.startTime) / self.duration);
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    // easeInOutCubic
+    CGFloat e = (t < 0.5) ? (4.0 * t * t * t) : (1.0 - pow(-2.0 * t + 2.0, 3.0) / 2.0);
+    CGFloat y = self.fromY + (self.toY - self.fromY) * e;
+    // The user grabbing the feed mid-restore wins outright.
+    if (sv.isDragging || sv.isTracking) { [self finish]; return; }
+    sv.contentOffset = CGPointMake(sv.contentOffset.x, y);
+    if (t >= 1.0) [self finish];
+}
+
+- (void)finish {
+    [self.link invalidate];
+    self.link = nil;
+    void (^done)(void) = self.completion;
+    self.completion = nil;
+    if (done) done();
+}
+
+@end
+
+static ApolloNSBScrollTween *sNSBTween = nil;
+
 static void NSBRestoreHeaderForTable(UIScrollView *sv);
 static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc);
 static void NSBApolloDismissNow(UIViewController *vc);
@@ -210,22 +268,47 @@ static void NSBApolloDismiss(UIViewController *vc) {
     if (sNSBDismissWindow && table &&
         table.contentOffset.y > -sNSBDismissTargetTop + 8.0 &&
         !table.isDragging && !table.isTracking) {
+        // Give the feed its FINAL top inset before animating. While the search
+        // is active Apollo runs a smaller inset (the palette is in its active
+        // shape), and a scroll view clamps contentOffset to -contentInset.top —
+        // so animating to the real rest landed short, and Apollo's own re-park
+        // then hopped it twice more (measured: -159, then -213, then -176).
+        // The current offset is far from either boundary, so raising the inset
+        // here moves nothing on screen; it just makes the target reachable.
+        // Hold the search bar expanded for the whole teardown. Left alone,
+        // UIKit collapses the palette the moment the bar deactivates and the
+        // auto-reveal expands it again a beat later — measured as navBottom
+        // 176 -> 116 -> 176. That moves the feed's rest twice underneath the
+        // scroll, which reads as a hop. Pinned, the rest is a constant for the
+        // whole teardown; the scroll-away policy is restored once the window
+        // closes (we end at the top, where flipping it back leaves the bar
+        // revealed).
+        vc.navigationItem.hidesSearchBarWhenScrolling = NO;
+
+        // Hold the pins down for the animation: firing one snaps the feed to
+        // the rest in a single frame and leaves the scroll nothing to travel.
+        sNSBAwaitingScroll = YES;
+
+        // Scroll the chrome back first, then let Apollo swap the rows. Apollo's
+        // own teardown scroll (aimed at ITS resting inset) is retargeted by the
+        // setContentOffset:animated: hook below, so it agrees with this one
+        // instead of cancelling it mid-flight.
         NSUInteger scrollGen = ++sNSBDismissGen;
-        sNSBDismissScrolling = YES;
-        __weak UIScrollView *weakTable = table;
         __weak UIViewController *weakVC = vc;
-        [UIView animateWithDuration:0.28
-                              delay:0.0
-                            options:UIViewAnimationOptionCurveEaseInOut |
-                                    UIViewAnimationOptionBeginFromCurrentState
-                         animations:^{
-            UIScrollView *sv = weakTable;
-            if (sv) sv.contentOffset = CGPointMake(0.0, -sNSBDismissTargetTop);
-        } completion:^(__unused BOOL finished) {
-            sNSBDismissScrolling = NO;
+        [sNSBTween finish];
+        ApolloNSBScrollTween *tween = [[ApolloNSBScrollTween alloc] init];
+        tween.scrollView = table;
+        tween.fromY = table.contentOffset.y;
+        tween.toY = -sNSBDismissTargetTop;
+        tween.duration = 0.32;
+        tween.completion = ^{
+            sNSBAwaitingScroll = NO;
+            sNSBTween = nil;
             if (scrollGen != sNSBDismissGen) return; // re-focused meanwhile
             NSBApolloDismissNow(weakVC);
-        }];
+        };
+        sNSBTween = tween;
+        [tween start];
         return;
     }
 
@@ -251,7 +334,8 @@ static void NSBApolloDismissNow(UIViewController *vc) {
     __weak UIViewController *weakVC = vc;
     void (^settle)(void) = ^{
         UIScrollView *sv = weakTable;
-        if (!sv || gen != sNSBDismissGen || sNSBSessionTyped || sNSBDismissScrolling) return;
+        if (!sv || gen != sNSBDismissGen || sNSBSessionTyped ||
+            sNSBDismissScrolling || sNSBAwaitingScroll) return;
         if (sv.isDragging || sv.isDecelerating || sv.isTracking) return;
         // The cancel morph animates the nav, so Apollo's restore write lands
         // computed against a TRANSIENT nav height and passes the hot-path match
@@ -277,8 +361,15 @@ static void NSBApolloDismissNow(UIViewController *vc) {
     };
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), settle);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), settle);
+    __weak UIViewController *weakPolicyVC = vc;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.40 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (gen == sNSBDismissGen) sNSBDismissWindow = NO;
+        if (gen == sNSBDismissGen) {
+            sNSBDismissWindow = NO;
+            UIViewController *pvc = weakPolicyVC;
+            if (pvc && !pvc.navigationItem.hidesSearchBarWhenScrolling) {
+                pvc.navigationItem.hidesSearchBarWhenScrolling = YES;
+            }
+        }
         settle();
     });
 }
@@ -639,12 +730,29 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
             if (want > 1.0 && fabs(inset.top - (want + sNSBToolbarBand)) < 2.0) {
                 inset.top = want;
             }
+            // While a search session is live, hold the inset AT the nav bottom.
+            // Apollo runs a slightly smaller value then (measured 159 against a
+            // 176 nav bottom), and correcting that at cancel time — a
+            // contentInset write mid-teardown — makes another module's
+            // scroll-to-top fire and teleports the feed before anything can
+            // animate. Keeping it right for the whole session means cancel has
+            // no inset change to make. Gated to a settled, non-dragging feed so
+            // it can never bake a rubber-band-stretched palette into the inset.
+            UIScrollView *sv2 = (UIScrollView *)self;
+            if (sNSBSessionTyped && want > 1.0 && inset.top < want &&
+                !sv2.isDragging && !sv2.isTracking && !sv2.isDecelerating) {
+                inset.top = want;
+            }
             // Cancel in flight: land every re-park at the known final rest on
             // the SAME frame it is written (the settle timers are only a
             // backstop). Net bounded away from the pull-to-refresh delta.
             if (sNSBDismissWindow && (UIScrollView *)self == sNSBSessionTable &&
-                inset.top > sNSBDismissTargetTop + 2.0 &&
+                fabs(inset.top - sNSBDismissTargetTop) > 0.5 &&
                 inset.top <= sNSBDismissTargetTop + sNSBToolbarBand + 15.0) {
+                // Hold the final inset for the whole window: Apollo writes its
+                // active-search value (smaller) and its resting value during
+                // the teardown, and either one moving under the animation is a
+                // visible hop.
                 inset.top = sNSBDismissTargetTop;
             }
         }
@@ -654,10 +762,13 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 
 - (void)setContentOffset:(CGPoint)offset {
     UIScrollView *sv = (UIScrollView *)self;
-    if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow && !sNSBDismissScrolling &&
-        sv == sNSBSessionTable && !sv.isDragging && !sv.isTracking &&
-        offset.y > -sNSBDismissTargetTop + 0.5) {
-        offset.y = -sNSBDismissTargetTop; // dismissal re-park -> straight to the final rest
+    if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow &&
+        !sNSBDismissScrolling && !sNSBAwaitingScroll &&
+        sv == sNSBSessionTable && !sv.isDragging && !sv.isTracking && !sv.isDecelerating &&
+        fabs(offset.y + sNSBDismissTargetTop) > 0.5) {
+        // Pin in BOTH directions: Apollo's teardown re-park overshoots ABOVE
+        // the top (into the rubber-band region) as well as landing below it.
+        offset.y = -sNSBDismissTargetTop;
     }
     if (ApolloNativeFeedSearchEnabled() && sv == sNSBSessionTable &&
         sNSBSessionTyped && NSBSessionQueryText().length > 0) {
@@ -678,9 +789,10 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 
 - (void)setBounds:(CGRect)bounds {
     UIScrollView *sv = (UIScrollView *)self;
-    if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow && !sNSBDismissScrolling &&
-        sv == sNSBSessionTable && !sv.isDragging && !sv.isTracking &&
-        bounds.origin.y > -sNSBDismissTargetTop + 0.5) {
+    if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow &&
+        !sNSBDismissScrolling && !sNSBAwaitingScroll &&
+        sv == sNSBSessionTable && !sv.isDragging && !sv.isTracking && !sv.isDecelerating &&
+        fabs(bounds.origin.y + sNSBDismissTargetTop) > 0.5) {
         bounds.origin.y = -sNSBDismissTargetTop;
     }
     if (ApolloNativeFeedSearchEnabled() && sv == sNSBSessionTable &&
@@ -752,6 +864,37 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
         return;
     }
     %orig;
+}
+
+%end
+
+// MARK: - Retarget Apollo's teardown scroll
+//
+// Apollo restores the feed position on dismiss with an animated
+// setContentOffset:, computed against its own resting inset — which is not
+// where the feed rests under the native bar. Left alone that call also
+// cancels any scroll of ours already in flight. Rewrite its destination to
+// the real rest (and make sure it animates): the chrome then slides back in
+// one continuous native motion that lands exactly where the feed settles.
+%hook UIScrollView
+
+- (void)setContentOffset:(CGPoint)offset animated:(BOOL)animated {
+    if (ApolloNativeFeedSearchEnabled() && sNSBDismissWindow &&
+        (UIScrollView *)self == sNSBSessionTable &&
+        !self.isDragging && !self.isTracking) {
+        CGFloat want = -sNSBDismissTargetTop;
+        if (fabs(offset.y - want) > 0.5) offset.y = want;
+        animated = YES;
+        // Stand the per-frame pins down for the length of the animation, or
+        // they would clamp it back to a standstill on its first frame.
+        sNSBDismissScrolling = YES;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            sNSBDismissScrolling = NO;
+            sNSBAwaitingScroll = NO; // pins take over holding the final rest
+        });
+    }
+    %orig(offset, animated);
 }
 
 %end
