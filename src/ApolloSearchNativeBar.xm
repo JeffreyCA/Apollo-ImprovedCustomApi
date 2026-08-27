@@ -109,6 +109,9 @@ static CGFloat sNSBDismissTargetTop = 0.0;
 static const void *kNSBBridgeKey     = &kNSBBridgeKey;      // VC -> bridge delegate object
 static const void *kNSBFeedTableKey  = &kNSBFeedTableKey;   // ASTableView -> @YES (native-managed feed)
 static CGFloat sNSBToolbarBand = 45.0; // Apollo's resting toolbar height (the band its inset reserves)
+// Widest band Apollo has been seen to add above the bar (45pt fresh, 37pt on a
+// restored feed). Comfortably clear of the pull-to-refresh spinner's delta.
+static const CGFloat kNSBBandSlack = 60.0;
 
 BOOL ApolloNativeFeedSearchEnabled(void) {
     return IsLiquidGlass();
@@ -347,7 +350,7 @@ static void NSBApolloDismissNow(UIViewController *vc) {
         if (svc) {
             CGFloat want = NSBNavBottomForTable(sv, svc);
             UIEdgeInsets cur = sv.contentInset;
-            if (want > 1.0 && cur.top > want + 2.0 && cur.top <= want + sNSBToolbarBand + 15.0) {
+            if (want > 1.0 && cur.top > want + 2.0 && cur.top <= want + kNSBBandSlack) {
                 cur.top = want;
                 sv.contentInset = cur;
             }
@@ -573,6 +576,19 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
     if (CGRectGetHeight(sc.searchBar.bounds) > 1.0) return;            // already revealed
     sNSBRevealInFlight = YES;
     navItem.hidesSearchBarWhenScrolling = NO;
+    // Expanding the palette grows the feed's top inset, which leaves the
+    // existing offset reading as "scrolled by a bar's height" — enough for
+    // UIKit to collapse the bar straight back again. Re-park at the new top on
+    // the next turn so the reveal sticks.
+    __weak UIScrollView *weakTable = table;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIScrollView *sv = weakTable;
+        if (!sv || sv.isDragging || sv.isTracking || sv.isDecelerating) return;
+        CGFloat top = -sv.contentInset.top;
+        if (sv.contentOffset.y > top && sv.contentOffset.y < top + 120.0) {
+            sv.contentOffset = CGPointMake(sv.contentOffset.x, top);
+        }
+    });
     __weak UIViewController *weakVC = vc;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -665,7 +681,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
     if (table && !table.isDragging && !table.isDecelerating && !sNSBSessionTyped) {
         CGFloat want = NSBNavBottomForTable(table, (UIViewController *)self);
         UIEdgeInsets cur = table.contentInset;
-        if (want > 1.0 && cur.top > want + 2.0 && cur.top <= want + sNSBToolbarBand + 15.0) {
+        if (want > 1.0 && cur.top > want + 2.0 && cur.top <= want + kNSBBandSlack) {
             cur.top = want;
             table.contentInset = cur;
         }
@@ -727,7 +743,24 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
             // subtract-and-floor version compounded on echoes and baked the
             // rubber-band-stretched palette height into the inset.
             CGFloat want = NSBNavBottomForTable((UIScrollView *)self, vc);
-            if (want > 1.0 && fabs(inset.top - (want + sNSBToolbarBand)) < 2.0) {
+            // Apollo sizes the feed's top inset as "where the bar ends, plus a
+            // band for its own — now hidden — toolbar". That band is not a
+            // constant (45pt measured on a fresh feed, 37pt on one restored
+            // after returning from a post), so matching an exact value left the
+            // odd path with a visible gap under the search bar. Collapse any
+            // resting inset that sits within a band's reach above the bar
+            // instead. The window stops well short of the pull-to-refresh
+            // spinner's much larger delta, and a dragging or decelerating feed
+            // is left alone, so a refresh in flight is never clipped.
+            UIScrollView *sv2 = (UIScrollView *)self;
+            BOOL settled = !sv2.isDragging && !sv2.isTracking && !sv2.isDecelerating;
+            // Only while the search palette is actually laid out: with the bar
+            // collapsed the nav bottom is the bare nav, and trimming to that
+            // would tell UIKit the feed already rests correctly — leaving the
+            // bar collapsed with a gap where it should have re-revealed.
+            BOOL barExpanded = CGRectGetHeight(vc.navigationItem.searchController.searchBar.bounds) > 1.0;
+            if (want > 1.0 && settled && barExpanded &&
+                inset.top > want + 2.0 && inset.top <= want + kNSBBandSlack) {
                 inset.top = want;
             }
             // While a search session is live, hold the inset AT the nav bottom.
@@ -738,9 +771,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
             // animate. Keeping it right for the whole session means cancel has
             // no inset change to make. Gated to a settled, non-dragging feed so
             // it can never bake a rubber-band-stretched palette into the inset.
-            UIScrollView *sv2 = (UIScrollView *)self;
-            if (sNSBSessionTyped && want > 1.0 && inset.top < want &&
-                !sv2.isDragging && !sv2.isTracking && !sv2.isDecelerating) {
+            if (sNSBSessionTyped && want > 1.0 && inset.top < want && settled) {
                 inset.top = want;
             }
             // Cancel in flight: land every re-park at the known final rest on
@@ -748,7 +779,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
             // backstop). Net bounded away from the pull-to-refresh delta.
             if (sNSBDismissWindow && (UIScrollView *)self == sNSBSessionTable &&
                 fabs(inset.top - sNSBDismissTargetTop) > 0.5 &&
-                inset.top <= sNSBDismissTargetTop + sNSBToolbarBand + 15.0) {
+                inset.top <= sNSBDismissTargetTop + kNSBBandSlack) {
                 // Hold the final inset for the whole window: Apollo writes its
                 // active-search value (smaller) and its resting value during
                 // the teardown, and either one moving under the animation is a
