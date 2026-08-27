@@ -13,9 +13,6 @@
 _LG_ASSETS_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _LG_ASSETS_REPO_DIR="$(cd "${_LG_ASSETS_MODULE_DIR}/../.." && pwd)"
 
-# shellcheck source=_plist-helpers.sh
-source "${_LG_ASSETS_MODULE_DIR}/_plist-helpers.sh"
-
 # Asset sources default to the Apollo-Reborn repo, but callers with their own
 # copy (e.g. the workspace build.sh under scripts/patch-assets/) can override
 # them via these env vars before sourcing/calling.
@@ -38,6 +35,12 @@ _lg_load_alternate_icons() {
     done
 }
 
+# Writes the primary + alternate icon metadata in ONE plistlib pass. The
+# previous PlistBuddy version spawned a process per key (several hundred for
+# the full icon registry, each re-parsing the whole Info.plist) and took ~17s
+# per IPA on CI runners; this takes well under a second. Existing entries under
+# CFBundleIcons are preserved and only the keys we own are (re)written, matching
+# the old behaviour. The plist's on-disk format (binary vs XML) is preserved.
 _lg_ensure_icon_metadata() {
     local plist="$1"
     local -a alt_icons=()
@@ -46,25 +49,47 @@ _lg_ensure_icon_metadata() {
         [[ -n "$line" ]] && alt_icons+=("$line")
     done < <(_lg_load_alternate_icons)
 
-    plist_ensure_dict "$plist" "CFBundleIcons"
-    plist_ensure_dict "$plist" "CFBundleIcons:CFBundlePrimaryIcon"
-    plist_ensure_dict "$plist" "CFBundleIcons:CFBundleAlternateIcons"
-    plist_ensure_dict "$plist" "CFBundleIcons~ipad"
-    plist_ensure_dict "$plist" "CFBundleIcons~ipad:CFBundlePrimaryIcon"
-    plist_ensure_dict "$plist" "CFBundleIcons~ipad:CFBundleAlternateIcons"
+    LG_PLIST="$plist" \
+    LG_ICON_NAME="$_LG_ICON_NAME" \
+    LG_IPHONE_ICON_FILES="$(IFS=,; echo "${_LG_IPHONE_ICON_FILES[*]}")" \
+    LG_IPAD_ICON_FILES="$(IFS=,; echo "${_LG_IPAD_ICON_FILES[*]}")" \
+    LG_ALT_ICONS="$(IFS=,; echo "${alt_icons[*]+"${alt_icons[*]}"}")" \
+    python3 - <<'PY'
+import os
+import plistlib
 
-    plist_set_string "$plist" "CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" "$_LG_ICON_NAME"
-    plist_set_string "$plist" "CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconName" "$_LG_ICON_NAME"
-    plist_replace_string_array "$plist" "CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "${_LG_IPHONE_ICON_FILES[@]}"
-    plist_replace_string_array "$plist" "CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles" "${_LG_IPAD_ICON_FILES[@]}"
+path = os.environ["LG_PLIST"]
+icon_name = os.environ["LG_ICON_NAME"]
+iphone_files = [f for f in os.environ["LG_IPHONE_ICON_FILES"].split(",") if f]
+ipad_files = [f for f in os.environ["LG_IPAD_ICON_FILES"].split(",") if f]
+alt_icons = [n for n in os.environ["LG_ALT_ICONS"].split(",") if n]
 
-    local icon_name
-    for icon_name in "${alt_icons[@]}"; do
-        plist_ensure_dict "$plist" "CFBundleIcons:CFBundleAlternateIcons:${icon_name}"
-        plist_ensure_dict "$plist" "CFBundleIcons~ipad:CFBundleAlternateIcons:${icon_name}"
-        plist_set_string "$plist" "CFBundleIcons:CFBundleAlternateIcons:${icon_name}:CFBundleIconName" "$icon_name"
-        plist_set_string "$plist" "CFBundleIcons~ipad:CFBundleAlternateIcons:${icon_name}:CFBundleIconName" "$icon_name"
-    done
+with open(path, "rb") as fh:
+    raw = fh.read()
+fmt = plistlib.FMT_BINARY if raw.startswith(b"bplist") else plistlib.FMT_XML
+root = plistlib.loads(raw)
+
+
+def ensure_dict(parent, key):
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        value = {}
+        parent[key] = value
+    return value
+
+
+for icons_key, files in (("CFBundleIcons", iphone_files), ("CFBundleIcons~ipad", ipad_files)):
+    icons = ensure_dict(root, icons_key)
+    primary = ensure_dict(icons, "CFBundlePrimaryIcon")
+    primary["CFBundleIconName"] = icon_name
+    primary["CFBundleIconFiles"] = list(files)
+    alternates = ensure_dict(icons, "CFBundleAlternateIcons")
+    for name in alt_icons:
+        ensure_dict(alternates, name)["CFBundleIconName"] = name
+
+with open(path, "wb") as fh:
+    plistlib.dump(root, fh, fmt=fmt)
+PY
 }
 
 patch_liquid_glass_assets_in_app() {

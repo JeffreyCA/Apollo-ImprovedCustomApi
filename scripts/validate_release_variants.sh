@@ -1,16 +1,42 @@
 #!/bin/bash
 set -euo pipefail
 
-OUT_DIR="${1:-dist/out}"
+OUT_DIR=""
+VALIDATE_GLASS_ICONS=1
 
 usage() {
-    echo "Usage: $0 <dist/out>"
+    echo "Usage: $0 [--no-glass-icons] <dist/out>"
+    echo ""
+    echo "  --no-glass-icons   do not expect the two GLASSICONS variants (PR test builds)"
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    usage
-    exit 0
-fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --no-glass-icons)
+            VALIDATE_GLASS_ICONS=0
+            shift
+            ;;
+        -*)
+            echo "Error: unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+        *)
+            if [[ -n "$OUT_DIR" ]]; then
+                echo "Error: unexpected argument: $1" >&2
+                usage
+                exit 1
+            fi
+            OUT_DIR="$1"
+            shift
+            ;;
+    esac
+done
+OUT_DIR="${OUT_DIR:-dist/out}"
 
 if [[ ! -d "$OUT_DIR" ]]; then
     echo "Error: output directory not found: $OUT_DIR" >&2
@@ -58,7 +84,10 @@ contains_path() {
     local ipa="$1"
     local pattern="$2"
 
-    unzip -Z1 "$ipa" | grep -Eq "$pattern"
+    # Not `grep -q`: it exits at the first match, unzip then dies of SIGPIPE on
+    # a listing larger than the pipe buffer, and `pipefail` turns a hit into a
+    # failure. Let grep drain the whole listing instead.
+    unzip -Z1 "$ipa" | grep -E "$pattern" >/dev/null
 }
 
 require_widget_variant() {
@@ -191,33 +220,35 @@ NOEXT_GLASS_ICONS_IPA="${BASE}-GLASSICONS-NOEXTENSIONS.ipa"
 require_file "$NOEXT_IPA" "No Extensions"
 require_file "$GLASS_IPA" "GLASS"
 require_file "$NOEXT_GLASS_IPA" "GLASS No Extensions"
-require_file "$GLASS_ICONS_IPA" "GLASS Icons"
-require_file "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
 
 require_widget_variant "$STANDARD_IPA" "standard"
 require_widget_variant "$GLASS_IPA" "GLASS"
-require_widget_variant "$GLASS_ICONS_IPA" "GLASS Icons"
 
 require_safari_extensions "$STANDARD_IPA" "standard"
 require_safari_extensions "$GLASS_IPA" "GLASS"
-require_safari_extensions "$GLASS_ICONS_IPA" "GLASS Icons"
 
 require_no_extensions_variant "$NOEXT_IPA" "No Extensions"
 require_no_extensions_variant "$NOEXT_GLASS_IPA" "GLASS No Extensions"
-require_no_extensions_variant "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
 
 require_promotion_enabled "$STANDARD_IPA" "standard"
 require_promotion_enabled "$NOEXT_IPA" "No Extensions"
 require_promotion_enabled "$GLASS_IPA" "GLASS"
 require_promotion_enabled "$NOEXT_GLASS_IPA" "GLASS No Extensions"
-require_promotion_enabled "$GLASS_ICONS_IPA" "GLASS Icons"
-require_promotion_enabled "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
+
+VALIDATED=("$STANDARD_IPA" "$NOEXT_IPA" "$GLASS_IPA" "$NOEXT_GLASS_IPA")
+
+if [[ $VALIDATE_GLASS_ICONS -eq 1 ]]; then
+    require_file "$GLASS_ICONS_IPA" "GLASS Icons"
+    require_file "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
+    require_widget_variant "$GLASS_ICONS_IPA" "GLASS Icons"
+    require_safari_extensions "$GLASS_ICONS_IPA" "GLASS Icons"
+    require_no_extensions_variant "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
+    require_promotion_enabled "$GLASS_ICONS_IPA" "GLASS Icons"
+    require_promotion_enabled "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
+    VALIDATED+=("$GLASS_ICONS_IPA" "$NOEXT_GLASS_ICONS_IPA")
+fi
 
 echo "IPA variant validation passed:"
-printf '  %s\n' \
-    "$(basename "$STANDARD_IPA")" \
-    "$(basename "$NOEXT_IPA")" \
-    "$(basename "$GLASS_IPA")" \
-    "$(basename "$NOEXT_GLASS_IPA")" \
-    "$(basename "$GLASS_ICONS_IPA")" \
-    "$(basename "$NOEXT_GLASS_ICONS_IPA")"
+for ipa in "${VALIDATED[@]}"; do
+    printf '  %s\n' "$(basename "$ipa")"
+done
