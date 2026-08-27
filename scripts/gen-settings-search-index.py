@@ -27,6 +27,7 @@ TWEAK_ROW_TITLES = {
     "Tag Filters",
     "Picture-in-Picture",
     "Theme Manager",
+    "SPCA Animals 🐱🐶",
 }
 
 
