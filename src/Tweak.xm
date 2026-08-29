@@ -4013,56 +4013,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
-    NSString *defaultsDomain = NSBundle.mainBundle.bundleIdentifier;
-    NSDictionary *persistedDefaults = defaultsDomain.length > 0
-        ? [standardDefaults persistentDomainForName:defaultsDomain]
-        : nil;
-    BOOL hasSeparateFeedSettings = persistedDefaults[UDKeySubredditFeedIconStyle] != nil ||
-                                   persistedDefaults[UDKeySubredditFeedLayout] != nil;
-    if (!hasSeparateFeedSettings) {
-        id legacyValue = persistedDefaults[UDKeySubredditFeedShortcuts];
-        NSInteger legacyLayout = 0;
-        if (legacyValue && CFGetTypeID((__bridge CFTypeRef)legacyValue) == CFBooleanGetTypeID()) {
-            legacyLayout = [legacyValue boolValue] ? 2 : 0;
-        } else if ([legacyValue respondsToSelector:@selector(integerValue)]) {
-            legacyLayout = [legacyValue integerValue];
-        }
-        sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleClassic;
-        sSubredditFeedLayout = ApolloSubredditFeedLayoutRows;
-        switch (legacyLayout) {
-            case 1:
-                sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleCircle;
-                break;
-            case 2:
-                sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleCircle;
-                sSubredditFeedLayout = ApolloSubredditFeedLayoutGrid;
-                break;
-            case 3:
-                sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleCircle;
-                sSubredditFeedLayout = ApolloSubredditFeedLayoutSideBySide;
-                break;
-            case 4:
-                sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleSolidTile;
-                break;
-            case 5:
-                sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleTinted;
-                break;
-            case 6:
-                sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleSoftTile;
-                break;
-            case 7:
-                sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleSoftTile;
-                sSubredditFeedLayout = ApolloSubredditFeedLayoutGrid;
-                break;
-            default:
-                break;
-        }
-        [standardDefaults setInteger:sSubredditFeedIconStyle forKey:UDKeySubredditFeedIconStyle];
-        [standardDefaults setInteger:sSubredditFeedLayout forKey:UDKeySubredditFeedLayout];
-    } else {
-        sSubredditFeedIconStyle = [standardDefaults integerForKey:UDKeySubredditFeedIconStyle];
-        sSubredditFeedLayout = [standardDefaults integerForKey:UDKeySubredditFeedLayout];
-    }
+    sSubredditFeedIconStyle = [standardDefaults integerForKey:UDKeySubredditFeedIconStyle];
+    sSubredditFeedLayout = [standardDefaults integerForKey:UDKeySubredditFeedLayout];
     if (sSubredditFeedIconStyle < ApolloSubredditFeedIconStyleClassic ||
         sSubredditFeedIconStyle > ApolloSubredditFeedIconStyleSolidTile) {
         sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleClassic;

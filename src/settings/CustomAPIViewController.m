@@ -78,30 +78,55 @@ static NSInteger sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
 static NSString *const kApolloRebornSubredditName = @"ApolloReborn";
 static char kAboutSubredditIconTaskKey;
 
-@interface ApolloFeedShortcutsPreviewCell : UITableViewCell
-@property (nonatomic, weak) UITableView *hostTableView;
-@property (nonatomic, strong) NSArray<UILayoutGuide *> *shortcutLayoutGuides;
-@property (nonatomic, strong) NSDictionary<NSNumber *, UIView *> *shortcutItemViewsByIndex;
-@property (nonatomic, strong) NSArray<UIView *> *shortcutSeparators;
-@property (nonatomic, strong) UIViewPropertyAnimator *previewAnimator;
-- (void)apollo_configurePreview;
-- (void)apollo_configurePreviewAnimated:(BOOL)animated;
+@interface ApolloFeedShortcutsPreviewState : NSObject
+@property (nonatomic, copy) NSArray<NSNumber *> *visibleIndexes;
+@property (nonatomic) ApolloSubredditFeedIconStyle iconStyle;
+@property (nonatomic) ApolloSubredditFeedLayout layout;
+@property (nonatomic) BOOL hideDescriptions;
+@property (nonatomic) CGFloat previewHeight;
+@property (nonatomic, strong) UITraitCollection *traitCollection;
 @end
 
-@implementation ApolloFeedShortcutsPreviewCell
+@implementation ApolloFeedShortcutsPreviewState
+@end
 
-- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
-    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+static ApolloFeedShortcutsPreviewState *ApolloFeedShortcutsCurrentPreviewState(
+    UITraitCollection *traitCollection) {
+    ApolloFeedShortcutsPreviewState *state = [ApolloFeedShortcutsPreviewState new];
+    state.visibleIndexes = ApolloFeedShortcutVisibleIndexes();
+    state.iconStyle = (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle;
+    state.traitCollection = traitCollection;
+    state.layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
+                                                       state.visibleIndexes.count,
+                                                       traitCollection);
+    state.hideDescriptions = sHideSubredditListDescriptions;
+    if (state.layout == ApolloSubredditFeedLayoutRows) {
+        NSUInteger count = state.visibleIndexes.count;
+        CGFloat rowsHeight = (CGFloat)count * ApolloFeedShortcutPreviewRowItemHeight(traitCollection);
+        CGFloat spacingHeight = count > 1 ? (CGFloat)(count - 1) * 8.0 : 0.0;
+        state.previewHeight = rowsHeight + spacingHeight + 10.0;
+    } else {
+        state.previewHeight = ApolloFeedShortcutLayoutHeight(state.layout, traitCollection);
+    }
+    return state;
+}
+
+@interface ApolloFeedShortcutsPreviewView : UIView
+@property (nonatomic, weak) UITableView *hostTableView;
+@property (nonatomic, strong) ApolloFeedShortcutsPreviewState *previewState;
+@property (nonatomic, strong) NSDictionary<NSNumber *, UIView *> *shortcutItemViewsByIndex;
+@property (nonatomic, strong) NSArray<UIView *> *shortcutSeparators;
+- (void)apollo_configurePreview;
+@end
+
+@implementation ApolloFeedShortcutsPreviewView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
     if (!self) return nil;
 
-    self.selectionStyle = UITableViewCellSelectionStyleNone;
     self.backgroundColor = UIColor.clearColor;
-    self.contentView.backgroundColor = UIColor.clearColor;
-    self.backgroundView = [UIView new];
-    self.backgroundView.backgroundColor = UIColor.clearColor;
-    if (@available(iOS 14.0, *)) {
-        self.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
-    }
+    self.opaque = NO;
     return self;
 }
 
@@ -134,19 +159,19 @@ static char kAboutSubredditIconTaskKey;
                           contentView:(UIView **)contentView
              contentCenterXConstraint:(NSLayoutConstraint **)contentCenterXConstraint {
     UIImageView *iconView = [[UIImageView alloc] initWithImage:ApolloFeedShortcutIconImage(index,
-                                                                                           sSubredditFeedIconStyle,
+                                                                                           self.previewState.iconStyle,
                                                                                            layout,
                                                                                            itemCount)];
     iconView.contentMode = UIViewContentModeScaleAspectFit;
     iconView.translatesAutoresizingMaskIntoConstraints = NO;
 
     if (layout == ApolloSubredditFeedLayoutRows) {
-        CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(sSubredditFeedIconStyle, layout, itemCount);
+        CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(self.previewState.iconStyle, layout, itemCount);
         [NSLayoutConstraint activateConstraints:@[
             [iconView.widthAnchor constraintEqualToConstant:iconSize],
             [iconView.heightAnchor constraintEqualToConstant:iconSize]
         ]];
-        NSString *detail = sHideSubredditListDescriptions ? nil : ApolloFeedShortcutDetail(index);
+        NSString *detail = self.previewState.hideDescriptions ? nil : ApolloFeedShortcutDetail(index);
         UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[
             iconView,
             [self apollo_textStackWithTitle:ApolloFeedShortcutRowTitle(index) detail:detail]
@@ -154,14 +179,16 @@ static char kAboutSubredditIconTaskKey;
         row.axis = UILayoutConstraintAxisHorizontal;
         row.alignment = UIStackViewAlignmentCenter;
         row.spacing = 12.0;
-        [row.heightAnchor constraintEqualToConstant:ApolloFeedShortcutPreviewRowItemHeight(self.traitCollection)].active = YES;
+        [row.heightAnchor constraintEqualToConstant:ApolloFeedShortcutPreviewRowItemHeight(
+            self.previewState.traitCollection)].active = YES;
         return row;
     }
 
     BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
     BOOL iconDock = layout == ApolloSubredditFeedLayoutIconDock;
-    BOOL usesFourItemSideBySideLayout = sideBySide && itemCount == 4;
-    CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(sSubredditFeedIconStyle, layout, itemCount);
+    ApolloFeedShortcutItemGeometry geometry =
+        ApolloFeedShortcutItemGeometryForLayout(layout, itemCount, index);
+    CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(self.previewState.iconStyle, layout, itemCount);
     [NSLayoutConstraint activateConstraints:@[
         [iconView.widthAnchor constraintEqualToConstant:iconSize],
         [iconView.heightAnchor constraintEqualToConstant:iconSize]
@@ -193,19 +220,15 @@ static char kAboutSubredditIconTaskKey;
     UIView *item = [UIView new];
     [item addSubview:content];
     NSLayoutConstraint *centerConstraint = [content.centerXAnchor constraintEqualToAnchor:item.centerXAnchor];
-    if (sideBySide && itemCount == 3 && index == 3) {
-        centerConstraint.constant = 6.0;
-    }
+    centerConstraint.constant = geometry.centerXOffset;
     [NSLayoutConstraint activateConstraints:@[
         centerConstraint,
         [content.centerYAnchor constraintEqualToAnchor:item.centerYAnchor]
     ]];
-    BOOL preservesModeratorLabelWidth = sideBySide && itemCount == 3 && index == 3;
-    if (!usesFourItemSideBySideLayout && !preservesModeratorLabelWidth) {
-        CGFloat horizontalMargin = sideBySide ? 6.0 : 4.0;
+    if (!geometry.usesFlexibleSideBySideLayout) {
         [NSLayoutConstraint activateConstraints:@[
-            [content.leadingAnchor constraintGreaterThanOrEqualToAnchor:item.leadingAnchor constant:horizontalMargin],
-            [content.trailingAnchor constraintLessThanOrEqualToAnchor:item.trailingAnchor constant:-horizontalMargin]
+            [content.leadingAnchor constraintGreaterThanOrEqualToAnchor:item.leadingAnchor constant:geometry.horizontalMargin],
+            [content.trailingAnchor constraintLessThanOrEqualToAnchor:item.trailingAnchor constant:-geometry.horizontalMargin]
         ]];
     }
     if (contentView) *contentView = content;
@@ -214,20 +237,10 @@ static char kAboutSubredditIconTaskKey;
 }
 
 - (void)apollo_configurePreview {
-    for (UILayoutGuide *layoutGuide in self.shortcutLayoutGuides) {
-        [self.contentView removeLayoutGuide:layoutGuide];
-    }
-    self.shortcutLayoutGuides = nil;
-    for (UIView *view in self.contentView.subviews) [view removeFromSuperview];
-
-    NSArray<NSNumber *> *visibleIndexes = ApolloFeedShortcutVisibleIndexes();
-    CGFloat availableWidth = CGRectGetWidth(self.hostTableView.bounds);
-    if (availableWidth <= 0.0) availableWidth = CGRectGetWidth(UIScreen.mainScreen.bounds);
-    ApolloSubredditFeedLayout layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
-                                                                          visibleIndexes,
-                                                                          (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
-                                                                          availableWidth,
-                                                                          self.traitCollection);
+    ApolloFeedShortcutsPreviewState *state = self.previewState;
+    if (!state) return;
+    NSArray<NSNumber *> *visibleIndexes = state.visibleIndexes;
+    ApolloSubredditFeedLayout layout = state.layout;
     BOOL usesShortcutLayout = layout != ApolloSubredditFeedLayoutRows;
     NSMutableArray<UIView *> *shortcutItems = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
     NSMutableDictionary<NSNumber *, UIView *> *itemViewsByIndex =
@@ -253,15 +266,12 @@ static char kAboutSubredditIconTaskKey;
         UIColor *separatorColor = ApolloThemeSeparatorColor()
             ?: self.hostTableView.separatorColor
             ?: UIColor.separatorColor;
-        NSArray<UILayoutGuide *> *layoutGuides = nil;
-        self.shortcutSeparators = ApolloFeedShortcutInstallLayout(self.contentView,
+        self.shortcutSeparators = ApolloFeedShortcutInstallLayout(self,
                                                                    shortcutItems,
                                                                    contentViews,
                                                                    centerConstraints,
                                                                    layout,
-                                                                   separatorColor,
-                                                                   &layoutGuides);
-        self.shortcutLayoutGuides = layoutGuides;
+                                                                   separatorColor);
         return;
     }
     self.shortcutSeparators = @[];
@@ -272,120 +282,13 @@ static char kAboutSubredditIconTaskKey;
     previewStack.distribution = UIStackViewDistributionFillEqually;
     previewStack.spacing = 8.0;
     previewStack.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.contentView addSubview:previewStack];
+    [self addSubview:previewStack];
     [NSLayoutConstraint activateConstraints:@[
-        [previewStack.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16.0],
-        [previewStack.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-16.0],
-        [previewStack.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:10.0],
-        [previewStack.bottomAnchor constraintLessThanOrEqualToAnchor:self.contentView.bottomAnchor constant:-10.0]
+        [previewStack.leadingAnchor constraintEqualToAnchor:self.layoutMarginsGuide.leadingAnchor constant:16.0],
+        [previewStack.trailingAnchor constraintEqualToAnchor:self.layoutMarginsGuide.trailingAnchor constant:-16.0],
+        [previewStack.topAnchor constraintEqualToAnchor:self.topAnchor constant:10.0],
+        [previewStack.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor]
     ]];
-}
-
-- (void)apollo_configurePreviewAnimated:(BOOL)animated {
-    if (!animated || self.shortcutItemViewsByIndex.count == 0) {
-        [self apollo_configurePreview];
-        return;
-    }
-
-    if (self.previewAnimator.state == UIViewAnimatingStateActive) {
-        [self.previewAnimator stopAnimation:NO];
-        [self.previewAnimator finishAnimationAtPosition:UIViewAnimatingPositionCurrent];
-    }
-    self.previewAnimator = nil;
-
-    if (UIAccessibilityIsReduceMotionEnabled()) {
-        [UIView transitionWithView:self.contentView
-                          duration:0.18
-                           options:UIViewAnimationOptionTransitionCrossDissolve |
-                                   UIViewAnimationOptionBeginFromCurrentState |
-                                   UIViewAnimationOptionAllowUserInteraction
-                        animations:^{
-            [self apollo_configurePreview];
-            [self.hostTableView beginUpdates];
-            [self.hostTableView endUpdates];
-            [self.hostTableView layoutIfNeeded];
-        } completion:nil];
-        return;
-    }
-
-    [self.contentView layoutIfNeeded];
-    NSDictionary<NSNumber *, UIView *> *oldItems = self.shortcutItemViewsByIndex;
-    NSMutableDictionary<NSNumber *, NSValue *> *oldFrames =
-        [NSMutableDictionary dictionaryWithCapacity:oldItems.count];
-    for (NSNumber *index in oldItems) {
-        UIView *item = oldItems[index];
-        oldFrames[index] = [NSValue valueWithCGRect:[item convertRect:item.bounds toView:self.contentView]];
-    }
-
-    NSSet<NSNumber *> *newVisibleIndexes = [NSSet setWithArray:ApolloFeedShortcutVisibleIndexes()];
-    NSMutableArray<UIView *> *departingSnapshots = [NSMutableArray array];
-    for (NSNumber *index in oldItems) {
-        if ([newVisibleIndexes containsObject:index]) continue;
-        UIView *item = oldItems[index];
-        UIView *snapshot = [item snapshotViewAfterScreenUpdates:NO];
-        if (!snapshot) continue;
-        snapshot.frame = oldFrames[index].CGRectValue;
-        snapshot.userInteractionEnabled = NO;
-        [departingSnapshots addObject:snapshot];
-    }
-
-    NSMutableArray<UIView *> *separatorSnapshots = [NSMutableArray arrayWithCapacity:self.shortcutSeparators.count];
-    for (UIView *separator in self.shortcutSeparators) {
-        UIView *snapshot = [separator snapshotViewAfterScreenUpdates:NO];
-        if (!snapshot) continue;
-        snapshot.frame = [separator convertRect:separator.bounds toView:self.contentView];
-        snapshot.userInteractionEnabled = NO;
-        [separatorSnapshots addObject:snapshot];
-    }
-
-    [self apollo_configurePreview];
-    [self.contentView layoutIfNeeded];
-    for (UIView *snapshot in departingSnapshots) [self.contentView addSubview:snapshot];
-    for (UIView *snapshot in separatorSnapshots) [self.contentView addSubview:snapshot];
-
-    for (NSNumber *index in self.shortcutItemViewsByIndex) {
-        UIView *item = self.shortcutItemViewsByIndex[index];
-        NSValue *oldFrameValue = oldFrames[index];
-        if (oldFrameValue) {
-            CGRect oldFrame = oldFrameValue.CGRectValue;
-            CGRect newFrame = [item convertRect:item.bounds toView:self.contentView];
-            item.transform = CGAffineTransformMakeTranslation(CGRectGetMidX(oldFrame) - CGRectGetMidX(newFrame),
-                                                               CGRectGetMidY(oldFrame) - CGRectGetMidY(newFrame));
-        } else {
-            item.alpha = 0.0;
-            item.transform = CGAffineTransformMakeScale(0.88, 0.88);
-        }
-    }
-    for (UIView *separator in self.shortcutSeparators) separator.alpha = 0.0;
-
-    UISpringTimingParameters *timing = [[UISpringTimingParameters alloc] initWithDampingRatio:0.88];
-    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:0.34
-                                                                      timingParameters:timing];
-    __weak typeof(self) weakSelf = self;
-    __weak UIViewPropertyAnimator *weakAnimator = animator;
-    [animator addAnimations:^{
-        for (UIView *item in weakSelf.shortcutItemViewsByIndex.allValues) {
-            item.alpha = 1.0;
-            item.transform = CGAffineTransformIdentity;
-        }
-        for (UIView *separator in weakSelf.shortcutSeparators) separator.alpha = 1.0;
-        for (UIView *snapshot in departingSnapshots) {
-            snapshot.alpha = 0.0;
-            snapshot.transform = CGAffineTransformMakeScale(0.88, 0.88);
-        }
-        for (UIView *snapshot in separatorSnapshots) snapshot.alpha = 0.0;
-        [weakSelf.hostTableView beginUpdates];
-        [weakSelf.hostTableView endUpdates];
-        [weakSelf.hostTableView layoutIfNeeded];
-        [weakSelf.contentView layoutIfNeeded];
-    }];
-    [animator addCompletion:^(__unused UIViewAnimatingPosition finalPosition) {
-        for (UIView *snapshot in departingSnapshots) [snapshot removeFromSuperview];
-        for (UIView *snapshot in separatorSnapshots) [snapshot removeFromSuperview];
-        if (weakSelf.previewAnimator == weakAnimator) weakSelf.previewAnimator = nil;
-    }];
-    self.previewAnimator = animator;
-    [animator startAnimation];
 }
 
 @end
@@ -2342,7 +2245,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                 push:^UIViewController * {
             return ApolloSettingsRouteInstantiate(@"feed-shortcuts");
         }];
-    feedShortcuts.visible = ^BOOL { return sSubredditListEnhancements; };
 
     ApolloSettingsRow *modernDividers =
         [ApolloSettingsRow switchRowWithID:@"sub.modernDividers"
@@ -2368,40 +2270,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:nil
-                                              rows:@[ enhancements, feedShortcuts, modernDividers, subredditLayout ]];
-}
-
-- (ApolloSettingsSection *)buildFeedShortcutsPreviewSection {
-    __weak typeof(self) weakSelf = self;
-    ApolloSettingsRow *preview =
-        [ApolloSettingsRow customRowWithID:@"feedShortcuts.preview"
-                                     cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
-        static NSString *reuseID = @"Cell_FeedShortcutsPreview";
-        ApolloFeedShortcutsPreviewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
-        if (!cell) cell = [[ApolloFeedShortcutsPreviewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseID];
-        cell.hostTableView = tableView;
-        [cell apollo_configurePreview];
-        [weakSelf apollo_applyPrimaryTextColorToCell:cell];
-        return cell;
-    }
-                                 onSelect:nil];
-    preview.height = ^CGFloat {
-        NSArray<NSNumber *> *visibleIndexes = ApolloFeedShortcutVisibleIndexes();
-        NSUInteger visibleCount = visibleIndexes.count;
-        ApolloSubredditFeedLayout layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
-                                                                              visibleIndexes,
-                                                                              (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
-                                                                              CGRectGetWidth(weakSelf.tableView.bounds),
-                                                                              weakSelf.traitCollection);
-        if (layout == ApolloSubredditFeedLayoutRows) {
-            CGFloat rowItemHeight = ApolloFeedShortcutPreviewRowItemHeight(weakSelf.traitCollection);
-            CGFloat rowsHeight = (CGFloat)visibleCount * rowItemHeight;
-            CGFloat spacingHeight = visibleCount > 1 ? (CGFloat)(visibleCount - 1) * 8.0 : 0.0;
-            return rowsHeight + spacingHeight + 20.0;
-        }
-        return ApolloFeedShortcutLayoutHeight(layout, weakSelf.traitCollection);
-    };
-    return [ApolloSettingsSection sectionWithTitle:@"Preview" footer:nil rows:@[ preview ]];
+                                              rows:@[ enhancements, modernDividers, feedShortcuts, subredditLayout ]];
 }
 
 - (ApolloSettingsSection *)buildFeedShortcutsVisibilitySection {
@@ -2485,7 +2354,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                   onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Descriptions"
-                                            footer:@"Hide Feed Descriptions is available only with Rows. Multireddit descriptions show a custom description or the included subreddits."
+                                            footer:@"Multireddit rows show either a custom description or their included subreddits."
                                               rows:@[ hideFeedDescriptions, hideMultiredditDescriptions ]];
 }
 
@@ -2517,7 +2386,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [[NSUserDefaults standardUserDefaults] setInteger:iconStyle forKey:UDKeySubredditFeedIconStyle];
     [self reloadRowWithID:@"sub.feedIconStyle"];
     [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedShortcutsChangedNotification object:nil];
 }
 
 - (void)setSubredditFeedLayout:(NSInteger)layout {
@@ -2530,7 +2399,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [self reloadRowWithID:@"sub.feedLayout"];
     [self visibilityDidChange];
     [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedShortcutsChangedNotification object:nil];
 }
 
 - (void)presentSubredditFeedIconStylePickerFromSourceView:(UIView *)sourceView {
@@ -4024,26 +3893,18 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
     sHideSubredditListDescriptions = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
-    [self reloadRowWithID:@"feedShortcuts.preview"];
+    [self apollo_refreshFeedShortcutsPreviewAnimated:NO];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
 }
 
 - (void)setFeedShortcutVisible:(BOOL)visible defaultsKey:(NSString *)defaultsKey {
     [NSUserDefaults.standardUserDefaults setBool:!visible forKey:defaultsKey];
     [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
-    [self reloadRowWithID:@"sub.hideFeedDescriptions"];
-    [NSNotificationCenter.defaultCenter postNotificationName:ApolloMetaFeedVisibilityChangedNotification object:nil];
+    [NSNotificationCenter.defaultCenter postNotificationName:ApolloFeedShortcutsChangedNotification object:nil];
 }
 
 - (void)apollo_refreshFeedShortcutsPreviewAnimated:(BOOL)animated {
-    NSIndexPath *indexPath = [self indexPathForRowID:@"feedShortcuts.preview"];
-    ApolloFeedShortcutsPreviewCell *cell = (ApolloFeedShortcutsPreviewCell *)[self cellForRowID:@"feedShortcuts.preview"];
-    if (!indexPath || ![cell isKindOfClass:[ApolloFeedShortcutsPreviewCell class]]) {
-        [self reloadRowWithID:@"feedShortcuts.preview"];
-        return;
-    }
-
-    [cell apollo_configurePreviewAnimated:animated];
+    (void)animated;
 }
 
 - (void)hideMultiredditDescriptionsSwitchToggled:(UISwitch *)sender {
@@ -4422,56 +4283,344 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 }
 @end
 
-@implementation ApolloFeedShortcutsSettingsViewController
+@interface ApolloFeedShortcutsFormViewController : CustomAPIViewController
+@property (nonatomic, weak) ApolloFeedShortcutsSettingsViewController *previewContainer;
+@end
+
+@interface ApolloFeedShortcutsSettingsViewController ()
+@property (nonatomic) UITableViewStyle tableStyle;
+@property (nonatomic, strong) ApolloFeedShortcutsFormViewController *formViewController;
+@property (nonatomic, strong) UIView *previewHost;
+@property (nonatomic, strong) UILabel *previewTitleLabel;
+@property (nonatomic, strong) UIView *previewContentHost;
+@property (nonatomic, strong) UIView *scrollBoundaryView;
+@property (nonatomic, strong) NSLayoutConstraint *previewContentHeightConstraint;
+@property (nonatomic, strong) ApolloFeedShortcutsPreviewView *currentPreviewView;
+@property (nonatomic, strong) UIViewPropertyAnimator *previewAnimator;
+@property (nonatomic) NSUInteger previewTransitionGeneration;
+@property (nonatomic) BOOL previewRefreshPending;
+- (void)apollo_refreshPreviewAnimated:(BOOL)animated;
+- (void)apollo_formDidScroll:(UIScrollView *)scrollView;
+@end
+
+@implementation ApolloFeedShortcutsFormViewController
 - (NSString *)apollo_screenTitle { return @"Feed Shortcuts"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
-    return @[ [self buildFeedShortcutsPreviewSection],
-              [self buildFeedShortcutsVisibilitySection],
+    return @[ [self buildFeedShortcutsVisibilitySection],
               [self buildFeedShortcutsControlsSection],
               [self buildFeedShortcutsDescriptionsSection] ];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    [self reloadRowWithID:@"feedShortcuts.preview"];
     [self reloadRowWithID:@"sub.showPopularShortcut"];
     [self reloadRowWithID:@"sub.showAllShortcut"];
     [self reloadRowWithID:@"sub.showModeratorShortcut"];
 }
 
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    [super traitCollectionDidChange:previousTraitCollection];
-    if (!previousTraitCollection ||
-        [self.traitCollection.preferredContentSizeCategory
-            isEqualToString:previousTraitCollection.preferredContentSizeCategory]) {
-        return;
-    }
-    [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
-    [self reloadRowWithID:@"sub.hideFeedDescriptions"];
+- (void)apollo_refreshFeedShortcutsPreviewAnimated:(BOOL)animated {
+    [self.previewContainer apollo_refreshPreviewAnimated:animated];
 }
 
-- (void)viewWillTransitionToSize:(CGSize)size
-       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
-    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
-    __weak typeof(self) weakSelf = self;
-    [coordinator animateAlongsideTransition:nil
-                                 completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
-        [weakSelf apollo_refreshFeedShortcutsPreviewAnimated:YES];
-        [weakSelf reloadRowWithID:@"sub.hideFeedDescriptions"];
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    [self.previewContainer apollo_formDidScroll:scrollView];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    if (section != 0) return UITableViewAutomaticDimension;
+    UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote
+                           compatibleWithTraitCollection:self.traitCollection];
+    return ceil(font.lineHeight) + 20.0;
+}
+@end
+
+@implementation ApolloFeedShortcutsSettingsViewController
+
+- (instancetype)init {
+    return [self initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (instancetype)initWithStyle:(UITableViewStyle)style {
+    self = [super initWithNibName:nil bundle:nil];
+    if (!self) return nil;
+    _tableStyle = style;
+    return self;
+}
+
+- (void)loadView {
+    self.view = [UIView new];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Feed Shortcuts";
+
+    UIView *previewHost = [UIView new];
+    previewHost.translatesAutoresizingMaskIntoConstraints = NO;
+    previewHost.layoutMargins = UIEdgeInsetsMake(0.0, 20.0, 0.0, 20.0);
+    self.previewHost = previewHost;
+    [self.view addSubview:previewHost];
+
+    UILabel *titleLabel = [UILabel new];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    if (IsLiquidGlass()) {
+        titleLabel.text = @"Preview";
+        UIFont *titleFont = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
+        titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody]
+            scaledFontForFont:titleFont];
+    } else {
+        titleLabel.text = @"PREVIEW";
+        titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    }
+    titleLabel.adjustsFontForContentSizeCategory = YES;
+    titleLabel.isAccessibilityElement = YES;
+    titleLabel.accessibilityTraits = UIAccessibilityTraitHeader;
+    self.previewTitleLabel = titleLabel;
+    [previewHost addSubview:titleLabel];
+
+    UIView *contentHost = [UIView new];
+    contentHost.translatesAutoresizingMaskIntoConstraints = NO;
+    contentHost.clipsToBounds = YES;
+    contentHost.userInteractionEnabled = NO;
+    self.previewContentHost = contentHost;
+    [previewHost addSubview:contentHost];
+
+    UIView *scrollBoundary = [UIView new];
+    scrollBoundary.translatesAutoresizingMaskIntoConstraints = NO;
+    scrollBoundary.userInteractionEnabled = NO;
+    scrollBoundary.alpha = 0.0;
+    self.scrollBoundaryView = scrollBoundary;
+
+    ApolloFeedShortcutsFormViewController *form =
+        [[ApolloFeedShortcutsFormViewController alloc] initWithStyle:self.tableStyle];
+    form.previewContainer = self;
+    self.formViewController = form;
+    [self addChildViewController:form];
+    form.view.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:form.view];
+    [form didMoveToParentViewController:self];
+    [self.view bringSubviewToFront:previewHost];
+    [self.view addSubview:scrollBoundary];
+
+    NSLayoutConstraint *contentHeight =
+        [contentHost.heightAnchor constraintEqualToConstant:1.0];
+    self.previewContentHeightConstraint = contentHeight;
+    [NSLayoutConstraint activateConstraints:@[
+        [previewHost.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [previewHost.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [previewHost.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+
+        [titleLabel.topAnchor constraintEqualToAnchor:previewHost.topAnchor constant:15.0],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:previewHost.layoutMarginsGuide.leadingAnchor constant:16.0],
+        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:previewHost.layoutMarginsGuide.trailingAnchor constant:-16.0],
+
+        [contentHost.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:7.0],
+        [contentHost.leadingAnchor constraintEqualToAnchor:previewHost.leadingAnchor],
+        [contentHost.trailingAnchor constraintEqualToAnchor:previewHost.trailingAnchor],
+        contentHeight,
+        [contentHost.bottomAnchor constraintEqualToAnchor:previewHost.bottomAnchor constant:-2.0],
+
+        [scrollBoundary.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [scrollBoundary.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [scrollBoundary.topAnchor constraintEqualToAnchor:previewHost.bottomAnchor],
+        [scrollBoundary.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale],
+
+        [form.view.topAnchor constraintEqualToAnchor:previewHost.bottomAnchor],
+        [form.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [form.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [form.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
+    ]];
+
+    [self apollo_applyPreviewTheme];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self apollo_applyPreviewTheme];
+    [self apollo_refreshPreviewAnimated:NO];
+    [self apollo_formDidScroll:self.formViewController.tableView];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [self apollo_finishPreviewTransition];
+    [super viewWillDisappear:animated];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    BOOL appearanceChanged = !previousTraitCollection ||
+        [self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection];
+    BOOL contentSizeChanged = !previousTraitCollection ||
+        ![self.traitCollection.preferredContentSizeCategory
+            isEqualToString:previousTraitCollection.preferredContentSizeCategory];
+    if (!appearanceChanged && !contentSizeChanged) return;
+
+    [self apollo_applyPreviewTheme];
+    [self apollo_refreshPreviewAnimated:NO];
+}
+
+- (void)apollo_applyPreviewTheme {
+    UIColor *backgroundColor = ApolloThemePageBackgroundColor()
+        ?: UIColor.systemGroupedBackgroundColor;
+    self.view.backgroundColor = backgroundColor;
+    self.previewHost.backgroundColor = backgroundColor;
+    self.previewTitleLabel.textColor =
+        ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel)
+        ?: UIColor.secondaryLabelColor;
+    self.scrollBoundaryView.backgroundColor = ApolloThemeSeparatorColor()
+        ?: self.formViewController.tableView.separatorColor
+        ?: UIColor.separatorColor;
+    self.view.tintColor = ApolloThemeAccentColor() ?: self.view.tintColor;
+}
+
+- (void)apollo_formDidScroll:(UIScrollView *)scrollView {
+    if (scrollView != self.formViewController.tableView) return;
+    CGFloat restingOffset = -scrollView.adjustedContentInset.top;
+    CGFloat targetAlpha = scrollView.contentOffset.y > restingOffset + 0.5 ? 1.0 : 0.0;
+    if (fabs(self.scrollBoundaryView.alpha - targetAlpha) < 0.01) return;
+    [UIView animateWithDuration:0.15
+                          delay:0.0
+                        options:UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        self.scrollBoundaryView.alpha = targetAlpha;
+    } completion:nil];
+}
+
+- (ApolloFeedShortcutsPreviewView *)apollo_previewViewForState:(ApolloFeedShortcutsPreviewState *)state {
+    ApolloFeedShortcutsPreviewView *preview = [[ApolloFeedShortcutsPreviewView alloc] initWithFrame:CGRectZero];
+    preview.translatesAutoresizingMaskIntoConstraints = NO;
+    preview.layoutMargins = self.previewHost.layoutMargins;
+    preview.hostTableView = self.formViewController.tableView;
+    preview.previewState = state;
+    [preview apollo_configurePreview];
+    return preview;
+}
+
+- (void)apollo_addPreviewView:(ApolloFeedShortcutsPreviewView *)preview
+                       height:(CGFloat)height {
+    [self.previewContentHost addSubview:preview];
+    [NSLayoutConstraint activateConstraints:@[
+        [preview.topAnchor constraintEqualToAnchor:self.previewContentHost.topAnchor],
+        [preview.leadingAnchor constraintEqualToAnchor:self.previewContentHost.leadingAnchor],
+        [preview.trailingAnchor constraintEqualToAnchor:self.previewContentHost.trailingAnchor],
+        [preview.heightAnchor constraintEqualToConstant:height]
+    ]];
+}
+
+- (void)apollo_finishPreviewTransition {
+    UIViewPropertyAnimator *animator = self.previewAnimator;
+    if (!animator) return;
+    [animator stopAnimation:NO];
+    [animator finishAnimationAtPosition:UIViewAnimatingPositionEnd];
+}
+
+- (void)apollo_replacePreviewImmediately:(ApolloFeedShortcutsPreviewView *)preview
+                                   state:(ApolloFeedShortcutsPreviewState *)state {
+    [self apollo_finishPreviewTransition];
+    for (UIView *subview in self.previewContentHost.subviews) [subview removeFromSuperview];
+    [self apollo_addPreviewView:preview height:state.previewHeight];
+    preview.alpha = 1.0;
+    self.currentPreviewView = preview;
+    self.previewContentHeightConstraint.constant = state.previewHeight;
+    [UIView performWithoutAnimation:^{
+        [self.view layoutIfNeeded];
     }];
 }
 
-- (void)apollo_applyThemeToCell:(UITableViewCell *)cell {
-    [super apollo_applyThemeToCell:cell];
-    if (![cell isKindOfClass:[ApolloFeedShortcutsPreviewCell class]]) return;
-
-    cell.backgroundColor = UIColor.clearColor;
-    cell.contentView.backgroundColor = UIColor.clearColor;
-    cell.backgroundView.backgroundColor = UIColor.clearColor;
-    if (@available(iOS 14.0, *)) {
-        cell.backgroundConfiguration = [UIBackgroundConfiguration clearConfiguration];
+- (void)apollo_refreshPreviewAnimated:(BOOL)animated {
+    if (animated && self.previewAnimator.state == UIViewAnimatingStateActive) {
+        self.previewRefreshPending = YES;
+        return;
     }
+    [self apollo_finishPreviewTransition];
+
+    ApolloFeedShortcutsPreviewState *state =
+        ApolloFeedShortcutsCurrentPreviewState(self.traitCollection);
+    ApolloFeedShortcutsPreviewView *incoming = [self apollo_previewViewForState:state];
+    ApolloFeedShortcutsPreviewView *outgoing = self.currentPreviewView;
+    if (!animated || UIAccessibilityIsReduceMotionEnabled() || !outgoing) {
+        [self apollo_replacePreviewImmediately:incoming state:state];
+        return;
+    }
+
+    [self.view layoutIfNeeded];
+    [self apollo_addPreviewView:incoming height:state.previewHeight];
+    [self.previewContentHost layoutIfNeeded];
+    [incoming layoutIfNeeded];
+    self.previewContentHeightConstraint.constant = state.previewHeight;
+    self.currentPreviewView = incoming;
+
+    BOOL animatesItems = outgoing.previewState.layout == state.layout &&
+        outgoing.previewState.iconStyle == state.iconStyle;
+    NSMutableArray<UIView *> *departingItems = [NSMutableArray array];
+    if (animatesItems) {
+        NSDictionary<NSNumber *, UIView *> *oldItems = outgoing.shortcutItemViewsByIndex;
+        NSDictionary<NSNumber *, UIView *> *newItems = incoming.shortcutItemViewsByIndex;
+        for (NSNumber *index in newItems) {
+            UIView *newItem = newItems[index];
+            UIView *oldItem = oldItems[index];
+            if (oldItem) {
+                CGRect oldFrame = [oldItem convertRect:oldItem.bounds toView:self.previewContentHost];
+                CGRect newFrame = [newItem convertRect:newItem.bounds toView:self.previewContentHost];
+                newItem.transform = CGAffineTransformMakeTranslation(CGRectGetMidX(oldFrame) - CGRectGetMidX(newFrame),
+                                                                      CGRectGetMidY(oldFrame) - CGRectGetMidY(newFrame));
+                oldItem.alpha = 0.0;
+            } else {
+                newItem.alpha = 0.0;
+                newItem.transform = CGAffineTransformMakeScale(0.88, 0.88);
+            }
+        }
+        for (NSNumber *index in oldItems) {
+            if (!newItems[index]) [departingItems addObject:oldItems[index]];
+        }
+        for (UIView *separator in incoming.shortcutSeparators) separator.alpha = 0.0;
+    } else {
+        incoming.alpha = 0.0;
+    }
+
+    NSUInteger generation = ++self.previewTransitionGeneration;
+    UISpringTimingParameters *timing = [[UISpringTimingParameters alloc] initWithDampingRatio:0.88];
+    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:0.34
+                                                                      timingParameters:timing];
+    __weak typeof(self) weakSelf = self;
+    __weak UIViewPropertyAnimator *weakAnimator = animator;
+    [animator addAnimations:^{
+        if (animatesItems) {
+            for (UIView *item in incoming.shortcutItemViewsByIndex.allValues) {
+                item.alpha = 1.0;
+                item.transform = CGAffineTransformIdentity;
+            }
+            for (UIView *item in departingItems) {
+                item.alpha = 0.0;
+                item.transform = CGAffineTransformMakeScale(0.88, 0.88);
+            }
+            for (UIView *separator in incoming.shortcutSeparators) separator.alpha = 1.0;
+            for (UIView *separator in outgoing.shortcutSeparators) separator.alpha = 0.0;
+        } else {
+            incoming.alpha = 1.0;
+            outgoing.alpha = 0.0;
+        }
+        [weakSelf.view layoutIfNeeded];
+    }];
+    [animator addCompletion:^(__unused UIViewAnimatingPosition finalPosition) {
+        [outgoing removeFromSuperview];
+        incoming.alpha = 1.0;
+        if (weakSelf.previewTransitionGeneration == generation &&
+            weakSelf.previewAnimator == weakAnimator) {
+            weakSelf.previewAnimator = nil;
+        }
+        if (weakSelf.previewRefreshPending) {
+            weakSelf.previewRefreshPending = NO;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf apollo_refreshPreviewAnimated:YES];
+            });
+        }
+    }];
+    self.previewAnimator = animator;
+    [animator startAnimation];
 }
+
 @end
 
 @implementation ApolloProfilesSettingsViewController

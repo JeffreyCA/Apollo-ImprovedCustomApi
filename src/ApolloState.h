@@ -1,6 +1,5 @@
 #import <Foundation/Foundation.h>
 
-@class UIImage;
 @class UIScrollView;
 @class UINavigationItem;
 @class UIViewController;
@@ -240,7 +239,7 @@ BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController);
 // cluster; unrelated windows and navigation stacks are never traversed.
 void ApolloSubredditRequestTitleRelayout(UINavigationItem *navigationItem);
 extern BOOL sModernSubredditDividers;
-// Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
+// Master toggle for subreddit list polish; Feed Shortcuts remains independent.
 extern BOOL sSubredditListEnhancements;
 typedef NS_ENUM(NSInteger, ApolloSubredditFeedIconStyle) {
     ApolloSubredditFeedIconStyleClassic = 0,
@@ -255,21 +254,11 @@ typedef NS_ENUM(NSInteger, ApolloSubredditFeedLayout) {
     ApolloSubredditFeedLayoutSideBySide = 2,
     ApolloSubredditFeedLayoutIconDock = 3,
 };
-// Home / Popular / All icon appearance and arrangement. Effective only with
-// the list master on.
+// Home / Popular / All / Moderator icon appearance and arrangement. Independent
+// of the subreddit-list polish master.
 extern NSInteger sSubredditFeedIconStyle;
 extern NSInteger sSubredditFeedLayout;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-// Returns Apollo's native built-in feed artwork. The original orb assets are
-// available immediately; captured row images take over once the subreddit
-// list supplies them.
-UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index);
-#ifdef __cplusplus
-}
-#endif
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;

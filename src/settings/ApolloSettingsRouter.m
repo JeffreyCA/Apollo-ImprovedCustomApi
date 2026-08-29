@@ -64,7 +64,9 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
         add(@"comments", @"Comments", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloCommentsSettingsViewController class]));
         add(@"media", @"Media", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloMediaSettingsViewController class]));
         add(@"subreddits", @"Subreddits", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloSubredditsSettingsViewController class]));
-        add(@"feed-shortcuts", @"Feed Shortcuts", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloFeedShortcutsSettingsViewController class]));
+        add(@"feed-shortcuts", @"Feed Shortcuts", @"Apollo Reborn → Features → Subreddits", ^UIViewController *{
+            return [[ApolloFeedShortcutsSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        });
         add(@"subreddit-layout", @"Subreddit Layout", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloSubredditLayoutViewController class]));
         add(@"profiles", @"Profiles", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloProfilesSettingsViewController class]));
         add(@"profile-layout", @"Profile Layout", @"Apollo Reborn → Features → Profiles", ApolloSettingsInsetGrouped([ApolloProfileLayoutViewController class]));

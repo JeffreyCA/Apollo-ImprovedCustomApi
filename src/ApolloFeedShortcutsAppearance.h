@@ -6,13 +6,18 @@
 extern "C" {
 #endif
 
+typedef struct {
+    BOOL usesFlexibleSideBySideLayout;
+    CGFloat centerXOffset;
+    CGFloat horizontalMargin;
+} ApolloFeedShortcutItemGeometry;
+
 NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
                                                     NSArray<UIView *> *items,
                                                     NSArray<UIView *> *contentViews,
                                                     NSArray<NSLayoutConstraint *> *contentCenterXConstraints,
                                                     ApolloSubredditFeedLayout layout,
-                                                    UIColor *separatorColor,
-                                                    NSArray<UILayoutGuide *> **installedLayoutGuides);
+                                                    UIColor *separatorColor);
 
 NSArray<NSNumber *> *ApolloFeedShortcutVisibleIndexes(void);
 NSString *ApolloFeedShortcutShortTitle(NSInteger index);
@@ -23,12 +28,14 @@ UIImage *ApolloFeedShortcutIconImage(NSInteger index,
                                      ApolloSubredditFeedIconStyle style,
                                      ApolloSubredditFeedLayout layout,
                                      NSUInteger itemCount);
+UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index);
 
 ApolloSubredditFeedLayout ApolloFeedShortcutEffectiveLayout(ApolloSubredditFeedLayout preferredLayout,
-                                                             NSArray<NSNumber *> *visibleIndexes,
-                                                             ApolloSubredditFeedIconStyle iconStyle,
-                                                             CGFloat availableWidth,
+                                                             NSUInteger itemCount,
                                                              UITraitCollection *traitCollection);
+ApolloFeedShortcutItemGeometry ApolloFeedShortcutItemGeometryForLayout(ApolloSubredditFeedLayout layout,
+                                                                        NSUInteger itemCount,
+                                                                        NSInteger feedIndex);
 CGFloat ApolloFeedShortcutLayoutHeight(ApolloSubredditFeedLayout layout,
                                        UITraitCollection *traitCollection);
 CGFloat ApolloFeedShortcutRowHeight(UITraitCollection *traitCollection);

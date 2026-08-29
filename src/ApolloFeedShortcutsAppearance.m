@@ -6,13 +6,25 @@
 #import "ApolloCommon.h"
 #import "UserDefaultConstants.h"
 
+static NSString * const kApolloFeedShortcutShortTitles[] = {
+    @"Home", @"Popular", @"All", @"Moderator"
+};
+static NSString * const kApolloFeedShortcutRowTitles[] = {
+    @"Home", @"Popular Posts", @"All Posts", @"Moderator Posts"
+};
+static NSString * const kApolloFeedShortcutDetails[] = {
+    @"Posts from subscriptions",
+    @"Most popular across Reddit",
+    @"Posts across all subreddits",
+    @"Posts from moderated subreddits"
+};
+
 NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
                                                     NSArray<UIView *> *items,
                                                     NSArray<UIView *> *contentViews,
                                                     NSArray<NSLayoutConstraint *> *contentCenterXConstraints,
                                                     ApolloSubredditFeedLayout layout,
-                                                    UIColor *separatorColor,
-                                                    NSArray<UILayoutGuide *> **installedLayoutGuides) {
+                                                    UIColor *separatorColor) {
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:items];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisHorizontal;
@@ -29,14 +41,13 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
     ]];
 
     if (layout == ApolloSubredditFeedLayoutIconDock) {
-        if (installedLayoutGuides) *installedLayoutGuides = @[];
         return @[];
     }
 
     BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
+    BOOL flexibleSideBySide = sideBySide && items.count >= 3;
     NSMutableArray<UIView *> *separators =
         [NSMutableArray arrayWithCapacity:items.count > 0 ? items.count - 1 : 0];
-    NSMutableArray<UILayoutGuide *> *layoutGuides = [NSMutableArray array];
     for (NSUInteger index = 0; index + 1 < items.count; index++) {
         UIView *separator = [UIView new];
         separator.translatesAutoresizingMaskIntoConstraints = NO;
@@ -48,10 +59,9 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
             [separator.topAnchor constraintEqualToAnchor:hostView.topAnchor constant:sideBySide ? 14.0 : 22.0],
             [separator.bottomAnchor constraintEqualToAnchor:hostView.bottomAnchor constant:sideBySide ? -14.0 : -22.0]
         ]];
-        if (sideBySide && items.count >= 3) {
+        if (flexibleSideBySide) {
             UILayoutGuide *gapGuide = [UILayoutGuide new];
             [hostView addLayoutGuide:gapGuide];
-            [layoutGuides addObject:gapGuide];
             [constraints addObjectsFromArray:@[
                 [gapGuide.leadingAnchor constraintEqualToAnchor:contentViews[index].trailingAnchor],
                 [gapGuide.trailingAnchor constraintEqualToAnchor:contentViews[index + 1].leadingAnchor],
@@ -64,12 +74,11 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
         [separators addObject:separator];
     }
 
-    if (sideBySide && items.count >= 3) {
+    if (flexibleSideBySide) {
         for (NSUInteger index = 1; index + 1 < items.count; index++) {
             contentCenterXConstraints[index].active = NO;
             UILayoutGuide *regionGuide = [UILayoutGuide new];
             [hostView addLayoutGuide:regionGuide];
-            [layoutGuides addObject:regionGuide];
             [NSLayoutConstraint activateConstraints:@[
                 [regionGuide.leadingAnchor constraintEqualToAnchor:separators[index - 1].centerXAnchor],
                 [regionGuide.trailingAnchor constraintEqualToAnchor:separators[index].centerXAnchor],
@@ -77,7 +86,6 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
             ]];
         }
     }
-    if (installedLayoutGuides) *installedLayoutGuides = [layoutGuides copy];
     return separators;
 }
 
@@ -91,23 +99,15 @@ NSArray<NSNumber *> *ApolloFeedShortcutVisibleIndexes(void) {
 }
 
 NSString *ApolloFeedShortcutShortTitle(NSInteger index) {
-    NSArray<NSString *> *titles = @[ @"Home", @"Popular", @"All", @"Moderator" ];
-    return index >= 0 && index < (NSInteger)titles.count ? titles[(NSUInteger)index] : @"";
+    return index >= 0 && index < 4 ? kApolloFeedShortcutShortTitles[index] : @"";
 }
 
 NSString *ApolloFeedShortcutRowTitle(NSInteger index) {
-    NSArray<NSString *> *titles = @[ @"Home", @"Popular Posts", @"All Posts", @"Moderator Posts" ];
-    return index >= 0 && index < (NSInteger)titles.count ? titles[(NSUInteger)index] : @"";
+    return index >= 0 && index < 4 ? kApolloFeedShortcutRowTitles[index] : @"";
 }
 
 NSString *ApolloFeedShortcutDetail(NSInteger index) {
-    NSArray<NSString *> *details = @[
-        @"Posts from subscriptions",
-        @"Most popular across Reddit",
-        @"Posts across all subreddits",
-        @"Posts from moderated subreddits"
-    ];
-    return index >= 0 && index < (NSInteger)details.count ? details[(NSUInteger)index] : @"";
+    return index >= 0 && index < 4 ? kApolloFeedShortcutDetails[index] : @"";
 }
 
 UIColor *ApolloFeedShortcutColor(NSInteger index) {
@@ -284,22 +284,17 @@ UIImage *ApolloFeedShortcutIconImage(NSInteger index,
     UIImage *icon = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
         CGRect bounds = CGRectMake(0.0, 0.0, canvasSize, canvasSize);
         BOOL usesCircle = style == ApolloSubredditFeedIconStyleCircle;
-        BOOL usesTile = style == ApolloSubredditFeedIconStyleSoftTile ||
-                        style == ApolloSubredditFeedIconStyleSolidTile;
+        BOOL softTile = style == ApolloSubredditFeedIconStyleSoftTile;
+        BOOL usesTile = softTile || style == ApolloSubredditFeedIconStyleSolidTile;
         if (usesCircle || usesTile) {
             UIBezierPath *path = usesTile
                 ? [UIBezierPath bezierPathWithRoundedRect:bounds cornerRadius:canvasSize * 0.25]
                 : [UIBezierPath bezierPathWithOvalInRect:bounds];
-            UIColor *fillColor = color;
-            if (style == ApolloSubredditFeedIconStyleSoftTile) {
-                fillColor = [color colorWithAlphaComponent:0.14];
-            }
+            UIColor *fillColor = softTile ? [color colorWithAlphaComponent:0.14] : color;
             [fillColor setFill];
             [path fill];
         }
-        UIColor *glyphColor = style == ApolloSubredditFeedIconStyleSoftTile
-            ? color
-            : UIColor.whiteColor;
+        UIColor *glyphColor = softTile ? color : UIColor.whiteColor;
         UIImage *coloredGlyph = [glyph imageWithTintColor:glyphColor
                                              renderingMode:UIImageRenderingModeAlwaysOriginal];
         [coloredGlyph drawInRect:CGRectInset(bounds, glyphMetric, glyphMetric)];
@@ -310,11 +305,8 @@ UIImage *ApolloFeedShortcutIconImage(NSInteger index,
 }
 
 ApolloSubredditFeedLayout ApolloFeedShortcutEffectiveLayout(ApolloSubredditFeedLayout preferredLayout,
-                                                             NSArray<NSNumber *> *visibleIndexes,
-                                                             ApolloSubredditFeedIconStyle iconStyle,
-                                                             CGFloat availableWidth,
+                                                             NSUInteger itemCount,
                                                              UITraitCollection *traitCollection) {
-    NSUInteger itemCount = visibleIndexes.count;
     if (preferredLayout != ApolloSubredditFeedLayoutSideBySide || itemCount < 2) {
         return preferredLayout;
     }
@@ -323,39 +315,29 @@ ApolloSubredditFeedLayout ApolloFeedShortcutEffectiveLayout(ApolloSubredditFeedL
     if (UIContentSizeCategoryIsAccessibilityCategory(category)) {
         return ApolloSubredditFeedLayoutRows;
     }
-
-    if (availableWidth > 0.0) {
-        UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody
-                                  compatibleWithTraitCollection:traitCollection];
-        CGFloat iconWidth = ApolloFeedShortcutDisplayIconSize(iconStyle,
-                                                               ApolloSubredditFeedLayoutSideBySide,
-                                                               itemCount);
-        CGFloat spacing = ApolloFeedShortcutContentSpacing(ApolloSubredditFeedLayoutSideBySide,
-                                                            itemCount);
-        CGFloat acceptableLabelScale = itemCount == 4 ? 0.72 : 0.80;
-        CGFloat availableItemWidth = (availableWidth - 28.0) / (CGFloat)itemCount;
-        CGFloat itemMargin = itemCount == 4 ? 0.0 : 12.0;
-        for (NSNumber *index in visibleIndexes) {
-            CGFloat labelWidth = ceil([ApolloFeedShortcutShortTitle(index.integerValue)
-                sizeWithAttributes:@{ NSFontAttributeName: font }].width);
-            CGFloat requiredWidth = iconWidth + spacing + labelWidth * acceptableLabelScale + itemMargin;
-            if (requiredWidth > availableItemWidth) {
-                return ApolloSubredditFeedLayoutGrid;
-            }
-        }
-    }
     return preferredLayout;
+}
+
+ApolloFeedShortcutItemGeometry ApolloFeedShortcutItemGeometryForLayout(ApolloSubredditFeedLayout layout,
+                                                                        NSUInteger itemCount,
+                                                                        NSInteger feedIndex) {
+    BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
+    return (ApolloFeedShortcutItemGeometry){
+        .usesFlexibleSideBySideLayout = sideBySide && itemCount >= 3,
+        .centerXOffset = sideBySide && itemCount == 3 && feedIndex == 3 ? 6.0 : 0.0,
+        .horizontalMargin = sideBySide ? 6.0 : 4.0,
+    };
 }
 
 CGFloat ApolloFeedShortcutLayoutHeight(ApolloSubredditFeedLayout layout,
                                        UITraitCollection *traitCollection) {
     if (layout == ApolloSubredditFeedLayoutIconDock) return 64.0;
+    if (layout == ApolloSubredditFeedLayoutRows) return 0.0;
 
     UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody
                               compatibleWithTraitCollection:traitCollection];
     if (layout == ApolloSubredditFeedLayoutSideBySide) {
-        CGFloat contentHeight = MAX(34.0, ceil(font.lineHeight)) + 16.0;
-        return MAX(68.0, contentHeight);
+        return MAX(68.0, ceil(font.lineHeight) + 16.0);
     }
     if (layout == ApolloSubredditFeedLayoutGrid) {
         CGFloat contentHeight = 46.0 + 4.0 + ceil(font.lineHeight) + 16.0;
@@ -373,7 +355,7 @@ CGFloat ApolloFeedShortcutRowHeight(UITraitCollection *traitCollection) {
 }
 
 CGFloat ApolloFeedShortcutPreviewRowItemHeight(UITraitCollection *traitCollection) {
-    return MAX(52.0, ApolloFeedShortcutRowHeight(traitCollection) - 8.0);
+    return ApolloFeedShortcutRowHeight(traitCollection) - 8.0;
 }
 
 CGFloat ApolloFeedShortcutDisplayIconSize(ApolloSubredditFeedIconStyle style,
