@@ -17,7 +17,8 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
                                                     NSArray<UIView *> *contentViews,
                                                     NSArray<NSLayoutConstraint *> *contentCenterXConstraints,
                                                     ApolloSubredditFeedLayout layout,
-                                                    UIColor *separatorColor);
+                                                    UIColor *separatorColor,
+                                                    CGFloat stackHorizontalOffset);
 
 NSArray<NSNumber *> *ApolloFeedShortcutVisibleIndexes(void);
 NSString *ApolloFeedShortcutShortTitle(NSInteger index);

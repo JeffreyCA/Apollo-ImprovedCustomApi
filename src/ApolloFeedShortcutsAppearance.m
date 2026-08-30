@@ -24,7 +24,8 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
                                                     NSArray<UIView *> *contentViews,
                                                     NSArray<NSLayoutConstraint *> *contentCenterXConstraints,
                                                     ApolloSubredditFeedLayout layout,
-                                                    UIColor *separatorColor) {
+                                                    UIColor *separatorColor,
+                                                    CGFloat stackHorizontalOffset) {
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:items];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisHorizontal;
@@ -34,8 +35,10 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
     [hostView addSubview:stack];
     CGFloat horizontalInset = layout == ApolloSubredditFeedLayoutIconDock ? 28.0 : 14.0;
     [NSLayoutConstraint activateConstraints:@[
-        [stack.leadingAnchor constraintEqualToAnchor:hostView.leadingAnchor constant:horizontalInset],
-        [stack.trailingAnchor constraintEqualToAnchor:hostView.trailingAnchor constant:-horizontalInset],
+        [stack.leadingAnchor constraintEqualToAnchor:hostView.leadingAnchor
+                                             constant:horizontalInset + stackHorizontalOffset],
+        [stack.trailingAnchor constraintEqualToAnchor:hostView.trailingAnchor
+                                              constant:-horizontalInset + stackHorizontalOffset],
         [stack.topAnchor constraintEqualToAnchor:hostView.topAnchor constant:8.0],
         [stack.bottomAnchor constraintEqualToAnchor:hostView.bottomAnchor constant:-8.0]
     ]];
@@ -55,7 +58,7 @@ NSArray<UIView *> *ApolloFeedShortcutInstallLayout(UIView *hostView,
         separator.backgroundColor = separatorColor;
         [hostView addSubview:separator];
         NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:@[
-            [separator.widthAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale],
+            [separator.widthAnchor constraintEqualToConstant:2.0 / UIScreen.mainScreen.scale],
             [separator.topAnchor constraintEqualToAnchor:hostView.topAnchor constant:sideBySide ? 14.0 : 22.0],
             [separator.bottomAnchor constraintEqualToAnchor:hostView.bottomAnchor constant:sideBySide ? -14.0 : -22.0]
         ]];

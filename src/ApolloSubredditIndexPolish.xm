@@ -425,7 +425,8 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
                                                       contentViews,
                                                       centerConstraints,
                                                       layout,
-                                                      UIColor.separatorColor);
+                                                      UIColor.separatorColor,
+                                                      0.0);
     self.tableView = tableView;
     return self;
 }

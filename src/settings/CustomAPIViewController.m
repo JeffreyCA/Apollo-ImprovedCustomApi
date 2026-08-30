@@ -104,11 +104,33 @@ static ApolloFeedShortcutsPreviewState *ApolloFeedShortcutsCurrentPreviewState(
         NSUInteger count = state.visibleIndexes.count;
         CGFloat rowsHeight = (CGFloat)count * ApolloFeedShortcutPreviewRowItemHeight(traitCollection);
         CGFloat spacingHeight = count > 1 ? (CGFloat)(count - 1) * 8.0 : 0.0;
-        state.previewHeight = rowsHeight + spacingHeight + 10.0;
+        state.previewHeight = rowsHeight + spacingHeight + 16.0;
     } else {
         state.previewHeight = ApolloFeedShortcutLayoutHeight(state.layout, traitCollection);
     }
     return state;
+}
+
+static CGFloat ApolloFeedShortcutsPreviewSideBySideCenterOffset(ApolloFeedShortcutsPreviewState *state) {
+    NSUInteger itemCount = state.visibleIndexes.count;
+    if (state.layout != ApolloSubredditFeedLayoutSideBySide || itemCount < 3) return 0.0;
+
+    NSInteger firstIndex = state.visibleIndexes.firstObject.integerValue;
+    NSInteger lastIndex = state.visibleIndexes.lastObject.integerValue;
+    UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody
+                              compatibleWithTraitCollection:state.traitCollection];
+    CGFloat firstTitleWidth = ceil([ApolloFeedShortcutShortTitle(firstIndex)
+        sizeWithAttributes:@{ NSFontAttributeName: font }].width);
+    CGFloat lastTitleWidth = ceil([ApolloFeedShortcutShortTitle(lastIndex)
+        sizeWithAttributes:@{ NSFontAttributeName: font }].width);
+    ApolloFeedShortcutItemGeometry firstGeometry =
+        ApolloFeedShortcutItemGeometryForLayout(state.layout, itemCount, firstIndex);
+    ApolloFeedShortcutItemGeometry lastGeometry =
+        ApolloFeedShortcutItemGeometryForLayout(state.layout, itemCount, lastIndex);
+    CGFloat visualCenterOffset = (firstGeometry.centerXOffset + lastGeometry.centerXOffset) / 2.0 +
+        (lastTitleWidth - firstTitleWidth) / 4.0;
+    CGFloat scale = UIScreen.mainScreen.scale;
+    return round(-visualCenterOffset * scale) / scale;
 }
 
 @interface ApolloFeedShortcutsPreviewView : UIView
@@ -271,7 +293,14 @@ static ApolloFeedShortcutsPreviewState *ApolloFeedShortcutsCurrentPreviewState(
                                                                    contentViews,
                                                                    centerConstraints,
                                                                    layout,
-                                                                   separatorColor);
+                                                                   separatorColor,
+                                                                   ApolloFeedShortcutsPreviewSideBySideCenterOffset(state));
+        if (layout == ApolloSubredditFeedLayoutSideBySide && contentViews.count >= 3) {
+            [NSLayoutConstraint activateConstraints:@[
+                [contentViews.firstObject.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor],
+                [contentViews.lastObject.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor]
+            ]];
+        }
         return;
     }
     self.shortcutSeparators = @[];
@@ -284,10 +313,10 @@ static ApolloFeedShortcutsPreviewState *ApolloFeedShortcutsCurrentPreviewState(
     previewStack.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:previewStack];
     [NSLayoutConstraint activateConstraints:@[
-        [previewStack.leadingAnchor constraintEqualToAnchor:self.layoutMarginsGuide.leadingAnchor constant:16.0],
-        [previewStack.trailingAnchor constraintEqualToAnchor:self.layoutMarginsGuide.trailingAnchor constant:-16.0],
-        [previewStack.topAnchor constraintEqualToAnchor:self.topAnchor constant:10.0],
-        [previewStack.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor]
+        [previewStack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16.0],
+        [previewStack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16.0],
+        [previewStack.topAnchor constraintEqualToAnchor:self.topAnchor constant:8.0],
+        [previewStack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-8.0]
     ]];
 }
 
@@ -4292,7 +4321,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 @property (nonatomic, strong) ApolloFeedShortcutsFormViewController *formViewController;
 @property (nonatomic, strong) UIView *previewHost;
 @property (nonatomic, strong) UILabel *previewTitleLabel;
-@property (nonatomic, strong) UIView *previewContentHost;
+@property (nonatomic, strong) UIView *previewCardView;
 @property (nonatomic, strong) UIView *scrollBoundaryView;
 @property (nonatomic, strong) NSLayoutConstraint *previewContentHeightConstraint;
 @property (nonatomic, strong) ApolloFeedShortcutsPreviewView *currentPreviewView;
@@ -4354,6 +4383,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Feed Shortcuts";
+    BOOL liquidGlass = IsLiquidGlass();
 
     UIView *previewHost = [UIView new];
     previewHost.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4363,7 +4393,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
     UILabel *titleLabel = [UILabel new];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    if (IsLiquidGlass()) {
+    if (liquidGlass) {
         titleLabel.text = @"Preview";
         UIFont *titleFont = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
         titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody]
@@ -4378,12 +4408,14 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     self.previewTitleLabel = titleLabel;
     [previewHost addSubview:titleLabel];
 
-    UIView *contentHost = [UIView new];
-    contentHost.translatesAutoresizingMaskIntoConstraints = NO;
-    contentHost.clipsToBounds = YES;
-    contentHost.userInteractionEnabled = NO;
-    self.previewContentHost = contentHost;
-    [previewHost addSubview:contentHost];
+    UIView *previewCard = [UIView new];
+    previewCard.translatesAutoresizingMaskIntoConstraints = NO;
+    previewCard.userInteractionEnabled = NO;
+    previewCard.clipsToBounds = YES;
+    previewCard.layer.cornerRadius = liquidGlass ? 20.0 : 10.0;
+    previewCard.layer.cornerCurve = kCACornerCurveContinuous;
+    self.previewCardView = previewCard;
+    [previewHost addSubview:previewCard];
 
     UIView *scrollBoundary = [UIView new];
     scrollBoundary.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4403,7 +4435,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [self.view addSubview:scrollBoundary];
 
     NSLayoutConstraint *contentHeight =
-        [contentHost.heightAnchor constraintEqualToConstant:1.0];
+        [previewCard.heightAnchor constraintEqualToConstant:1.0];
     self.previewContentHeightConstraint = contentHeight;
     [NSLayoutConstraint activateConstraints:@[
         [previewHost.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
@@ -4414,11 +4446,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         [titleLabel.leadingAnchor constraintEqualToAnchor:previewHost.layoutMarginsGuide.leadingAnchor constant:16.0],
         [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:previewHost.layoutMarginsGuide.trailingAnchor constant:-16.0],
 
-        [contentHost.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:7.0],
-        [contentHost.leadingAnchor constraintEqualToAnchor:previewHost.leadingAnchor],
-        [contentHost.trailingAnchor constraintEqualToAnchor:previewHost.trailingAnchor],
+        [previewCard.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:7.0],
+        [previewCard.leadingAnchor constraintEqualToAnchor:previewHost.leadingAnchor constant:20.0],
+        [previewCard.trailingAnchor constraintEqualToAnchor:previewHost.trailingAnchor constant:-20.0],
+        [previewCard.bottomAnchor constraintEqualToAnchor:previewHost.bottomAnchor constant:-2.0],
         contentHeight,
-        [contentHost.bottomAnchor constraintEqualToAnchor:previewHost.bottomAnchor constant:-2.0],
 
         [scrollBoundary.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [scrollBoundary.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
@@ -4464,6 +4496,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         ?: UIColor.systemGroupedBackgroundColor;
     self.view.backgroundColor = backgroundColor;
     self.previewHost.backgroundColor = backgroundColor;
+    self.previewCardView.backgroundColor = ApolloThemeCardBackgroundColor()
+        ?: UIColor.secondarySystemGroupedBackgroundColor;
     self.previewTitleLabel.textColor =
         ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel)
         ?: UIColor.secondaryLabelColor;
@@ -4490,7 +4524,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (ApolloFeedShortcutsPreviewView *)apollo_previewViewForState:(ApolloFeedShortcutsPreviewState *)state {
     ApolloFeedShortcutsPreviewView *preview = [[ApolloFeedShortcutsPreviewView alloc] initWithFrame:CGRectZero];
     preview.translatesAutoresizingMaskIntoConstraints = NO;
-    preview.layoutMargins = self.previewHost.layoutMargins;
     preview.hostTableView = self.formViewController.tableView;
     preview.previewState = state;
     [preview apollo_configurePreview];
@@ -4499,11 +4532,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 - (void)apollo_addPreviewView:(ApolloFeedShortcutsPreviewView *)preview
                        height:(CGFloat)height {
-    [self.previewContentHost addSubview:preview];
+    [self.previewCardView addSubview:preview];
     [NSLayoutConstraint activateConstraints:@[
-        [preview.topAnchor constraintEqualToAnchor:self.previewContentHost.topAnchor],
-        [preview.leadingAnchor constraintEqualToAnchor:self.previewContentHost.leadingAnchor],
-        [preview.trailingAnchor constraintEqualToAnchor:self.previewContentHost.trailingAnchor],
+        [preview.topAnchor constraintEqualToAnchor:self.previewCardView.topAnchor],
+        [preview.leadingAnchor constraintEqualToAnchor:self.previewCardView.leadingAnchor],
+        [preview.trailingAnchor constraintEqualToAnchor:self.previewCardView.trailingAnchor],
         [preview.heightAnchor constraintEqualToConstant:height]
     ]];
 }
@@ -4518,7 +4551,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)apollo_replacePreviewImmediately:(ApolloFeedShortcutsPreviewView *)preview
                                    state:(ApolloFeedShortcutsPreviewState *)state {
     [self apollo_finishPreviewTransition];
-    for (UIView *subview in self.previewContentHost.subviews) [subview removeFromSuperview];
+    for (UIView *subview in self.previewCardView.subviews) [subview removeFromSuperview];
     [self apollo_addPreviewView:preview height:state.previewHeight];
     preview.alpha = 1.0;
     self.currentPreviewView = preview;
@@ -4546,7 +4579,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
     [self.view layoutIfNeeded];
     [self apollo_addPreviewView:incoming height:state.previewHeight];
-    [self.previewContentHost layoutIfNeeded];
+    [self.previewCardView layoutIfNeeded];
     [incoming layoutIfNeeded];
     self.previewContentHeightConstraint.constant = state.previewHeight;
     self.currentPreviewView = incoming;
@@ -4561,8 +4594,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             UIView *newItem = newItems[index];
             UIView *oldItem = oldItems[index];
             if (oldItem) {
-                CGRect oldFrame = [oldItem convertRect:oldItem.bounds toView:self.previewContentHost];
-                CGRect newFrame = [newItem convertRect:newItem.bounds toView:self.previewContentHost];
+                CGRect oldFrame = [oldItem convertRect:oldItem.bounds toView:self.previewCardView];
+                CGRect newFrame = [newItem convertRect:newItem.bounds toView:self.previewCardView];
                 newItem.transform = CGAffineTransformMakeTranslation(CGRectGetMidX(oldFrame) - CGRectGetMidX(newFrame),
                                                                       CGRectGetMidY(oldFrame) - CGRectGetMidY(newFrame));
                 oldItem.alpha = 0.0;
