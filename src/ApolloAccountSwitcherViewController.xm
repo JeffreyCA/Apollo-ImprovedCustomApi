@@ -7,6 +7,7 @@
 #import "ApolloCommon.h"
 #import "UserDefaultConstants.h"
 #import "ApolloUserProfileCache.h"
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 // Feature flag: if a future Apollo build changes the native
@@ -105,6 +106,49 @@ static void ApolloSwitcherApplyAvatarToCell(UITableViewCell *cell, NSString *use
 @property (nonatomic) BOOL isWebSession;
 @end
 @implementation ApolloSwitcherAccountRow @end
+
+// Broaden UIKit's narrow reorder target and reload only after its drag finishes.
+@interface ApolloSwitcherAccountCell : UITableViewCell
+@property (nonatomic, copy) void (^reorderDragDidEnd)(void);
+@property (nonatomic) BOOL observedReorderDrag;
+@end
+
+@implementation ApolloSwitcherAccountCell
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hitView = [super hitTest:point withEvent:event];
+    if (!self.isEditing || !self.showsReorderControl ||
+        [hitView isKindOfClass:[UIControl class]]) return hitView;
+
+    // Forward the trailing 52-point band to whatever UIKit exposes at the
+    // center of its reorder handle, without naming or moving private views.
+    BOOL rightToLeft = self.effectiveUserInterfaceLayoutDirection ==
+        UIUserInterfaceLayoutDirectionRightToLeft;
+    CGRect band = self.bounds;
+    band.size.width = MIN(52.0, CGRectGetWidth(band));
+    if (!rightToLeft) {
+        band.origin.x = CGRectGetMaxX(self.bounds) - CGRectGetWidth(band);
+    }
+    if (!CGRectContainsPoint(band, point)) return hitView;
+
+    CGPoint handlePoint = CGPointMake(rightToLeft ? 20.0 : CGRectGetWidth(self.bounds) - 20.0,
+                                      CGRectGetMidY(self.bounds));
+    UIView *reorderControl = [super hitTest:handlePoint withEvent:event];
+    while (reorderControl && reorderControl != self &&
+           ![reorderControl isKindOfClass:[UIControl class]]) {
+        reorderControl = reorderControl.superview;
+    }
+    return [reorderControl isKindOfClass:[UIControl class]] ? reorderControl : hitView;
+}
+
+- (void)dragStateDidChange:(UITableViewCellDragState)dragState {
+    [super dragStateDidChange:dragState];
+    BOOL ended = self.observedReorderDrag && dragState == UITableViewCellDragStateNone;
+    self.observedReorderDrag = dragState != UITableViewCellDragStateNone;
+    if (ended && self.reorderDragDidEnd) self.reorderDragDidEnd();
+}
+
+@end
 
 static NSArray<ApolloSwitcherAccountRow *> *ApolloSwitcherLoadAccountRows(void) {
     NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuite];
@@ -316,6 +360,7 @@ static NSArray<ApolloSwitcherAccountRow *> *ApolloSwitcherLoadAccountRows(void) 
 @interface ApolloAccountSwitcherViewController ()
 @property (nonatomic, weak, nullable) UIViewController *liveManager;
 @property (nonatomic, strong) NSArray<ApolloSwitcherAccountRow *> *rows;
+- (BOOL)driveLiveMoveRowFromIndexPath:(NSIndexPath *)fromPath toIndexPath:(NSIndexPath *)toPath;
 @end
 
 // Fetches a private ivar of object type by name (e.g. the real `tableView`
@@ -324,6 +369,257 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     if (!object) return nil;
     Ivar ivar = class_getInstanceVariable([object class], name);
     return ivar ? object_getIvar(object, ivar) : nil;
+}
+
+#pragma mark - Identity-preserving native account reorder
+
+// The overlay calls Apollo's native move handler. This result lets it commit
+// its cached row order only after the guarded live move succeeds.
+static const void *kApolloAccountReorderSucceededKey = &kApolloAccountReorderSucceededKey;
+
+typedef struct {
+    __unsafe_unretained id manager;
+    __unsafe_unretained id activeAccount;
+    Ivar accountsIvar;
+    Ivar currentIndexIvar;
+    Ivar backgroundTaskIvar;
+    NSUInteger accountCount;
+    NSInteger currentIndex;
+    NSInteger movedIndex;
+    uintptr_t originalOrder[64];
+} ApolloAccountReorderContext;
+
+static BOOL ApolloAccountReorderIvarFits(Class cls, Ivar ivar, size_t length) {
+    if (!cls || !ivar) return NO;
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    size_t instanceSize = class_getInstanceSize(cls);
+    return offset >= 0 && (size_t)offset <= instanceSize &&
+        length <= instanceSize - (size_t)offset;
+}
+
+static NSInteger ApolloAccountIndexAfterMove(NSInteger activeIndex,
+                                             NSInteger sourceIndex,
+                                             NSInteger destinationIndex) {
+    if (activeIndex == sourceIndex) return destinationIndex;
+    if (sourceIndex < activeIndex && activeIndex <= destinationIndex) return activeIndex - 1;
+    if (destinationIndex <= activeIndex && activeIndex < sourceIndex) return activeIndex + 1;
+    return activeIndex;
+}
+
+static void ApolloAccountReorderWriteIndex(const ApolloAccountReorderContext *context,
+                                           NSInteger index) {
+    uint8_t *bytes = (uint8_t *)(__bridge void *)context->manager;
+    ptrdiff_t offset = ivar_getOffset(context->currentIndexIvar);
+    uint8_t some = 0;
+    memcpy(bytes + offset, &index, sizeof(index));
+    memcpy(bytes + offset + sizeof(index), &some, sizeof(some));
+}
+
+static UIBackgroundTaskIdentifier ApolloAccountReorderReadTask(
+    const ApolloAccountReorderContext *context) {
+    UIBackgroundTaskIdentifier value = UIBackgroundTaskInvalid;
+    uint8_t *bytes = (uint8_t *)(__bridge void *)context->manager;
+    memcpy(&value, bytes + ivar_getOffset(context->backgroundTaskIvar), sizeof(value));
+    return value;
+}
+
+static void ApolloAccountReorderWriteTask(const ApolloAccountReorderContext *context,
+                                          UIBackgroundTaskIdentifier value) {
+    uint8_t *bytes = (uint8_t *)(__bridge void *)context->manager;
+    memcpy(bytes + ivar_getOffset(context->backgroundTaskIvar), &value, sizeof(value));
+}
+
+// Read the native Swift array without retaining or mutating its elements.
+static BOOL ApolloAccountReorderReadOrder(const ApolloAccountReorderContext *context,
+                                          uintptr_t order[64]) {
+    uint8_t *managerBytes = (uint8_t *)(__bridge void *)context->manager;
+    uintptr_t storageWord = 0;
+    memcpy(&storageWord, managerBytes + ivar_getOffset(context->accountsIvar),
+           sizeof(storageWord));
+    if ((storageWord & 0xF000000000000000ULL) != 0) return NO;
+    uint8_t *storage = (uint8_t *)(storageWord & ~(uintptr_t)0x7);
+    if (!storage) return NO;
+
+    uintptr_t count = 0;
+    memcpy(&count, storage + 2 * sizeof(uintptr_t), sizeof(count));
+    if (count != context->accountCount) return NO;
+    for (NSUInteger index = 0; index < context->accountCount; index++) {
+        memcpy(&order[index], storage + (4 + index) * sizeof(uintptr_t),
+               sizeof(order[index]));
+        if (!order[index]) return NO;
+    }
+    return YES;
+}
+
+static NSInteger ApolloAccountReorderIndexOf(const uintptr_t order[64],
+                                              NSUInteger count,
+                                              uintptr_t account) {
+    for (NSUInteger index = 0; index < count; index++) {
+        if (order[index] == account) return (NSInteger)index;
+    }
+    return -1;
+}
+
+static void ApolloAccountReorderApplyMove(uintptr_t order[64],
+                                          NSInteger source,
+                                          NSInteger destination) {
+    uintptr_t moved = order[source];
+    if (source < destination) {
+        memmove(&order[source], &order[source + 1],
+                (NSUInteger)(destination - source) * sizeof(uintptr_t));
+    } else {
+        memmove(&order[destination + 1], &order[destination],
+                (NSUInteger)(source - destination) * sizeof(uintptr_t));
+    }
+    order[destination] = moved;
+}
+
+static BOOL ApolloAccountReorderOrdersMatch(const ApolloAccountReorderContext *context,
+                                            const uintptr_t first[64],
+                                            const uintptr_t second[64]) {
+    return memcmp(first, second,
+                  context->accountCount * sizeof(uintptr_t)) == 0;
+}
+
+// Check every private Swift-layout assumption before %orig. Signed-out moves
+// are intentionally rejected because there is no live identity to prove.
+static BOOL ApolloAccountReorderPrepare(NSInteger source,
+                                        NSInteger destination,
+                                        ApolloAccountReorderContext *outContext) {
+    if (![NSThread isMainThread] || !outContext) return NO;
+
+    Class managerClass = objc_getClass("_TtC6Apollo14AccountManager");
+    SEL sharedSelector = NSSelectorFromString(@"shared");
+    id manager = managerClass && [managerClass respondsToSelector:sharedSelector]
+        ? ((id (*)(id, SEL))objc_msgSend)(managerClass, sharedSelector) : nil;
+    if (!manager || object_getClass(manager) != managerClass) return NO;
+
+    Ivar accountsIvar = class_getInstanceVariable(managerClass, "accounts");
+    Ivar currentIndexIvar = class_getInstanceVariable(managerClass, "currentAccountIndex");
+    Ivar backgroundTaskIvar = class_getInstanceVariable(managerClass, "backgroundTaskID");
+    if (!ApolloAccountReorderIvarFits(managerClass, accountsIvar, sizeof(uintptr_t)) ||
+        !ApolloAccountReorderIvarFits(managerClass, currentIndexIvar, sizeof(NSInteger) + 1) ||
+        !ApolloAccountReorderIvarFits(managerClass, backgroundTaskIvar,
+                                      sizeof(UIBackgroundTaskIdentifier)) ||
+        ivar_getOffset(currentIndexIvar) !=
+            ivar_getOffset(accountsIvar) + (ptrdiff_t)sizeof(uintptr_t)) {
+        return NO;
+    }
+
+    SEL countSelector = NSSelectorFromString(@"totalAccountsObjC");
+    SEL persistSelector = NSSelectorFromString(@"persistInformationToDisk");
+    NSMethodSignature *countSignature = [manager methodSignatureForSelector:countSelector];
+    NSMethodSignature *persistSignature = [manager methodSignatureForSelector:persistSelector];
+    if (!countSignature || countSignature.numberOfArguments != 2 ||
+        countSignature.methodReturnLength != sizeof(NSInteger) ||
+        !persistSignature || persistSignature.numberOfArguments != 2 ||
+        persistSignature.methodReturnLength != 0) {
+        return NO;
+    }
+
+    NSInteger reportedCount = 0;
+    @try {
+        reportedCount = ((NSInteger (*)(id, SEL))objc_msgSend)(manager, countSelector);
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+    if (reportedCount <= 0 || reportedCount > 64 || source < 0 || destination < 0 ||
+        source >= reportedCount || destination >= reportedCount) return NO;
+
+    uint8_t *bytes = (uint8_t *)(__bridge void *)manager;
+    ptrdiff_t indexOffset = ivar_getOffset(currentIndexIvar);
+    NSInteger currentIndex = 0;
+    uint8_t discriminator = 0xFF;
+    memcpy(&currentIndex, bytes + indexOffset, sizeof(currentIndex));
+    memcpy(&discriminator, bytes + indexOffset + sizeof(currentIndex), sizeof(discriminator));
+    id activeAccount = ApolloActiveAccountClient();
+    if (discriminator != 0 || currentIndex < 0 ||
+        currentIndex >= reportedCount || !activeAccount) return NO;
+
+    ApolloAccountReorderContext context = {0};
+    context.manager = manager;
+    context.activeAccount = activeAccount;
+    context.accountsIvar = accountsIvar;
+    context.currentIndexIvar = currentIndexIvar;
+    context.backgroundTaskIvar = backgroundTaskIvar;
+    context.accountCount = (NSUInteger)reportedCount;
+    context.currentIndex = currentIndex;
+    context.movedIndex = ApolloAccountIndexAfterMove(currentIndex, source, destination);
+    if (ApolloAccountReorderReadTask(&context) != UIBackgroundTaskInvalid ||
+        !ApolloAccountReorderReadOrder(&context, context.originalOrder) ||
+        context.originalOrder[currentIndex] !=
+            (uintptr_t)(__bridge void *)activeAccount) return NO;
+    for (NSUInteger index = 0; index < context.accountCount; index++) {
+        if (ApolloAccountReorderIndexOf(context.originalOrder, index,
+                                        context.originalOrder[index]) >= 0) return NO;
+    }
+    *outContext = context;
+    return YES;
+}
+
+typedef BOOL (^ApolloAccountReorderMoveBlock)(NSInteger source, NSInteger destination);
+
+// Reconstruct the exact original permutation through Apollo's native mover.
+// Each step is verified before another begins; the Swift array is never
+// written directly.
+static BOOL ApolloAccountReorderRestore(
+    const ApolloAccountReorderContext *context,
+    UIBackgroundTaskIdentifier guard,
+    ApolloAccountReorderMoveBlock move) {
+    uintptr_t liveOrder[64] = {0};
+    if (ApolloAccountReorderReadTask(context) != guard ||
+        !ApolloAccountReorderReadOrder(context, liveOrder)) return NO;
+    for (NSUInteger index = 0; index < context->accountCount; index++) {
+        if (ApolloAccountReorderIndexOf(liveOrder, context->accountCount,
+                                        context->originalOrder[index]) < 0) return NO;
+    }
+
+    for (NSUInteger target = 0; target < context->accountCount; target++) {
+        if (liveOrder[target] == context->originalOrder[target]) continue;
+        NSInteger source = ApolloAccountReorderIndexOf(
+            liveOrder, context->accountCount, context->originalOrder[target]);
+        NSInteger activeIndex = ApolloAccountReorderIndexOf(
+            liveOrder, context->accountCount,
+            (uintptr_t)(__bridge void *)context->activeAccount);
+        if (source < 0 || activeIndex < 0) return NO;
+        ApolloAccountReorderWriteIndex(context, activeIndex);
+
+        uintptr_t expectedOrder[64] = {0};
+        memcpy(expectedOrder, liveOrder,
+               context->accountCount * sizeof(uintptr_t));
+        ApolloAccountReorderApplyMove(expectedOrder, source, (NSInteger)target);
+        (void)move(source, (NSInteger)target);
+        if (ApolloAccountReorderReadTask(context) != guard ||
+            !ApolloAccountReorderReadOrder(context, liveOrder) ||
+            !ApolloAccountReorderOrdersMatch(context, liveOrder, expectedOrder)) return NO;
+    }
+
+    ApolloAccountReorderWriteIndex(context, context->currentIndex);
+    return ApolloAccountReorderReadTask(context) == guard &&
+        ApolloAccountReorderOrdersMatch(context, liveOrder, context->originalOrder) &&
+        ApolloActiveAccountClient() == context->activeAccount;
+}
+
+static BOOL ApolloAccountReorderReleaseGuard(
+    const ApolloAccountReorderContext *context,
+    UIBackgroundTaskIdentifier guard) {
+    if (ApolloAccountReorderReadTask(context) != guard) return NO;
+    ApolloAccountReorderWriteTask(context, UIBackgroundTaskInvalid);
+    return ApolloAccountReorderReadTask(context) == UIBackgroundTaskInvalid;
+}
+
+// Apollo's native method starts a background task and schedules its writer.
+// A normal return means that native eventual persistence was accepted.
+static BOOL ApolloAccountReorderSchedulePersist(
+    const ApolloAccountReorderContext *context) {
+    @try {
+        ((void (*)(id, SEL))objc_msgSend)(
+            context->manager, NSSelectorFromString(@"persistInformationToDisk"));
+        return YES;
+    } @catch (NSException *exception) {
+        ApolloLog(@"[AccountSwitcher] Account reorder persistence failed: %@", exception);
+        return NO;
+    }
 }
 
 @implementation ApolloAccountSwitcherViewController
@@ -351,6 +647,12 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     // style (for the key-status detail line), which registerClass's recycling
     // pool can't express — see the manual dequeue-or-alloc in cellForRowAtIndexPath:.
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"AddRow"];
+    // Keep account rows self-sizing for Dynamic Type, but force UIKit to resolve
+    // geometry exactly. iOS 26's estimate cache can otherwise overlap rows
+    // after reorder-driven autoscrolling.
+    self.tableView.estimatedRowHeight = 0.0;
+    self.tableView.estimatedSectionHeaderHeight = 0.0;
+    self.tableView.estimatedSectionFooterHeight = 0.0;
     [self reloadRows];
 }
 
@@ -392,9 +694,10 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
         return cell;
     }
 
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"AccountRow"];
+    ApolloSwitcherAccountCell *cell = [tableView dequeueReusableCellWithIdentifier:@"AccountRow"];
     if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"AccountRow"];
+        cell = [[ApolloSwitcherAccountCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                                reuseIdentifier:@"AccountRow"];
     }
     cell.textLabel.textColor = [UIColor labelColor];
     cell.accessoryType = UITableViewCellAccessoryNone;
@@ -405,6 +708,12 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     ApolloSwitcherApplyAvatarToCell(cell, row.username);
     cell.accessoryView = [self accessoryViewForRow:row];
+    __weak UITableView *weakTableView = tableView;
+    cell.reorderDragDidEnd = ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakTableView reloadData];
+        });
+    };
     return cell;
 }
 
@@ -482,20 +791,25 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     [self reloadRows];
 }
 
-// UIKit has already performed the visual move by the time this is called, so
-// we only need to keep our own data model in the same order — NOT reload the
-// table (that would fight the in-flight animation). Drives the live VC's real
-// move handler so AccountManager's on-disk order actually changes too;
-// reverts the local reorder if that call has no effect (no live manager).
+// UIKit has already performed the visual move by the time this is called. Drive
+// the guarded native move first; only commit our cached row order after the
+// native AccountManager confirms success. A failed runtime-layout preflight
+// reloads below on the next main turn, visually cancelling UIKit's move.
 - (void)tableView:(UITableView *)tableView moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath toIndexPath:(NSIndexPath *)destinationIndexPath {
     if (sourceIndexPath.section != 0 || destinationIndexPath.section != 0) return;
-    if (!self.liveManager) return;
+    if (sourceIndexPath.row < 0 || destinationIndexPath.row < 0 ||
+        sourceIndexPath.row >= (NSInteger)self.rows.count ||
+        destinationIndexPath.row >= (NSInteger)self.rows.count ||
+        ![self driveLiveMoveRowFromIndexPath:sourceIndexPath toIndexPath:destinationIndexPath]) {
+        // Keep the cached order unchanged. ApolloSwitcherAccountCell repairs
+        // UIKit's visual move only after dragStateDidChange: returns to None.
+        return;
+    }
     NSMutableArray<ApolloSwitcherAccountRow *> *rows = [self.rows mutableCopy];
     ApolloSwitcherAccountRow *moved = rows[sourceIndexPath.row];
     [rows removeObjectAtIndex:sourceIndexPath.row];
     [rows insertObject:moved atIndex:destinationIndexPath.row];
     self.rows = rows;
-    [self driveLiveMoveRowFromIndexPath:sourceIndexPath toIndexPath:destinationIndexPath];
 }
 
 #pragma mark - UITableViewDelegate
@@ -566,15 +880,16 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
 }
 
 // Verified selector: -tableView:moveRowAtIndexPath:toIndexPath: (the native
-// switcher's drag-to-reorder handler). Reuses the same NSInvocation pattern as
-// switch/delete above so AccountManager's own persisted account order is what
-// actually changes, rather than just our local row array.
-- (void)driveLiveMoveRowFromIndexPath:(NSIndexPath *)fromPath toIndexPath:(NSIndexPath *)toPath {
-    if (!self.liveManager) return;
+// switcher's drag-to-reorder handler). The hooked live method records YES only
+// after its Swift-layout preflight and identity-preserving move both complete.
+- (BOOL)driveLiveMoveRowFromIndexPath:(NSIndexPath *)fromPath toIndexPath:(NSIndexPath *)toPath {
+    if (!self.liveManager) return NO;
     SEL sel = NSSelectorFromString(@"tableView:moveRowAtIndexPath:toIndexPath:");
-    if (![self.liveManager respondsToSelector:sel]) return;
+    if (![self.liveManager respondsToSelector:sel]) return NO;
     NSMethodSignature *sig = [self.liveManager methodSignatureForSelector:sel];
-    if (!sig) return;
+    if (!sig || sig.numberOfArguments != 5 || sig.methodReturnLength != 0) return NO;
+    objc_setAssociatedObject(self.liveManager, kApolloAccountReorderSucceededKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
     inv.selector = sel;
     id tv = ApolloGetObjectIvar(self.liveManager, "tableView");
@@ -585,7 +900,9 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
         [inv invokeWithTarget:self.liveManager];
     } @catch (NSException *ex) {
         ApolloLog(@"[AccountSwitcher] Live move call failed: %@", ex);
+        return NO;
     }
+    return [objc_getAssociatedObject(self.liveManager, kApolloAccountReorderSucceededKey) boolValue];
 }
 
 // Starts Apollo's own OAuth add-account flow via the live instance's real "+"
@@ -729,11 +1046,167 @@ static void ApolloInstallAccountSwitcherOverlay(UIViewController *host) {
     }
 }
 
+// The overlay's custom cell repairs failed drops at drag-end. If the custom
+// switcher is disabled and Apollo's native table is visible, reload it on the
+// next turn to cancel UIKit's already-animated visual move.
+static void ApolloCancelVisibleNativeAccountReorder(UITableView *tableView) {
+    if (![tableView isKindOfClass:[UITableView class]] || tableView.hidden) return;
+    __weak UITableView *weakTableView = tableView;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UITableView *table = weakTableView;
+        if (!table.hidden) [table reloadData];
+    });
+}
+
+static BOOL sApolloAccountReorderQuarantined = NO;
+
+static void ApolloQuarantineAccountSwitcher(UIViewController *controller) {
+    sApolloAccountReorderQuarantined = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [controller dismissViewControllerAnimated:NO completion:nil];
+    });
+}
+
 %hook _TtC6Apollo28AccountManagerViewController
 
 - (void)viewDidLoad {
     %orig;
+    if (sApolloAccountReorderQuarantined) {
+        ApolloQuarantineAccountSwitcher((UIViewController *)self);
+        return;
+    }
     ApolloInstallAccountSwitcherOverlay((UIViewController *)self);
+}
+
+- (void)tableView:(UITableView *)tableView
+ moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath
+       toIndexPath:(NSIndexPath *)destinationIndexPath {
+    objc_setAssociatedObject(self, kApolloAccountReorderSucceededKey, @NO,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    if (![sourceIndexPath isKindOfClass:[NSIndexPath class]] ||
+        ![destinationIndexPath isKindOfClass:[NSIndexPath class]] ||
+        sourceIndexPath.section != 0 || destinationIndexPath.section != 0) {
+        ApolloLog(@"[AccountSwitcher] Cancelling account reorder: invalid index path");
+        ApolloCancelVisibleNativeAccountReorder(tableView);
+        return;
+    }
+
+    NSInteger source = sourceIndexPath.row;
+    NSInteger destination = destinationIndexPath.row;
+    if (source == destination) {
+        objc_setAssociatedObject(self, kApolloAccountReorderSucceededKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+
+    ApolloAccountReorderContext context = {0};
+    if (!ApolloAccountReorderPrepare(source, destination, &context)) {
+        ApolloLog(@"[AccountSwitcher] Cancelling account reorder: runtime layout check failed");
+        ApolloCancelVisibleNativeAccountReorder(tableView);
+        return;
+    }
+
+    // Suppress the native handler's immediate stale write, move its index with
+    // the retained account, then persist the corrected order/index pair once.
+    id activeAccount = context.activeAccount; // retain across the Swift array mutation
+    uintptr_t activePointer = (uintptr_t)(__bridge void *)activeAccount;
+    uintptr_t expectedOrder[64] = {0};
+    memcpy(expectedOrder, context.originalOrder,
+           context.accountCount * sizeof(uintptr_t));
+    ApolloAccountReorderApplyMove(expectedOrder, source, destination);
+
+    ApolloAccountReorderMoveBlock nativeMove = ^BOOL(NSInteger from, NSInteger to) {
+        NSIndexPath *fromPath = [NSIndexPath indexPathForRow:from inSection:0];
+        NSIndexPath *toPath = [NSIndexPath indexPathForRow:to inSection:0];
+        @try {
+            %orig(tableView, fromPath, toPath);
+            return YES;
+        } @catch (NSException *exception) {
+            ApolloLog(@"[AccountSwitcher] Native reorder %ld -> %ld failed: %@",
+                      (long)from, (long)to, exception);
+            return NO;
+        }
+    };
+
+    UIBackgroundTaskIdentifier guard = UIBackgroundTaskInvalid == 0
+        ? (UIBackgroundTaskIdentifier)NSUIntegerMax : 0;
+    ApolloAccountReorderWriteTask(&context, guard);
+    if (ApolloAccountReorderReadTask(&context) != guard) {
+        ApolloLog(@"[AccountSwitcher] Cancelling account reorder: persistence guard failed");
+        ApolloCancelVisibleNativeAccountReorder(tableView);
+        return;
+    }
+
+    BOOL nativeReturned = nativeMove(source, destination);
+    uintptr_t observedOrder[64] = {0};
+    BOOL readOrder = ApolloAccountReorderReadOrder(&context, observedOrder);
+    NSInteger activeIndex = readOrder
+        ? ApolloAccountReorderIndexOf(observedOrder, context.accountCount, activePointer)
+        : -1;
+    if (activeIndex >= 0) ApolloAccountReorderWriteIndex(&context, activeIndex);
+    BOOL movedSafely = nativeReturned &&
+        ApolloAccountReorderReadTask(&context) == guard &&
+        readOrder &&
+        ApolloAccountReorderOrdersMatch(&context, observedOrder, expectedOrder) &&
+        activeIndex == context.movedIndex &&
+        expectedOrder[context.movedIndex] == activePointer &&
+        ApolloActiveAccountClient() == activeAccount;
+    if (!movedSafely) {
+        BOOL restored = ApolloAccountReorderRestore(&context, guard, nativeMove);
+        BOOL released = restored &&
+            ApolloAccountReorderReleaseGuard(&context, guard);
+        ApolloLog(@"[AccountSwitcher] Cancelled reorder postcondition (restored=%d, released=%d)",
+                  restored, released);
+        ApolloCancelVisibleNativeAccountReorder(tableView);
+        if (!restored || !released) {
+            ApolloQuarantineAccountSwitcher((UIViewController *)self);
+        }
+        return;
+    }
+
+    if (!ApolloAccountReorderReleaseGuard(&context, guard)) {
+        BOOL restored = ApolloAccountReorderRestore(&context, guard, nativeMove);
+        BOOL released = restored &&
+            ApolloAccountReorderReleaseGuard(&context, guard);
+        ApolloLog(@"[AccountSwitcher] Cancelled reorder: guard release failed (restored=%d)",
+                  restored);
+        ApolloCancelVisibleNativeAccountReorder(tableView);
+        if (!restored || !released) {
+            ApolloQuarantineAccountSwitcher((UIViewController *)self);
+        }
+        return;
+    }
+
+    if (!ApolloAccountReorderSchedulePersist(&context)) {
+        // If persistence failed before starting work, restore and persist the
+        // original pair. Never race a real background task if one was started.
+        BOOL restored = NO;
+        BOOL released = NO;
+        BOOL originalPersisted = NO;
+        if (ApolloAccountReorderReadTask(&context) == UIBackgroundTaskInvalid) {
+            ApolloAccountReorderWriteTask(&context, guard);
+            if (ApolloAccountReorderReadTask(&context) == guard) {
+                restored = ApolloAccountReorderRestore(&context, guard, nativeMove);
+                released = restored &&
+                    ApolloAccountReorderReleaseGuard(&context, guard);
+                originalPersisted = restored && released &&
+                    ApolloAccountReorderSchedulePersist(&context);
+            }
+        }
+        ApolloLog(@"[AccountSwitcher] Cancelled unpersisted reorder (restored=%d)",
+                  restored);
+        ApolloCancelVisibleNativeAccountReorder(tableView);
+        if (!originalPersisted) {
+            ApolloQuarantineAccountSwitcher((UIViewController *)self);
+        }
+        return;
+    }
+    objc_setAssociatedObject(self, kApolloAccountReorderSucceededKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloLogDebug(@"[AccountSwitcher] Reordered row %ld -> %ld; active index %ld -> %ld",
+                   (long)source, (long)destination,
+                   (long)context.currentIndex, (long)context.movedIndex);
 }
 
 %end
