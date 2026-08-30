@@ -124,7 +124,6 @@ static NSArray<NSArray *> *ApolloSettingsSearchNativeRows(void) {
             @[@"Clearly Combustion", @"App Icon", @"App Icon", @NO],
             @[@"Dino Spoon", @"App Icon", @"App Icon", @NO],
             @[@"Community Icon Pack", @"App Icon", @"App Icon", @YES],
-            @[@"SPCA Animals 🐱🐶", @"App Icon", @"App Icon", @NO],
             @[@"Hyper Suit 4000", @"App Icon → Ultra Icons", @"App Icon", @NO],
             @[@"The Adventurer", @"App Icon → Ultra Icons", @"App Icon", @NO],
             @[@"Ye Snow Guardian", @"App Icon → Ultra Icons", @"App Icon", @NO],

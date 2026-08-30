@@ -3664,7 +3664,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyFeedTextPostThumbnails: @YES,
                                     UDKeyFeedGalleryCarousel: @YES,
-                                    UDKeyFeedGalleryEdgeSwipeNav: @YES,
+                                    UDKeyFeedGalleryEdgeSwipeNav: @NO,
+                                    UDKeyForwardSwipeForgetAfterScrolling: @NO,
                                     UDKeySwipeUpForComments: @YES,
                                     UDKeySportsClipsInlineVideo: @YES,
                                     UDKeyDevvitInteractivePosts: @NO,
@@ -3795,6 +3796,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sFeedTextPostThumbnails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails];
     sFeedGalleryCarousel = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedGalleryCarousel];
     sFeedGalleryEdgeSwipeNav = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedGalleryEdgeSwipeNav];
+    sForwardSwipeForgetAfterScrolling = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyForwardSwipeForgetAfterScrolling];
     sSwipeUpForComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySwipeUpForComments];
     sDevvitInteractivePosts = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts];
     sDevvitFeedWidgets = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets];

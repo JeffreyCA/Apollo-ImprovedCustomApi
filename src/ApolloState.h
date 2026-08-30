@@ -26,6 +26,9 @@ extern BOOL sFeedGalleryCarousel;
 // Default-on: at the carousel's first/last image, swiping past the edge hands
 // the drag to Apollo's swipe-back/forward navigation instead of rubber-banding.
 extern BOOL sFeedGalleryEdgeSwipeNav;
+// Default-on: scrolling the feed a few posts past where you swiped back drops
+// Apollo's forward-swipe memory (ApolloForwardSwipeExpiry.xm).
+extern BOOL sForwardSwipeForgetAfterScrolling;
 // Default-on fullscreen-media comments pane, opened by upward flick or button.
 extern BOOL sSwipeUpForComments;
 // Opt-in (default OFF) live interactive Devvit posts (embedded web widget).

@@ -165,6 +165,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAppleTranslateSheet.xm \
     $(SRC_DIR)/ApolloVideoUnmute.xm \
     $(SRC_DIR)/ApolloFeedVideoScrubber.xm \
+    $(SRC_DIR)/ApolloForwardSwipeExpiry.xm \
     $(SRC_DIR)/ApolloVideoSwipeFix.xm \
     $(SRC_DIR)/ApolloVideoPlaybackSpeed.xm \
     $(SRC_DIR)/ApolloVideoHoldSpeed.xm \
