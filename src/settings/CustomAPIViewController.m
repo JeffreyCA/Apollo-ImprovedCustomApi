@@ -84,6 +84,7 @@ static char kAboutSubredditIconTaskKey;
 @property (nonatomic) ApolloSubredditFeedLayout layout;
 @property (nonatomic) BOOL hideDescriptions;
 @property (nonatomic) CGFloat previewHeight;
+@property (nonatomic) BOOL usesCompactFourUp;
 @property (nonatomic, strong) UITraitCollection *traitCollection;
 @end
 
@@ -91,7 +92,8 @@ static char kAboutSubredditIconTaskKey;
 @end
 
 static ApolloFeedShortcutsPreviewState *ApolloFeedShortcutsCurrentPreviewState(
-    UITraitCollection *traitCollection) {
+    UITraitCollection *traitCollection,
+    CGFloat availableWidth) {
     ApolloFeedShortcutsPreviewState *state = [ApolloFeedShortcutsPreviewState new];
     state.visibleIndexes = ApolloFeedShortcutVisibleIndexes();
     state.iconStyle = (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle;
@@ -99,6 +101,11 @@ static ApolloFeedShortcutsPreviewState *ApolloFeedShortcutsCurrentPreviewState(
     state.layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
                                                        state.visibleIndexes.count,
                                                        traitCollection);
+    BOOL supportsCompactFourUp = state.layout == ApolloSubredditFeedLayoutSideBySide ||
+        state.layout == ApolloSubredditFeedLayoutGrid;
+    state.usesCompactFourUp = supportsCompactFourUp &&
+        state.visibleIndexes.count == 4 &&
+        availableWidth <= 336.0;
     state.hideDescriptions = sHideSubredditListDescriptions;
     if (state.layout == ApolloSubredditFeedLayoutRows) {
         NSUInteger count = state.visibleIndexes.count;
@@ -111,14 +118,25 @@ static ApolloFeedShortcutsPreviewState *ApolloFeedShortcutsCurrentPreviewState(
     return state;
 }
 
+static UIFont *ApolloFeedShortcutsPreviewTitleFont(ApolloFeedShortcutsPreviewState *state) {
+    if (!state.usesCompactFourUp) {
+        return [UIFont preferredFontForTextStyle:UIFontTextStyleBody
+                          compatibleWithTraitCollection:state.traitCollection];
+    }
+    CGFloat pointSize = state.layout == ApolloSubredditFeedLayoutGrid ? 15.0 : 16.0;
+    UIFont *baseFont = [UIFont systemFontOfSize:pointSize];
+    return [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody]
+        scaledFontForFont:baseFont
+        compatibleWithTraitCollection:state.traitCollection];
+}
+
 static CGFloat ApolloFeedShortcutsPreviewSideBySideCenterOffset(ApolloFeedShortcutsPreviewState *state) {
     NSUInteger itemCount = state.visibleIndexes.count;
     if (state.layout != ApolloSubredditFeedLayoutSideBySide || itemCount < 3) return 0.0;
 
     NSInteger firstIndex = state.visibleIndexes.firstObject.integerValue;
     NSInteger lastIndex = state.visibleIndexes.lastObject.integerValue;
-    UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody
-                              compatibleWithTraitCollection:state.traitCollection];
+    UIFont *font = ApolloFeedShortcutsPreviewTitleFont(state);
     CGFloat firstTitleWidth = ceil([ApolloFeedShortcutShortTitle(firstIndex)
         sizeWithAttributes:@{ NSFontAttributeName: font }].width);
     CGFloat lastTitleWidth = ceil([ApolloFeedShortcutShortTitle(lastIndex)
@@ -210,7 +228,11 @@ static CGFloat ApolloFeedShortcutsPreviewSideBySideCenterOffset(ApolloFeedShortc
     BOOL iconDock = layout == ApolloSubredditFeedLayoutIconDock;
     ApolloFeedShortcutItemGeometry geometry =
         ApolloFeedShortcutItemGeometryForLayout(layout, itemCount, index);
+    BOOL compactSideBySide = self.previewState.usesCompactFourUp && sideBySide;
+    BOOL compactGrid = self.previewState.usesCompactFourUp &&
+        layout == ApolloSubredditFeedLayoutGrid;
     CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(self.previewState.iconStyle, layout, itemCount);
+    if (compactSideBySide) iconSize = MIN(iconSize, 28.0);
     [NSLayoutConstraint activateConstraints:@[
         [iconView.widthAnchor constraintEqualToConstant:iconSize],
         [iconView.heightAnchor constraintEqualToConstant:iconSize]
@@ -219,7 +241,7 @@ static CGFloat ApolloFeedShortcutsPreviewSideBySideCenterOffset(ApolloFeedShortc
     if (!iconDock) {
         label = [UILabel new];
         label.text = ApolloFeedShortcutShortTitle(index);
-        label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        label.font = ApolloFeedShortcutsPreviewTitleFont(self.previewState);
         label.textColor = UIColor.labelColor;
         label.adjustsFontForContentSizeCategory = YES;
         label.adjustsFontSizeToFitWidth = YES;
@@ -237,20 +259,21 @@ static CGFloat ApolloFeedShortcutsPreviewSideBySideCenterOffset(ApolloFeedShortc
         ? UILayoutConstraintAxisHorizontal
         : UILayoutConstraintAxisVertical;
     content.alignment = UIStackViewAlignmentCenter;
-    content.spacing = ApolloFeedShortcutContentSpacing(layout, itemCount);
+    content.spacing = compactSideBySide ? 2.5 : ApolloFeedShortcutContentSpacing(layout, itemCount);
 
     UIView *item = [UIView new];
     [item addSubview:content];
     NSLayoutConstraint *centerConstraint = [content.centerXAnchor constraintEqualToAnchor:item.centerXAnchor];
-    centerConstraint.constant = geometry.centerXOffset;
+    centerConstraint.constant = geometry.centerXOffset + (compactGrid && index == 3 ? 2.0 : 0.0);
     [NSLayoutConstraint activateConstraints:@[
         centerConstraint,
         [content.centerYAnchor constraintEqualToAnchor:item.centerYAnchor]
     ]];
     if (!geometry.usesFlexibleSideBySideLayout) {
+        CGFloat horizontalMargin = compactGrid ? 0.0 : geometry.horizontalMargin;
         [NSLayoutConstraint activateConstraints:@[
-            [content.leadingAnchor constraintGreaterThanOrEqualToAnchor:item.leadingAnchor constant:geometry.horizontalMargin],
-            [content.trailingAnchor constraintLessThanOrEqualToAnchor:item.trailingAnchor constant:-geometry.horizontalMargin]
+            [content.leadingAnchor constraintGreaterThanOrEqualToAnchor:item.leadingAnchor constant:horizontalMargin],
+            [content.trailingAnchor constraintLessThanOrEqualToAnchor:item.trailingAnchor constant:-horizontalMargin]
         ]];
     }
     if (contentView) *contentView = content;
@@ -4503,6 +4526,15 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [self apollo_refreshPreviewAnimated:NO];
 }
 
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    __weak typeof(self) weakSelf = self;
+    [coordinator animateAlongsideTransition:nil completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+        [weakSelf apollo_refreshPreviewAnimated:NO];
+    }];
+}
+
 - (void)apollo_applyPreviewTheme {
     UIColor *backgroundColor = ApolloThemePageBackgroundColor()
         ?: UIColor.systemGroupedBackgroundColor;
@@ -4580,8 +4612,14 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     }
     [self apollo_finishPreviewTransition];
 
+    CGFloat availableWidth = CGRectGetWidth(self.previewCardView.bounds);
+    if (availableWidth <= 0.0) {
+        CGFloat containerWidth = CGRectGetWidth(self.view.bounds);
+        if (containerWidth <= 0.0) containerWidth = CGRectGetWidth(UIScreen.mainScreen.bounds);
+        availableWidth = MAX(0.0, containerWidth - 40.0);
+    }
     ApolloFeedShortcutsPreviewState *state =
-        ApolloFeedShortcutsCurrentPreviewState(self.traitCollection);
+        ApolloFeedShortcutsCurrentPreviewState(self.traitCollection, availableWidth);
     ApolloFeedShortcutsPreviewView *incoming = [self apollo_previewViewForState:state];
     ApolloFeedShortcutsPreviewView *outgoing = self.currentPreviewView;
     if (!animated || UIAccessibilityIsReduceMotionEnabled() || !outgoing) {
