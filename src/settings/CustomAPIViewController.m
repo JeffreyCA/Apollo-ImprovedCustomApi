@@ -17,6 +17,7 @@
 #import "settings/ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
+#import "ApolloPerAccountFavorites.h"
 #import "ApolloState.h"
 #import "ApolloTagFilters.h"
 #import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
@@ -2509,6 +2510,19 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     return [parts componentsJoinedByString:@" · "];
 }
 
+- (ApolloSettingsSection *)buildSubredditsFavoritesSection {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *perAccountFavorites =
+        [ApolloSettingsRow switchRowWithID:@"sub.perAccountFavorites"
+                                     title:@"Per-Account Favorites"
+                                      isOn:^BOOL { return sPerAccountFavoritesEnabled; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf perAccountFavoritesSwitchToggled:sender]; }];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Favorites"
+                                            footer:@"Keeps an independent Favorites list for each account. First enable copies the current list to existing accounts; new accounts start empty. Turning it off restores Apollo's shared list."
+                                              rows:@[ perAccountFavorites ]];
+}
+
 - (NSString *)subredditLayoutSummaryText {
     if (!sShowSubredditHeaders) return @"Native (Apollo)";
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
@@ -3963,6 +3977,24 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 // Subreddit Sections screen now (ApolloSubredditSectionsViewController),
 // beside the live preview that shows what they change.
 
+- (void)perAccountFavoritesSwitchToggled:(UISwitch *)sender {
+    ApolloPerAccountFavoritesSetResult result =
+        ApolloPerAccountFavoritesSetEnabled(sender.isOn);
+    if (result == ApolloPerAccountFavoritesSetResultApplied) return;
+
+    [sender setOn:sPerAccountFavoritesEnabled animated:YES];
+    if (result == ApolloPerAccountFavoritesSetResultUnsupportedStore) {
+        [self showAlertWithTitle:@"Newer Favorites Data Found"
+                         message:@"Per-Account Favorites stayed off because this data was created by a newer version of Apollo Reborn. Your favorites were not changed. Update Apollo Reborn before enabling it here."];
+    } else if (result == ApolloPerAccountFavoritesSetResultInvalidStore) {
+        [self showAlertWithTitle:@"Favorites Data Couldn’t Be Read"
+                         message:@"Per-Account Favorites stayed off and your current favorites were not changed. Restore a known-good settings backup before trying again."];
+    } else {
+        [self showAlertWithTitle:@"Account Still Loading"
+                         message:@"Apollo could not safely identify the active account yet, so Per-Account Favorites stayed off. Wait a moment, then try again."];
+    }
+}
+
 - (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
     sHideSubredditListDescriptions = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
@@ -4369,6 +4401,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSString *)apollo_screenTitle { return @"Subreddits"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildSubredditsMainSection],
+              [self buildSubredditsFavoritesSection],
               [self buildSubredditsSourcesSection] ];
 }
 - (void)viewWillAppear:(BOOL)animated {

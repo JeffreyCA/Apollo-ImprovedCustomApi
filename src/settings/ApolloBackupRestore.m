@@ -1,6 +1,7 @@
 #import "settings/ApolloBackupRestore.h"
 
 #import "ApolloCommon.h"
+#import "ApolloPerAccountFavorites.h"
 #import "ApolloState.h"
 #import "ApolloTranslation.h"
 #import "UserDefaultConstants.h"
@@ -203,15 +204,40 @@ NSURL *ApolloBackupRestoreCreateBackupZip(NSError **error) {
         return nil;
     }
 
-    // The on-disk plist may be stale (cfprefsd manages persistence timing),
-    // so patch in the current in-memory ReadPostIDs directly.
-    NSArray *currentReadPostIDs = [[NSUserDefaults standardUserDefaults] arrayForKey:@"ReadPostIDs"];
+    // The on-disk plist may be stale (cfprefsd manages persistence timing), so
+    // patch state whose most recent value must be captured atomically. This is
+    // especially important for the per-account bucket envelope: a favorite can
+    // be changed and backed up before cfprefsd flushes the new scope.
+    NSUserDefaults *liveDefaults = [NSUserDefaults standardUserDefaults];
+    NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:mainDestPath];
+    if (!plist) {
+        [fileManager removeItemAtPath:backupDir error:nil];
+        if (error) *error = ApolloBackupRestoreError(@"Could not read the copied preferences file.");
+        return nil;
+    }
+    NSArray *currentReadPostIDs = [liveDefaults arrayForKey:@"ReadPostIDs"];
     if (currentReadPostIDs.count > 0) {
-        NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:mainDestPath];
-        if (plist) {
-            plist[@"ReadPostIDs"] = currentReadPostIDs;
-            [plist writeToFile:mainDestPath atomically:YES];
+        plist[@"ReadPostIDs"] = currentReadPostIDs;
+    }
+    NSDictionary<NSString *, id> *favoritesState =
+        ApolloPerAccountFavoritesCopyBackupPreferenceValues();
+    if (!favoritesState) {
+        [fileManager removeItemAtPath:backupDir error:nil];
+        if (error) {
+            *error = ApolloBackupRestoreError(
+                @"Could not capture favorites while the active account is changing. Please try again.");
         }
+        return nil;
+    }
+    for (NSString *key in favoritesState) {
+        id currentValue = favoritesState[key];
+        if (currentValue && currentValue != [NSNull null]) plist[key] = currentValue;
+        else [plist removeObjectForKey:key];
+    }
+    if (![plist writeToFile:mainDestPath atomically:YES]) {
+        [fileManager removeItemAtPath:backupDir error:nil];
+        if (error) *error = ApolloBackupRestoreError(@"Could not capture the latest preferences for backup.");
+        return nil;
     }
 
     if ([fileManager fileExistsAtPath:groupPlistPath]) {
@@ -289,6 +315,13 @@ BOOL ApolloBackupRestoreRestoreFromZipURL(NSURL *zipURL, NSString **outErrorTitl
         if (outErrorMessage) *outErrorMessage = @"The preferences file in the backup is corrupted or invalid.";
         return NO;
     }
+
+    // Restore is intentionally a one-way transaction: the success UI force-exits
+    // and launch reloads every setting. Suspend live favorites callbacks before
+    // unordered key replay so FavoriteSubreddits cannot be snapshotted into the
+    // old session's materialized account while its restored envelope/account
+    // state is only partially installed.
+    ApolloPerAccountFavoritesSuspendForPreferencesRestore();
 
     // Restore main preferences, skipping analytics/tracking keys
     NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];

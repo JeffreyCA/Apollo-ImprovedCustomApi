@@ -272,6 +272,9 @@ typedef NS_ENUM(NSInteger, ApolloSubredditFeedLayout) {
 extern NSInteger sSubredditFeedIconStyle;
 extern NSInteger sSubredditFeedLayout;
 
+// Opt-in per-account FavoriteSubreddits projection. Defaults OFF; see
+// ApolloPerAccountFavorites.{h,m}.
+extern BOOL sPerAccountFavoritesEnabled;
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;
