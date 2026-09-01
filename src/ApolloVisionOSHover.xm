@@ -572,7 +572,13 @@ static BOOL ApolloSearchIsActive(UIView *bar) {
 
 @end
 
+// Keyed weakly by the bar, so a deallocated toolbar drops out of the map on its
+// own — which is why the strong list beside it exists. `upperToolbar` is a `let`
+// on ASTableViewController, so every feed push builds a new toolbar and popping
+// the feed deallocates it; without a handle that outlives the key, the ghost is
+// never touched again and stays in the window as a stale subview.
 static NSMapTable<UIView *, ApolloSearchGhost *> *gApolloSearchGhosts = nil;
+static NSMutableArray<ApolloSearchGhost *> *gApolloSearchGhostList = nil;
 
 // Is a real touch at the bar's centre delivered to the bar? Our own ghost is
 // hidden across the probe so it can never be the answer.
@@ -610,6 +616,7 @@ static void ApolloEnrollSearchBar(UIView *bar) {
 static ApolloSearchGhost *ApolloSearchGhostFor(UIView *bar) {
     if (!gApolloSearchGhosts) {
         gApolloSearchGhosts = [NSMapTable weakToStrongObjectsMapTable];
+        gApolloSearchGhostList = [NSMutableArray array];
     }
     ApolloSearchGhost *ghost = [gApolloSearchGhosts objectForKey:bar];
     if (ghost) return ghost;
@@ -626,6 +633,7 @@ static ApolloSearchGhost *ApolloSearchGhostFor(UIView *bar) {
     tap.cancelsTouchesInView = NO;
     [ghost addGestureRecognizer:tap];
     [gApolloSearchGhosts setObject:ghost forKey:bar];
+    [gApolloSearchGhostList addObject:ghost];
     return ghost;
 }
 
@@ -675,16 +683,31 @@ static void ApolloRefreshSearchBars(void) {
 }
 
 // Per frame, from the ghost driver: the same job as ApolloGhostLayoutPass, but
-// one dedicated ghost per bar rather than a pool.
+// one dedicated ghost per bar rather than a pool. Iterating the strong list
+// rather than the map's keys is what lets a ghost outlive its bar just long
+// enough to be taken out of the window: a bar that goes away or leaves its
+// window has its ghost removed from the view hierarchy and dropped from both
+// collections, and a bar that comes back is given a fresh one by the next sweep
+// (which it has to wait for regardless, since gApolloSearchBars is rebuilt
+// there and an unlisted bar keeps its ghost hidden anyway).
 static void ApolloLayoutSearchGhosts(BOOL hideAll) {
-    if (!gApolloSearchGhosts) return;
-    NSMutableArray<UIView *> *bars = [NSMutableArray array];
-    for (UIView *bar in gApolloSearchGhosts.keyEnumerator) [bars addObject:bar];
-    for (UIView *bar in bars) {
-        ApolloSearchGhost *ghost = [gApolloSearchGhosts objectForKey:bar];
+    if (!gApolloSearchGhostList) return;
+    for (ApolloSearchGhost *ghost in [gApolloSearchGhostList copy]) {
+        UIView *bar = ghost.bar;
         UIWindow *window = bar.window;
-        UIView *presentedView = window ? ApolloWindowPresentedView(window) : nil;
-        if (hideAll || !window || !ApolloViewVisibleInWindow(bar) ||
+        if (!bar || !window) {
+            // Clearing `interactive` before the removal is belt-and-braces: off
+            // the hierarchy its -hitTest: is unreachable anyway, but a stale
+            // interactive ghost is exactly what turned this leak into a dead
+            // pinch band, and nothing should be able to resurrect that.
+            ghost.interactive = NO;
+            [ghost removeFromSuperview];
+            [gApolloSearchGhostList removeObjectIdenticalTo:ghost];
+            if (bar) [gApolloSearchGhosts removeObjectForKey:bar];
+            continue;
+        }
+        UIView *presentedView = ApolloWindowPresentedView(window);
+        if (hideAll || !ApolloViewVisibleInWindow(bar) ||
             ![gApolloSearchBars containsObject:bar] ||
             (presentedView && !ApolloViewIsWithin(bar, presentedView))) {
             ghost.hidden = YES;
