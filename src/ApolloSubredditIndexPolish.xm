@@ -93,6 +93,23 @@ static BOOL ApolloMetaFeedLayoutUsesShortcuts(ApolloSubredditFeedLayout layout) 
            layout == ApolloSubredditFeedLayoutIconDock;
 }
 
+static BOOL ApolloMetaFeedUsesCompactFourUp(ApolloSubredditFeedLayout layout,
+                                             NSUInteger itemCount,
+                                             CGFloat availableWidth) {
+    BOOL supportsCompactFourUp = layout == ApolloSubredditFeedLayoutGrid ||
+        layout == ApolloSubredditFeedLayoutSideBySide;
+    return supportsCompactFourUp && itemCount == 4 && availableWidth <= 376.0;
+}
+
+static UIFont *ApolloMetaFeedCompactFourUpTitleFont(ApolloSubredditFeedLayout layout,
+                                                     UITraitCollection *traitCollection) {
+    CGFloat pointSize = layout == ApolloSubredditFeedLayoutGrid ? 15.0 : 16.0;
+    UIFont *baseFont = [UIFont systemFontOfSize:pointSize];
+    return [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody]
+        scaledFontForFont:baseFont
+        compatibleWithTraitCollection:traitCollection];
+}
+
 static __unsafe_unretained UITableView *sApolloFavoriteMutationTable = nil;
 static NSUInteger sApolloFavoriteMutationDepth = 0;
 static NSInteger sApolloFavoriteMutationDeleteRow = NSNotFound;
@@ -114,7 +131,9 @@ static NSInteger sApolloFavoriteMutationOriginalLastRow = NSNotFound;
 @property (nonatomic) NSInteger feedIndex;
 - (instancetype)initWithFeedIndex:(NSInteger)feedIndex
                             layout:(ApolloSubredditFeedLayout)layout
-                         itemCount:(NSUInteger)itemCount;
+                         itemCount:(NSUInteger)itemCount
+                 usesCompactFourUp:(BOOL)usesCompactFourUp
+                   traitCollection:(UITraitCollection *)traitCollection;
 - (void)apollo_applyColorsWithTextColor:(UIColor *)textColor;
 - (void)apollo_useOriginalImage:(UIImage *)image;
 @end
@@ -123,6 +142,8 @@ static NSInteger sApolloFavoriteMutationOriginalLastRow = NSNotFound;
 @property (nonatomic, weak) UITableView *tableView;
 @property (nonatomic, strong) NSArray<ApolloMetaFeedShortcutControl *> *shortcuts;
 @property (nonatomic, strong) NSArray<UIView *> *separators;
+@property (nonatomic) ApolloSubredditFeedLayout layout;
+@property (nonatomic) BOOL usesCompactFourUp;
 @property (nonatomic) BOOL themeRefreshScheduled;
 - (instancetype)initWithTableView:(UITableView *)tableView
                 visibleFeedIndexes:(NSArray<NSNumber *> *)visibleFeedIndexes;
@@ -208,12 +229,16 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
 
 - (instancetype)initWithFeedIndex:(NSInteger)feedIndex
                             layout:(ApolloSubredditFeedLayout)layout
-                         itemCount:(NSUInteger)itemCount {
+                         itemCount:(NSUInteger)itemCount
+                 usesCompactFourUp:(BOOL)usesCompactFourUp
+                   traitCollection:(UITraitCollection *)traitCollection {
     self = [super initWithFrame:CGRectZero];
     if (!self) return nil;
 
     NSString *title = ApolloFeedShortcutShortTitle(feedIndex);
     BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
+    BOOL compactSideBySide = usesCompactFourUp && sideBySide;
+    BOOL compactGrid = usesCompactFourUp && layout == ApolloSubredditFeedLayoutGrid;
     BOOL iconDock = layout == ApolloSubredditFeedLayoutIconDock;
     _feedIndex = feedIndex;
     _feedIconStyle = sSubredditFeedIconStyle;
@@ -239,6 +264,7 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
     CGFloat iconSize = ApolloFeedShortcutDisplayIconSize((ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle,
                                                          layout,
                                                          itemCount);
+    if (compactSideBySide) iconSize = MIN(iconSize, 28.0);
     [_iconBadgeView addSubview:_iconView];
     [NSLayoutConstraint activateConstraints:@[
         [_iconBadgeView.widthAnchor constraintEqualToConstant:iconSize],
@@ -253,7 +279,10 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
         _titleLabel = [UILabel new];
         _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
         _titleLabel.text = title;
-        _titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        _titleLabel.font = usesCompactFourUp
+            ? ApolloMetaFeedCompactFourUpTitleFont(layout, traitCollection)
+            : [UIFont preferredFontForTextStyle:UIFontTextStyleBody
+                          compatibleWithTraitCollection:traitCollection];
         _titleLabel.adjustsFontForContentSizeCategory = YES;
         _titleLabel.textAlignment = NSTextAlignmentCenter;
         _titleLabel.numberOfLines = 1;
@@ -269,21 +298,22 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
     contentStack.axis = sideBySide ? UILayoutConstraintAxisHorizontal : UILayoutConstraintAxisVertical;
     contentStack.alignment = UIStackViewAlignmentCenter;
     contentStack.distribution = UIStackViewDistributionFill;
-    contentStack.spacing = ApolloFeedShortcutContentSpacing(layout, itemCount);
+    contentStack.spacing = compactSideBySide ? 2.5 : ApolloFeedShortcutContentSpacing(layout, itemCount);
     contentStack.userInteractionEnabled = NO;
     [self addSubview:contentStack];
     _contentStack = contentStack;
 
     _contentCenterXConstraint = [contentStack.centerXAnchor constraintEqualToAnchor:self.centerXAnchor];
-    _contentCenterXConstraint.constant = geometry.centerXOffset;
+    _contentCenterXConstraint.constant = geometry.centerXOffset + (compactGrid && feedIndex == 3 ? 2.0 : 0.0);
     [NSLayoutConstraint activateConstraints:@[
         _contentCenterXConstraint,
         [contentStack.centerYAnchor constraintEqualToAnchor:self.centerYAnchor]
     ]];
     if (!geometry.usesFlexibleSideBySideLayout) {
+        CGFloat horizontalMargin = compactGrid ? 0.0 : geometry.horizontalMargin;
         [NSLayoutConstraint activateConstraints:@[
-            [contentStack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor constant:geometry.horizontalMargin],
-            [contentStack.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-geometry.horizontalMargin]
+            [contentStack.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor constant:horizontalMargin],
+            [contentStack.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-horizontalMargin]
         ]];
     }
     if (!sideBySide && !iconDock) {
@@ -395,12 +425,21 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
 
     self.translatesAutoresizingMaskIntoConstraints = NO;
     ApolloSubredditFeedLayout layout = ApolloMetaFeedEffectiveLayout(tableView, visibleFeedIndexes);
+    CGFloat availableWidth = CGRectGetWidth(tableView.bounds);
+    if (availableWidth <= 0.0) availableWidth = CGRectGetWidth(UIScreen.mainScreen.bounds);
+    BOOL usesCompactFourUp = ApolloMetaFeedUsesCompactFourUp(layout,
+                                                             visibleFeedIndexes.count,
+                                                             availableWidth);
+    self.layout = layout;
+    self.usesCompactFourUp = usesCompactFourUp;
     NSMutableArray<ApolloMetaFeedShortcutControl *> *shortcuts = [NSMutableArray arrayWithCapacity:visibleFeedIndexes.count];
     for (NSUInteger nativeRow = 0; nativeRow < visibleFeedIndexes.count; nativeRow++) {
         NSInteger feedIndex = visibleFeedIndexes[nativeRow].integerValue;
         ApolloMetaFeedShortcutControl *shortcut = [[ApolloMetaFeedShortcutControl alloc] initWithFeedIndex:feedIndex
                                                                                                     layout:layout
-                                                                                                 itemCount:visibleFeedIndexes.count];
+                                                                                                 itemCount:visibleFeedIndexes.count
+                                                                                         usesCompactFourUp:usesCompactFourUp
+                                                                                           traitCollection:tableView.traitCollection];
         shortcut.tag = (NSInteger)nativeRow;
         [shortcut addTarget:self action:@selector(apollo_shortcutTapped:) forControlEvents:UIControlEventTouchUpInside];
         shortcut.editDeleteButton.tag = (NSInteger)nativeRow;
@@ -498,8 +537,10 @@ UIImage *ApolloSubredditClassicMetaFeedIcon(NSInteger index) {
         }
     }
 
-    UIFont *font = referenceLabel.font ?: [UIFont preferredFontForTextStyle:UIFontTextStyleBody
-                                                          compatibleWithTraitCollection:self.traitCollection];
+    UIFont *font = self.usesCompactFourUp
+        ? ApolloMetaFeedCompactFourUpTitleFont(self.layout, self.traitCollection)
+        : referenceLabel.font ?: [UIFont preferredFontForTextStyle:UIFontTextStyleBody
+                                 compatibleWithTraitCollection:self.traitCollection];
     UIColor *textColor = referenceLabel.textColor
         ?: ApolloThemeRuntimeColor(ApolloThemeTokenLabel)
         ?: UIColor.labelColor;
@@ -2804,6 +2845,10 @@ static void ApolloSubredditIndexRestoreMetaFeedCell(UITableViewCell *cell) {
     cell.accessoryView.hidden = [state[@"accessoryHidden"] boolValue];
     cell.isAccessibilityElement = [state[@"isAccessibilityElement"] boolValue];
     cell.selectionStyle = (UITableViewCellSelectionStyle)[state[@"selectionStyle"] integerValue];
+    NSValue *separatorInset = state[@"separatorInset"];
+    if ([separatorInset isKindOfClass:[NSValue class]]) {
+        cell.separatorInset = separatorInset.UIEdgeInsetsValue;
+    }
     id background = state[@"background"];
     cell.backgroundColor = [background isKindOfClass:[UIColor class]] ? background : nil;
     id contentBackground = state[@"contentBackground"];
@@ -2847,6 +2892,7 @@ static void ApolloSubredditIndexApplyMetaFeedShortcuts(UITableView *tableView, U
     }
     if (!ApolloMetaFeedLayoutUsesShortcuts(layout)) return;
 
+    ApolloSubredditIndexCaptureCellNativeState(cell);
     NSDictionary *state = @{
         @"textHidden": @(cell.textLabel.hidden),
         @"detailHidden": @(cell.detailTextLabel.hidden),
@@ -2854,6 +2900,7 @@ static void ApolloSubredditIndexApplyMetaFeedShortcuts(UITableView *tableView, U
         @"accessoryHidden": @(cell.accessoryView.hidden),
         @"isAccessibilityElement": @(cell.isAccessibilityElement),
         @"selectionStyle": @(cell.selectionStyle),
+        @"separatorInset": [NSValue valueWithUIEdgeInsets:cell.separatorInset],
         @"background": cell.backgroundColor ?: (id)[NSNull null],
         @"contentBackground": cell.contentView.backgroundColor ?: (id)[NSNull null]
     };
@@ -2873,6 +2920,7 @@ static void ApolloSubredditIndexApplyMetaFeedShortcuts(UITableView *tableView, U
     cell.imageView.hidden = YES;
     cell.accessoryView.hidden = YES;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.separatorInset = UIEdgeInsetsMake(0.0, CGFLOAT_MAX, 0.0, 0.0);
     cell.backgroundColor = UIColor.clearColor;
     cell.contentView.backgroundColor = UIColor.clearColor;
 
@@ -2959,6 +3007,37 @@ static void ApolloSubredditIndexApplyEnhancementStateToKnownTables(void) {
 }
 
 %hook _TtC6Apollo24RedditListViewController
+
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    %orig;
+
+    UITableView *ownedTable = nil;
+    UIView *controllerView = ((UIViewController *)self).view;
+    for (UITableView *tableView in sApolloSubredditKnownTables.allObjects) {
+        if ([tableView isDescendantOfView:controllerView]) {
+            ownedTable = tableView;
+            break;
+        }
+    }
+    if (!ownedTable) return;
+
+    NSArray<NSNumber *> *visibleIndexes = ApolloSubredditIndexVisibleMetaFeedIndexes(ownedTable);
+    ApolloSubredditFeedLayout layout = ApolloMetaFeedEffectiveLayout(ownedTable, visibleIndexes);
+    BOOL wasCompact = ApolloMetaFeedUsesCompactFourUp(layout,
+                                                       visibleIndexes.count,
+                                                       CGRectGetWidth(ownedTable.bounds));
+    BOOL willBeCompact = ApolloMetaFeedUsesCompactFourUp(layout,
+                                                          visibleIndexes.count,
+                                                          size.width);
+    if (wasCompact == willBeCompact) return;
+
+    __weak UITableView *weakTable = ownedTable;
+    [coordinator animateAlongsideTransition:nil
+                                 completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+        ApolloSubredditIndexReloadTablePreservingAnchor(weakTable);
+    }];
+}
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = %orig;
