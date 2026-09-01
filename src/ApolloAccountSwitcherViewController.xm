@@ -647,9 +647,8 @@ static BOOL ApolloAccountReorderSchedulePersist(
     // style (for the key-status detail line), which registerClass's recycling
     // pool can't express — see the manual dequeue-or-alloc in cellForRowAtIndexPath:.
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"AddRow"];
-    // Keep account rows self-sizing for Dynamic Type, but force UIKit to resolve
-    // geometry exactly. iOS 26's estimate cache can otherwise overlap rows
-    // after reorder-driven autoscrolling.
+    // Use exact geometry. iOS 26's estimate cache can otherwise overlap rows
+    // after reorder-driven autoscrolling; account heights are supplied below.
     self.tableView.estimatedRowHeight = 0.0;
     self.tableView.estimatedSectionHeaderHeight = 0.0;
     self.tableView.estimatedSectionFooterHeight = 0.0;
@@ -683,6 +682,10 @@ static BOOL ApolloAccountReorderSchedulePersist(
     return section == 0
         ? @"Each account can use its own Reddit API key, or sign in without one via a web session. Tap an account to switch to it, or tap the ellipsis to manage its sign-in."
         : nil;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return indexPath.section == 0 ? 62.0 : UITableViewAutomaticDimension;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -852,10 +855,17 @@ static BOOL ApolloAccountReorderSchedulePersist(
     NSIndexPath *path = [NSIndexPath indexPathForRow:row inSection:0];
     [inv setArgument:&tv atIndex:2];
     [inv setArgument:&path atIndex:3];
+    id previousAccount = ApolloActiveAccountClient();
     @try {
         [inv invokeWithTarget:self.liveManager];
     } @catch (NSException *ex) {
         ApolloLog(@"[AccountSwitcher] Live switch call failed: %@", ex);
+        return;
+    }
+    id selectedAccount = ApolloActiveAccountClient();
+    if (selectedAccount && selectedAccount != previousAccount) {
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [feedback impactOccurred];
     }
 }
 
