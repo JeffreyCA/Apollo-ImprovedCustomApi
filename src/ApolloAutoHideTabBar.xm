@@ -761,7 +761,8 @@ static void ApolloScrollAwayDidScroll(id self, SEL _cmd, id notification) {
 }
 
 static void ApolloScrollAwayDidEndDecelerating(id self, SEL _cmd, id notification) {
-    if (ApolloGuardedScrollAwayInteractionIsAtBottom(self)) return;
+    // Always let UIKit settle a partial morph (it floors progress to 0/1);
+    // the at-bottom expand we suppress lives in the didScroll math.
     if (sApolloScrollAwayDidEndDeceleratingOriginal) {
         sApolloScrollAwayDidEndDeceleratingOriginal(self, _cmd, notification);
     }
@@ -769,9 +770,12 @@ static void ApolloScrollAwayDidEndDecelerating(id self, SEL _cmd, id notificatio
 
 static void ApolloScrollAwayDidEndDragging(id self, SEL _cmd, id notification,
                                             BOOL decelerate) {
-    if (ApolloGuardedScrollAwayInteractionIsAtBottom(self)) return;
+    // willDecelerate:YES re-enters the didScroll math with the animation
+    // target; at the bottom, take the plain settle path instead.
+    BOOL atBottom = ApolloGuardedScrollAwayInteractionIsAtBottom(self);
     if (sApolloScrollAwayDidEndDraggingOriginal) {
-        sApolloScrollAwayDidEndDraggingOriginal(self, _cmd, notification, decelerate);
+        sApolloScrollAwayDidEndDraggingOriginal(self, _cmd, notification,
+                                                decelerate && !atBottom);
     }
 }
 
