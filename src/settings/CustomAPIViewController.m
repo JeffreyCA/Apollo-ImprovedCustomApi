@@ -1857,7 +1857,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                      title:@"Center Title Between Buttons"
                                       isOn:^BOOL { return IsLiquidGlass() && sLGTitleGapCentering; }
                                   onToggle:^(UISwitch *sender) { [weakSelf lgTitleGapCenteringSwitchToggled:sender]; }];
-    titleGapCentering.enabled = ^BOOL { return IsLiquidGlass(); };
+    titleGapCentering.visible = ^BOOL { return IsLiquidGlass(); };
 
     // Overrides the top scroll-edge glass under the nav bar (iOS 26+). Liquid
     // Glass only — hidden otherwise rather than shown-disabled, since the row
