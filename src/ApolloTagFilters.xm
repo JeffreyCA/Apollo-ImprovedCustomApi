@@ -878,11 +878,29 @@ static void ApolloTagPresentConfirmAlertForOverlay(id cell, UIVisualEffectView *
 
 // MARK: - Live updates
 
+// Everything this feature can change lives on a post cell, and post cells are
+// ASDK nodes (LargePostCellNode / CompactPostCellNode — see the %ctor's %init)
+// that only ever appear in Apollo's ASTableView feeds and comment threads. So
+// reload those and leave every other table alone.
+//
+// This used to reload EVERY UITableView in every window, which reached tables
+// with nothing to re-blur — the subreddit list above all. On a large list that
+// is a full row-data rebuild of a ~10,000pt table during launch, and it throws
+// away the section header views; if the next layout pass happens to be an
+// animated one, the recreated headers then glide their labels into place from
+// the previous frame instead of just appearing (issue #919). Reloading a table
+// that cannot contain a post cell was never doing anything for this feature.
 static void ApolloTagRefreshAllVisibleCells(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        Class postTableClass = objc_getClass("ASTableView");
         void (^__block walk)(UIView *) = nil;
         void (^localWalk)(UIView *) = ^(UIView *root) {
-            if ([root isKindOfClass:[UITableView class]]) {
+            BOOL hostsPostCells = postTableClass ? [root isKindOfClass:postTableClass]
+                                                 // ASTableView missing means Texture changed under us;
+                                                 // fall back to the old broad behaviour rather than
+                                                 // silently refreshing nothing.
+                                                 : [root isKindOfClass:[UITableView class]];
+            if (hostsPostCells) {
                 UITableView *tv = (UITableView *)root;
                 @try { [tv reloadData]; } @catch (__unused id e) {}
             }

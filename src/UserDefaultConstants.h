@@ -323,10 +323,16 @@ static NSString *const UDKeyShowTranslationTitleDetails = @"ShowTranslationTitle
 static NSString *const UDKeyTranslationMarkerUseThemeColor = @"TranslationMarkerUseThemeColor";
 static NSString *const UDKeyTranslatePostTitles = @"TranslatePostTitles";
 static NSString *const UDKeyTranslationTargetLanguage = @"TranslationTargetLanguage";
-static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre | apple
+static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre | apple | microsoft
 static NSString *const UDKeyTranslationProviderUserSelected = @"TranslationProviderUserSelected";
 static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
+// Microsoft (Azure AI Translator) — bring-your-own-key, like LibreTranslate.
+// Azure's free F0 tier is 2M characters/month, so unlike the free Google
+// endpoints it is an official, documented API that won't rate-limit ordinary
+// use. Region is required for regional resources ("global" for global ones).
+static NSString *const UDKeyMicrosoftTranslateAPIKey = @"MicrosoftTranslateAPIKey";
+static NSString *const UDKeyMicrosoftTranslateRegion = @"MicrosoftTranslateRegion";
 // Array<String> of 2-letter language codes to leave untranslated (detected source language).
 static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";
 // Redirects Apollo's OWN Translate button (the native action-sheet item on
@@ -549,10 +555,21 @@ static NSString *const ApolloFeedGalleryCarouselChangedNotification = @"ApolloFe
 // When the feed gallery carousel sits on its first (or last) image, continuing
 // to swipe toward the edge hands the drag to Apollo's swipe-back (or
 // swipe-forward) page navigation instead of rubber-banding, but only when a
-// previous (or forward) page actually exists. Default YES. Read live at
-// gesture time, so no change notification is needed (same reasoning as
-// UDKeySwipeUpForComments below). See ApolloFeedGalleryCarousel.xm.
+// previous (or forward) page actually exists. Default NO: handing a gallery
+// swipe to page navigation surprises people who only meant to bounce, so it's
+// opt-in (#996 review). Read live at gesture time, so no change notification
+// is needed (same reasoning as UDKeySwipeUpForComments below). See
+// ApolloFeedGalleryCarousel.xm.
 static NSString *const UDKeyFeedGalleryEdgeSwipeNav = @"FeedGalleryEdgeSwipeNavigation";
+// Apollo's forward-swipe (right edge, plus the gallery edge-swipe hand-off)
+// re-opens the screen you last swiped back from, and that memory natively
+// survives unlimited feed scrolling. With this on, scrolling the feed a few
+// posts away from where you popped back drops the stale forward memory, so a
+// much-later accidental swipe doesn't teleport to an old post. Default NO:
+// forward-swipe is a common enough gesture that changing what it does is
+// opt-in (#996 review). Read live per scroll tick, so no change notification
+// is needed. See ApolloForwardSwipeExpiry.xm.
+static NSString *const UDKeyForwardSwipeForgetAfterScrolling = @"ForwardSwipeForgetAfterScrolling";
 // In the fullscreen viewer for post-backed images, galleries, GIFs, and video,
 // an upward vertical flick or comments-button tap opens a media-owned comments
 // pane. The normal downward flick still dismisses when the pane is closed.
@@ -575,6 +592,24 @@ static NSString *const UDKeyDevvitInteractivePosts = @"DevvitInteractivePosts";
 // surface — comments is one widget at a time by construction). Default ON;
 // only consulted while DevvitInteractivePosts is on.
 static NSString *const UDKeyDevvitFeedWidgets = @"DevvitFeedWidgets";
+
+// Floating Post Tabs: chat-heads-style bubbles (max 5) that keep posts open
+// for instant return, created from the comments "..." menu. Default OFF
+// (opt-in). See ApolloFloatingTabs.xm.
+static NSString *const UDKeyFloatingPostTabs = @"FloatingPostTabs";
+// Sub-toggle: bubbles released near each other magnetize into a draggable
+// pile (tap fans it apart). Default ON; only consulted while the master
+// toggle is on. Turning it off fans existing piles out.
+static NSString *const UDKeyFloatingPostTabsMagnet = @"FloatingPostTabsMagnet";
+// Sub-toggle: holding a bubble pops a snapshot preview card with
+// peek-and-pop semantics (release opens the post, slide away first to
+// cancel). Default ON; only consulted while the master toggle is on. Off =
+// long-press does nothing (bubbles only tap and drag).
+static NSString *const UDKeyFloatingPostTabsPreview = @"FloatingPostTabsPreview";
+// Persisted open tabs (array of dicts: linkKey/permalink/title/subreddit +
+// dock state), rewritten on every tab mutation so bubbles survive relaunch.
+// Deliberately NOT registered with a default — absent means "no tabs".
+static NSString *const UDKeyFloatingPostTabsSaved = @"FloatingPostTabsSaved";
 
 // Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
 static NSString *const UDKeyLinkPreviewBodyMode = @"LinkPreviewBodyMode";

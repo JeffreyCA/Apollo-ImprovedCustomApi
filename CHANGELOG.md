@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixes
+
+- Give **Show/Hide Deleted Comments** in the comments ⋯ menu custom icons that match Apollo's own artwork instead of the SF Symbol eye (#962: @AcornElf, @icpryde)
+- Restore Apollo's original icon weight across the ⋯ menus — the Liquid Glass menu was downscaling every icon to 18pt, and rows added by the tweak (Gallery View, View Hidden/Deleted Content, Show/Hide Deleted Comments) rendered smaller than Apollo's own rows on the legacy sheet (#985: @AcornElf, @icpryde)
+
 ## [v3.6.0] - 2026-08-18
 
 ### Features
