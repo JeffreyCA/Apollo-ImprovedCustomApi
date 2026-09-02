@@ -18,10 +18,14 @@ BOOL sPassiveDeletedComments = NO;
 BOOL sShowRecentlyReadThumbnails = YES;
 BOOL sFeedTextPostThumbnails = YES;
 BOOL sFeedGalleryCarousel = YES;
-BOOL sFeedGalleryEdgeSwipeNav = YES;
+BOOL sFeedGalleryEdgeSwipeNav = NO;
+BOOL sForwardSwipeForgetAfterScrolling = NO; // scrolling the feed away expires the forward-swipe memory (opt-in)
 BOOL sSwipeUpForComments = YES;
 BOOL sDevvitInteractivePosts = NO;
 BOOL sDevvitFeedWidgets = YES;
+BOOL sFloatingPostTabs = NO;         // chat-heads-style floating post tabs (ApolloFloatingTabs.xm)
+BOOL sFloatingPostTabsMagnet = YES;  // effective default ON via registerDefaults; consulted only while master is on
+BOOL sFloatingPostTabsPreview = YES; // effective default ON via registerDefaults; hold-to-preview peek cards
 NSInteger sPreferredGIFFallbackFormat = 1; // 0=GIF, 1=MP4
 
 NSInteger sReadPostMaxCount = 0;
@@ -138,6 +142,8 @@ NSString *sTranslationTargetLanguage = nil;
 NSString *sTranslationProvider = nil;
 NSString *sLibreTranslateURL = nil;
 NSString *sLibreTranslateAPIKey = nil;
+NSString *sMicrosoftTranslateAPIKey = nil;
+NSString *sMicrosoftTranslateRegion = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
 BOOL sAppleTranslateSheet = NO;
 

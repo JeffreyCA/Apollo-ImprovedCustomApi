@@ -16,6 +16,43 @@
 #import <objc/runtime.h>
 #include <dlfcn.h>
 
+#import "ApolloCommon.h"
+#import "ApolloSavedItemsDeduplicator.h"
+
+@class RDKPagination;
+typedef void (^ApolloSavedItemsCompletion)(NSArray *items, RDKPagination *pagination, NSError *error);
+
+// MARK: - Saved-list refresh de-duplication
+
+// SavedPostsCommentsViewController uses this category-aware API for both the
+// unfiltered Saved screen (nil category) and category filters. Apollo replaces
+// its savedPostsComments array with the response on a pull-to-refresh. Reddit
+// can return the same thing twice in that response, so normalize at this data
+// boundary before the Swift controller or ListAdapter sees it. Pagination and
+// errors pass through untouched.
+%hook RDKClient
+
+- (id)savedLinksAndCommentsWithCategory:(id)category
+                              pagination:(RDKPagination *)pagination
+                              completion:(ApolloSavedItemsCompletion)completion {
+    if (!completion) return %orig;
+
+    ApolloSavedItemsCompletion originalCompletion = [completion copy];
+    ApolloSavedItemsCompletion deduplicatingCompletion = ^(NSArray *items,
+                                                            RDKPagination *responsePagination,
+                                                            NSError *error) {
+        NSArray *deduplicated = ApolloDeduplicateSavedItems(items);
+        if (deduplicated.count != items.count) {
+            ApolloLog(@"[SavedItems] Removed %lu duplicate item(s) from refresh response",
+                      (unsigned long)(items.count - deduplicated.count));
+        }
+        originalCompletion(deduplicated, responsePagination, error);
+    };
+    return %orig(category, pagination, deduplicatingCompletion);
+}
+
+%end
+
 // MARK: - ActionController In-Place Sort
 
 // Decode a Swift String stored as two raw 64-bit words into an NSString.
