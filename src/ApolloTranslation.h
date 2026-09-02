@@ -23,3 +23,27 @@ void ApolloTranslationRemoveVoteBodyCover(id coverToken);
 // cell/fullname already has a ready cover.
 void ApolloTranslationPrimeVoteBodySnapshot(id cellNode);
 void ApolloTranslationDiscardVoteBodySnapshot(id cellNode);
+
+// Maps the stored LibreTranslate URL setting to a usable endpoint: empty —
+// or the dead libretranslate.de public instance the tweak defaulted to before
+// it shut down (issue #995) — becomes the current default instance. Callers:
+// %ctor settings load, backup-restore statics re-sync, settings screen.
+// extern "C": defined in ApolloTranslation.xm (ObjC++) but also called from
+// plain ObjC (.m) TUs, so it needs unmangled linkage.
+__BEGIN_DECLS
+NSString *ApolloNormalizedLibreTranslateURLSetting(NSString *stored);
+
+// True when LibreTranslate cannot work as currently configured: the effective
+// URL points at a keyed public instance and no API key is entered. Keyless
+// self-hosted instances return NO. Shared by the request leg's fail-fast, the
+// cross-provider fallback chooser, and the settings screen's key warning.
+BOOL ApolloLibreTranslateNeedsAPIKey(void);
+__END_DECLS
+
+#if APOLLO_SIM_BUILD
+// Sim debug-bridge probe (see ApolloSimDebugTap.xm): run `text` through a
+// translation provider leg and ApolloLog the outcome, bypassing all UI/feed
+// gating. `spec` is "<google|libre|auto> <text>"; auto = the user-selected
+// provider with the normal cross-provider fallback.
+void ApolloTranslationDebugProbe(NSString *spec);
+#endif

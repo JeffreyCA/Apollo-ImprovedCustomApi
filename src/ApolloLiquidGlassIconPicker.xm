@@ -26,7 +26,8 @@
 //     grid of every icon in that group, optionally headed by the group's
 //     description. See LGPackGridRowCell / LGGroupIconsViewController.
 //   • A matching "Standard Icon Packs" card grid for Apollo Originals,
-//     Community, Ultra, and Sekrit. Apollo's SPCA support row stays separate.
+//     Community, Ultra, and Sekrit. The retired SPCA support row is removed;
+//     its icon now lives in Ultra with the other selectable icons.
 //
 // Featured cards preview the light and dark renditions as an overlapping fan.
 // Pack cards use three of the group's cover icons so each pack remains easy to
@@ -53,6 +54,7 @@ static NSString *const kLGDarkIconSuffix  = @"__apollo_dark";
 static NSString *const kLGAppearancePreferenceDefaultsKey = @"ApolloLGPreferredIconAppearance";
 static NSString *const kLGActiveStandardPackDefaultsKey = @"ApolloLGActiveStandardPack";
 static NSString *const kLGActiveStandardPackRowDefaultsKey = @"ApolloLGActiveStandardPackRow";
+static NSString *const kLGActiveStandardAddedIconIDDefaultsKey = @"ApolloLGActiveStandardAddedIconID";
 static NSString *const kLGConfirmedDefaultIconMarker = @"__apollo_confirmed_default";
 static NSString *const kLGLegacyClassicsMigrationDefaultsKey = @"ApolloLGLegacyClassicsMigrationV1";
 static NSString *const kLGDailyFeaturedDayDefaultsKey = @"ApolloLGDailyFeaturedDay";
@@ -924,6 +926,7 @@ static void LGPersistActiveStandardPack(LGStandardPack pack) {
         [defaults setInteger:pack forKey:kLGActiveStandardPackDefaultsKey];
     } else {
         [defaults removeObjectForKey:kLGActiveStandardPackDefaultsKey];
+        [defaults removeObjectForKey:kLGActiveStandardAddedIconIDDefaultsKey];
     }
 }
 
@@ -943,6 +946,7 @@ static LGStandardPack LGActiveStandardPack(void) {
 
 static void LGPersistActiveStandardPackRow(LGStandardPack pack, NSInteger row) {
     LGPersistActiveStandardPack(pack);
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:kLGActiveStandardAddedIconIDDefaultsKey];
     if (pack >= 0 && pack < LGStandardPackCount && row >= 0) {
         [NSUserDefaults.standardUserDefaults setInteger:row
                                                  forKey:kLGActiveStandardPackRowDefaultsKey];
@@ -1007,9 +1011,43 @@ static NSInteger LGActiveStandardPackRow(LGStandardPack pack) {
     return stored ? stored.integerValue : NSNotFound;
 }
 
-static BOOL LGStandardPackRowIsActive(LGStandardPack pack, NSInteger row) {
+typedef struct {
+    BOOL isAdded;
+    NSInteger nativeRow;
+    const LGIconRowEntry *addedEntry;
+} LGUltraDisplayedRow;
+
+static LGUltraDisplayedRow LGUltraRowAtDisplayedRow(NSInteger displayedRow,
+                                                     NSInteger nativeRowCount);
+static const LGIconRowEntry *LGStandardPackAddedEntryForIconID(NSString *iconID);
+
+static NSString *LGActiveStandardAddedIconID(void) {
+    if (LGActiveStandardPack() != LGStandardPackUltra) return nil;
+    NSString *iconID = [NSUserDefaults.standardUserDefaults
+        stringForKey:kLGActiveStandardAddedIconIDDefaultsKey];
+    if (iconID.length) return iconID;
+
+    // The system's current alternate name can recover the selected added icon
+    // if a previous test build did not persist this tweak-owned identifier.
+    NSString *systemID = LGBaseIconIDFromAlternateIconName(
+        UIApplication.sharedApplication.alternateIconName);
+    return LGStandardPackAddedEntryForIconID(systemID) ? systemID : nil;
+}
+
+static BOOL LGStandardPackRowIsActive(LGStandardPack pack, NSInteger row,
+                                      NSInteger nativeRowCount) {
     if (row < 0) return NO;
-    if (LGActiveStandardPackRow(pack) == row) return YES;
+    if (pack == LGStandardPackUltra) {
+        LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(row, nativeRowCount);
+        NSString *addedID = LGActiveStandardAddedIconID();
+        if (mapped.isAdded) {
+            return addedID.length && [addedID isEqualToString:@(mapped.addedEntry->iconID)];
+        }
+        if (mapped.nativeRow != NSNotFound && !addedID.length &&
+            LGActiveStandardPackRow(pack) == mapped.nativeRow) return YES;
+    } else if (LGActiveStandardPackRow(pack) == row) {
+        return YES;
+    }
     // Only a successful Default selection is authoritative. A missing saved
     // icon is not: iOS can report nil while an alternate icon remains active.
     return pack == LGStandardPackApolloOriginals && row == 0 &&
@@ -1038,10 +1076,62 @@ static NSInteger LGStandardPackIconCount(LGStandardPack pack) {
     switch (pack) {
         case LGStandardPackApolloOriginals: return 32;
         case LGStandardPackCommunity:       return 19;
-        case LGStandardPackUltra:           return 80;
-        case LGStandardPackSekrit:          return 21;
+        case LGStandardPackUltra:           return 81 + (NSInteger)kLGStandardPackEntries_ultraCount;
+        case LGStandardPackSekrit:          return 22;
         case LGStandardPackCount:           return 0;
     }
+}
+
+// SPCA is already a complete native alternate icon in Apollo's bundle. Keep
+// its original file-based registration intact and expose it through the same
+// added-row bridge as the tweak-supplied Ultra additions.
+static const LGIconRowEntry kLGSPCAUltraEntry = { "spca", "SPCA", "David Lanham" };
+
+static LGUltraDisplayedRow LGUltraRowAtDisplayedRow(NSInteger displayedRow,
+                                                     NSInteger nativeRowCount) {
+    LGUltraDisplayedRow missing = { NO, NSNotFound, NULL };
+    if (displayedRow < 0 || nativeRowCount < 0) return missing;
+
+    NSInteger outputRow = 0;
+    for (NSInteger nativeRow = 0; nativeRow < nativeRowCount; nativeRow++) {
+        if (outputRow++ == displayedRow) {
+            return (LGUltraDisplayedRow){ NO, nativeRow, NULL };
+        }
+
+        for (NSInteger i = 0; i < (NSInteger)kLGStandardPackEntries_ultraCount; i++) {
+            const LGIconRowEntry *entry = &kLGStandardPackEntries_ultra[i];
+            if (entry->nativeAnchorRow != nativeRow) continue;
+            if (outputRow++ == displayedRow) {
+                return (LGUltraDisplayedRow){ YES, NSNotFound, entry };
+            }
+        }
+    }
+
+    // Entries without an anchor, plus any whose native counterpart is absent
+    // from this Apollo build, remain available at the end of Ultra.
+    for (NSInteger i = 0; i < (NSInteger)kLGStandardPackEntries_ultraCount; i++) {
+        const LGIconRowEntry *entry = &kLGStandardPackEntries_ultra[i];
+        if (entry->nativeAnchorRow >= 0 && entry->nativeAnchorRow < nativeRowCount) continue;
+        if (outputRow++ == displayedRow) {
+            return (LGUltraDisplayedRow){ YES, NSNotFound, entry };
+        }
+    }
+
+    if (outputRow == displayedRow) {
+        return (LGUltraDisplayedRow){ YES, NSNotFound, &kLGSPCAUltraEntry };
+    }
+    return missing;
+}
+
+static const LGIconRowEntry *LGStandardPackAddedEntryForIconID(NSString *iconID) {
+    if (!iconID.length) return NULL;
+    for (NSInteger i = 0; i < (NSInteger)kLGStandardPackEntries_ultraCount; i++) {
+        if ([iconID isEqualToString:@(kLGStandardPackEntries_ultra[i].iconID)]) {
+            return &kLGStandardPackEntries_ultra[i];
+        }
+    }
+    if ([iconID isEqualToString:@(kLGSPCAUltraEntry.iconID)]) return &kLGSPCAUltraEntry;
+    return NULL;
 }
 
 static NSInteger LGNativeSectionForStandardPack(LGStandardPack pack) {
@@ -1058,7 +1148,7 @@ static NSArray<NSString *> *LGStandardPackCoverIconIDs(LGStandardPack pack) {
     switch (pack) {
         case LGStandardPackApolloOriginals: return @[ @"gold", @"calico", @"teal" ];
         case LGStandardPackCommunity:       return @[ @"apollo-san", @"rimuru", @"surprised" ];
-        case LGStandardPackUltra:           return @[ @"rainbow-visor", @"hyper-suit-4000", @"wish-maker" ];
+        case LGStandardPackUltra:           return @[ @"wish-maker", @"in-the-jungle", @"space-paws" ];
         case LGStandardPackSekrit:          return @[ @"beans", @"sus", @"apollobook-pro" ];
         case LGStandardPackCount:           return @[];
     }
@@ -1075,6 +1165,7 @@ static NSArray<UIImage *> *LGStandardPackCoverImages(LGStandardPack pack) {
     NSMutableArray<UIImage *> *images = [NSMutableArray arrayWithCapacity:kLGFanCount];
     for (NSString *iconID in LGStandardPackCoverIconIDs(pack)) {
         UIImage *image = LGStandardIconPreview(iconID);
+        if (!image) image = LGPreviewImage(iconID, @"default");
         if (image) [images addObject:image];
     }
     return images;
@@ -1128,9 +1219,8 @@ static BOOL LGAlternateIconsAvailable(void) {
 static BOOL LGSectionIsOurs(NSInteger section) { return section < LGInjectedSectionCount(); }
 
 static NSInteger LGRemapSectionToOriginal(NSInteger section) {
-    // The four native icon collections move into the standard pack cards.
-    // Only Apollo's standalone SPCA support row (native section 2) remains on
-    // the main screen below the injected grids.
+    // The native icon collections move into the standard pack cards, and the
+    // old SPCA purchase/support row is intentionally no longer forwarded.
     return section - LGInjectedSectionCount() + 2;
 }
 
@@ -1142,6 +1232,7 @@ static NSIndexPath *LGRemapIndexPathToOriginal(NSIndexPath *indexPath) {
 }
 
 static char kLGForwardedNativeSectionKey;
+static char kLGForwardedUIKitRowKey;
 static char kLGNativeDetailTableSectionKey;
 static char kLGNativeDetailRegisteredIdentifiersKey;
 
@@ -1156,6 +1247,17 @@ static void LGSetForwardedNativeSection(id controller, NSInteger section) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+static NSInteger LGForwardedUIKitRow(id controller) {
+    NSNumber *value = objc_getAssociatedObject(controller, &kLGForwardedUIKitRowKey);
+    return value ? value.integerValue : NSNotFound;
+}
+
+static void LGSetForwardedUIKitRow(id controller, NSInteger row) {
+    objc_setAssociatedObject(controller, &kLGForwardedUIKitRowKey,
+                             row == NSNotFound ? nil : @(row),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 #pragma mark - TLS remap scope
 //
 // Apollo's data-source/delegate methods call back into the table view using
@@ -1165,34 +1267,46 @@ static void LGSetForwardedNativeSection(id controller, NSInteger section) {
 static __thread BOOL       sLGRemapActive       = NO;
 static __thread NSInteger  sLGRemapApolloSection = -1;
 static __thread NSInteger  sLGRemapUIKitSection  = -1;
+static __thread NSInteger  sLGRemapApolloRow = -1;
+static __thread NSInteger  sLGRemapUIKitRow  = -1;
 static __thread __unsafe_unretained UITableView *sLGRemapActiveTable = nil;
 
 typedef struct {
     BOOL prevActive; NSInteger prevApollo; NSInteger prevUIKit;
+    NSInteger prevApolloRow; NSInteger prevUIKitRow;
     __unsafe_unretained UITableView *prevTable;
 } LGRemapScope;
 
 static inline void LGRemapScopeEnter(LGRemapScope *s, UITableView *tv,
-                                     NSInteger apollo, NSInteger uikit) {
+                                     NSInteger apollo, NSInteger uikit,
+                                     NSInteger apolloRow, NSInteger uikitRow) {
     s->prevActive = sLGRemapActive; s->prevApollo = sLGRemapApolloSection;
     s->prevUIKit = sLGRemapUIKitSection; s->prevTable = sLGRemapActiveTable;
+    s->prevApolloRow = sLGRemapApolloRow; s->prevUIKitRow = sLGRemapUIKitRow;
     sLGRemapActive = YES; sLGRemapApolloSection = apollo;
-    sLGRemapUIKitSection = uikit; sLGRemapActiveTable = tv;
+    sLGRemapUIKitSection = uikit; sLGRemapApolloRow = apolloRow;
+    sLGRemapUIKitRow = uikitRow; sLGRemapActiveTable = tv;
 }
 
 static inline void LGRemapScopeExit(LGRemapScope *s) {
     sLGRemapActive = s->prevActive; sLGRemapApolloSection = s->prevApollo;
     sLGRemapUIKitSection = s->prevUIKit; sLGRemapActiveTable = s->prevTable;
+    sLGRemapApolloRow = s->prevApolloRow; sLGRemapUIKitRow = s->prevUIKitRow;
 }
 
 #define LG_REMAP_SCOPE(tv, apollo, uikit) \
     __attribute__((cleanup(LGRemapScopeExit))) LGRemapScope _lgScope; \
-    LGRemapScopeEnter(&_lgScope, (tv), (apollo), (uikit))
+    LGRemapScopeEnter(&_lgScope, (tv), (apollo), (uikit), NSNotFound, NSNotFound)
+
+#define LG_REMAP_ROW_SCOPE(tv, apollo, uikit, apolloRow, uikitRow) \
+    __attribute__((cleanup(LGRemapScopeExit))) LGRemapScope _lgScope; \
+    LGRemapScopeEnter(&_lgScope, (tv), (apollo), (uikit), (apolloRow), (uikitRow))
 
 static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath *ip) {
     if (!sLGRemapActive || (sLGRemapActiveTable && tv != sLGRemapActiveTable)) return ip;
     if (!ip || ip.section != sLGRemapApolloSection) return ip;
-    return [NSIndexPath indexPathForRow:ip.row inSection:sLGRemapUIKitSection];
+    NSInteger row = ip.row == sLGRemapApolloRow ? sLGRemapUIKitRow : ip.row;
+    return [NSIndexPath indexPathForRow:row inSection:sLGRemapUIKitSection];
 }
 
 #pragma mark - Rendition fan (one square host, two renditions overlapped as a small fanned stack)
@@ -2690,6 +2804,106 @@ static void LGInstallAppearanceMenu(UIViewController *controller, UIView *hostVi
 
 static const NSInteger kLGUltraLowBatteryRow = 63;
 static const NSInteger kLGUltraPaletteRow = 70;
+static const NSInteger kLGNativeSekritSection = 4;
+static const NSInteger kLGNativeSekritIconCount = 21;
+static NSString *const kLGEAPIconID = @"eap";
+static char kLGEAPRowAppendedKey;
+
+// Only append to Apollo's known 21-row Sekrit list; a future native row wins.
+static BOOL LGShouldAppendEAPRow(NSInteger section, NSInteger nativeRowCount) {
+    if (section != kLGNativeSekritSection || nativeRowCount != kLGNativeSekritIconCount) return NO;
+    NSDictionary *alternates = NSBundle.mainBundle.infoDictionary[@"CFBundleIcons"][@"CFBundleAlternateIcons"];
+    return alternates[kLGEAPIconID] != nil;
+}
+
+static void LGRememberEAPAppendDecision(id controller, NSInteger section, NSInteger nativeRowCount) {
+    if (section != kLGNativeSekritSection) return;
+    objc_setAssociatedObject(controller, &kLGEAPRowAppendedKey,
+                             @(LGShouldAppendEAPRow(section, nativeRowCount)),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static BOOL LGIsAppendedEAPRow(id controller, NSInteger section, NSInteger row) {
+    return section == kLGNativeSekritSection &&
+        [objc_getAssociatedObject(controller, &kLGEAPRowAppendedKey) boolValue] &&
+        row == kLGNativeSekritIconCount;
+}
+
+static void LGSetApolloCellNativeCheckmark(UITableViewCell *cell, BOOL selected) {
+    if (!cell) return;
+    cell.accessoryView = nil;
+    cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    Ivar ivar = class_getInstanceVariable([cell class], "apolloAccessoryType");
+    if (ivar) {
+        uint8_t *field = (uint8_t *)(__bridge void *)cell + ivar_getOffset(ivar);
+        *field = selected ? 0 : 2;
+    }
+}
+
+static UIImage *LGNormalizedEAPThumbnail(void) {
+    static UIImage *thumbnail;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        UIImage *source = LGStandardIconPreview(kLGEAPIconID);
+        if (!source) return;
+
+        // Render onto the native 76-point canvas so the raw icon is not cropped.
+        CGSize size = CGSizeMake(76.0, 76.0);
+        UIGraphicsBeginImageContextWithOptions(size, NO, UIScreen.mainScreen.scale);
+        CGRect bounds = (CGRect){ CGPointZero, size };
+        [[UIBezierPath bezierPathWithRoundedRect:bounds cornerRadius:17.0] addClip];
+        [source drawInRect:bounds];
+        thumbnail = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+    });
+    return thumbnail;
+}
+
+static UITableViewCell *LGConfigureEAPCell(UITableViewCell *cell) {
+    cell.textLabel.text = @"Icons Drop Test";
+    cell.detailTextLabel.text = nil;
+    cell.imageView.image = LGNormalizedEAPThumbnail();
+    cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
+    cell.imageView.clipsToBounds = NO;
+    BOOL selected = [UIApplication.sharedApplication.alternateIconName isEqualToString:kLGEAPIconID];
+    LGSetApolloCellNativeCheckmark(cell, selected);
+    cell.accessibilityLabel = @"Icons Drop Test";
+    return cell;
+}
+
+static UITableViewCell *LGCreateEAPCell(void) {
+    Class cellClass = NSClassFromString(@"Apollo.ApolloSubtitleTableViewCell");
+    if (!cellClass) cellClass = NSClassFromString(@"_TtC6Apollo27ApolloSubtitleTableViewCell");
+    UITableViewCell *cell = [[cellClass ?: UITableViewCell.class alloc]
+        initWithStyle:UITableViewCellStyleSubtitle
+       reuseIdentifier:@"ApolloEAPIconCell"];
+    return LGConfigureEAPCell(cell);
+}
+
+static void LGSetNativeIconCellCheckmark(UITableViewCell *cell, BOOL selected);
+
+// A tweak-owned cell avoids dequeuing twice for one index path, which UIKit rejects.
+@interface LGAddedSekritIconCell : UITableViewCell
+@end
+
+@implementation LGAddedSekritIconCell
+
+- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
+    [super setHighlighted:highlighted animated:animated];
+    self.selectedBackgroundView = nil;
+    LGSetPressAnimationHighlighted(self, LGNativeIconCellPressAnimation(self), highlighted);
+    NSNumber *selected = objc_getAssociatedObject(self, &kLGNativeIconCellSelectedKey);
+    if (selected) LGSetNativeIconCellCheckmark(self, selected.boolValue);
+}
+
+- (void)prepareForReuse {
+    LGPressAnimationBox *box = objc_getAssociatedObject(self, &kLGNativeIconCellPressAnimationKey);
+    if (box) LGResetPressAnimation(self, &box->_state);
+    self.selectedBackgroundView = nil;
+    [super prepareForReuse];
+}
+
+@end
 
 static UIImage *LGNormalizedUltraThumbnail(NSString *baseName) {
     static NSMutableDictionary<NSString *, UIImage *> *cache;
@@ -2725,6 +2939,30 @@ static UIImage *LGNormalizedUltraThumbnail(NSString *baseName) {
     return thumbnail;
 }
 
+static UIImage *LGAddedUltraThumbnail(NSString *iconID) {
+    static NSCache<NSString *, UIImage *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ cache = [[NSCache alloc] init]; });
+
+    UIImage *cached = [cache objectForKey:iconID];
+    if (cached) return cached;
+    UIImage *source = LGPreviewImage(iconID, @"default") ?: LGStandardIconPreview(iconID);
+    if (!source) return nil;
+
+    // Apollo's native Ultra cells use 76-point thumbnails. Generated picker
+    // previews are 52 points, so render a matching cell-sized copy rather
+    // than allowing UITableViewCell to display them visibly undersized.
+    CGSize size = CGSizeMake(76.0, 76.0);
+    UIGraphicsImageRendererFormat *format = UIGraphicsImageRendererFormat.preferredFormat;
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    UIImage *thumbnail = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        [source drawInRect:(CGRect){ CGPointZero, size }];
+    }];
+    if (thumbnail) [cache setObject:thumbnail forKey:iconID];
+    return thumbnail;
+}
+
 static void LGFixLegacyUltraPreview(UITableViewCell *cell, NSInteger row) {
     NSString *baseName = nil;
     if (row == kLGUltraLowBatteryRow)
@@ -2735,8 +2973,6 @@ static void LGFixLegacyUltraPreview(UITableViewCell *cell, NSInteger row) {
     UIImage *thumbnail = baseName ? LGNormalizedUltraThumbnail(baseName) : nil;
     if (thumbnail) cell.imageView.image = thumbnail;
 }
-
-static void LGSetNativeIconCellCheckmark(UITableViewCell *cell, BOOL selected);
 
 static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
                                                 UIColor *cardBackgroundColor,
@@ -2773,6 +3009,32 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     fill.layer.maskedCorners = corners;
 }
 
+// The additional Ultra rows are plain UITableViewCells rather than
+// ApolloTableViewCell instances, so Apollo's hooked Standard-row press path
+// does not reach them. Mirror that path here: the same 0.97 scale/spring,
+// stable circular checkmark, and no custom-theme full-row selection wash.
+@interface LGAddedUltraIconCell : UITableViewCell
+@end
+
+@implementation LGAddedUltraIconCell
+
+- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
+    [super setHighlighted:highlighted animated:animated];
+    self.selectedBackgroundView = nil;
+    LGSetPressAnimationHighlighted(self, LGNativeIconCellPressAnimation(self), highlighted);
+    NSNumber *selected = objc_getAssociatedObject(self, &kLGNativeIconCellSelectedKey);
+    if (selected) LGSetNativeIconCellCheckmark(self, selected.boolValue);
+}
+
+- (void)prepareForReuse {
+    LGPressAnimationBox *box = objc_getAssociatedObject(self, &kLGNativeIconCellPressAnimationKey);
+    if (box) LGResetPressAnimation(self, &box->_state);
+    self.selectedBackgroundView = nil;
+    [super prepareForReuse];
+}
+
+@end
+
 // Keep the Standard packs on a tweak-owned table controller. Apollo's private
 // Swift table-controller base cannot safely be constructed outside Apollo's
 // own initialization path and crashes as soon as these packs are opened.
@@ -2791,11 +3053,122 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     NSInteger _nativeSection;
     id _changedIconObserver;
     id _didBecomeActiveObserver;
+    UIFont *_nativeTitleFont;
+    UIFont *_nativeDesignerFont;
+    UIColor *_nativeTitleColor;
+    UIColor *_nativeDesignerColor;
 }
 
 - (UIColor *)lg_pageBackgroundColor {
     UITableView *liveSource = ApolloThemeSourceTableIsStale(_sourceTable) ? nil : _sourceTable;
     return LGThemedPageBackgroundColor(liveSource);
+}
+
+- (NSInteger)lg_nativeRowCountForTableView:(UITableView *)tableView {
+    id source = _sourceController;
+    if (!source) return 0;
+    LGSetForwardedNativeSection(source, _nativeSection);
+    NSInteger count = ((NSInteger (*)(id, SEL, UITableView *, NSInteger))objc_msgSend)(
+        source, @selector(tableView:numberOfRowsInSection:), tableView, 0);
+    LGSetForwardedNativeSection(source, NSNotFound);
+    return count;
+}
+
+- (BOOL)lg_shouldAppendEAPForNativeCount:(NSInteger)nativeCount {
+    return _pack == LGStandardPackSekrit &&
+        LGShouldAppendEAPRow(_nativeSection, nativeCount);
+}
+
+- (BOOL)lg_isEAPRow:(NSInteger)row tableView:(UITableView *)tableView {
+    NSInteger nativeCount = [self lg_nativeRowCountForTableView:tableView];
+    return [self lg_shouldAppendEAPForNativeCount:nativeCount] && row == nativeCount;
+}
+
+- (void)lg_styleEAPCell:(UITableViewCell *)cell
+              tableView:(UITableView *)tableView
+            atIndexPath:(NSIndexPath *)indexPath {
+    [self apollo_applyPrimaryTextColorToCell:cell];
+    if (_nativeTitleFont) cell.textLabel.font = _nativeTitleFont;
+    cell.tintColor = ApolloThemeAccentColor() ?: tableView.tintColor;
+    cell.selectedBackgroundView = nil;
+    NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
+    LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
+                                        indexPath.row == 0, indexPath.row == rowCount - 1);
+    LGSetNativeIconCellCheckmark(cell,
+        [self lg_rowIsActive:indexPath.row tableView:tableView]);
+}
+
+- (BOOL)lg_rowIsActive:(NSInteger)row tableView:(UITableView *)tableView {
+    NSInteger nativeRowCount = _pack == LGStandardPackUltra
+        ? [self lg_nativeRowCountForTableView:tableView] : NSNotFound;
+    return LGStandardPackRowIsActive(_pack, row, nativeRowCount);
+}
+
+- (const LGIconRowEntry *)lg_addedEntryForRow:(NSInteger)row
+                                    tableView:(UITableView *)tableView {
+    if (_pack != LGStandardPackUltra) return NULL;
+    NSInteger nativeRowCount = [self lg_nativeRowCountForTableView:tableView];
+    LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(row, nativeRowCount);
+    return mapped.isAdded ? mapped.addedEntry : NULL;
+}
+
+- (NSIndexPath *)lg_nativeIndexPathForDisplayedIndexPath:(NSIndexPath *)indexPath {
+    if (_pack != LGStandardPackUltra) return indexPath;
+    NSInteger nativeRowCount = [self lg_nativeRowCountForTableView:self.tableView];
+    LGUltraDisplayedRow mapped = LGUltraRowAtDisplayedRow(indexPath.row, nativeRowCount);
+    if (mapped.isAdded || mapped.nativeRow == NSNotFound) return nil;
+    return [NSIndexPath indexPathForRow:mapped.nativeRow inSection:0];
+}
+
+- (void)lg_styleAddedUltraCell:(UITableViewCell *)cell
+                     tableView:(UITableView *)tableView
+                   atIndexPath:(NSIndexPath *)indexPath {
+    if (!cell || !indexPath) return;
+    // Apollo applies the final Ultra typography while configuring each native
+    // row; constructing its cell class directly does not run that path. Copy
+    // the resolved values from a real native row so additions match exactly,
+    // including custom-theme colors and any Dynamic Type sizing.
+    if (_nativeTitleFont) cell.textLabel.font = _nativeTitleFont;
+    if (_nativeDesignerFont) cell.detailTextLabel.font = _nativeDesignerFont;
+    if (_nativeTitleColor) cell.textLabel.textColor = _nativeTitleColor;
+    if (_nativeDesignerColor) cell.detailTextLabel.textColor = _nativeDesignerColor;
+    cell.tintColor = ApolloThemeAccentColor() ?: tableView.tintColor;
+    cell.selectedBackgroundView = nil;
+
+    NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
+    // Use the pack card fill, not the page background. Using the page token
+    // made only these four rows disappear into the surrounding table.
+    LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
+                                        indexPath.row == 0,
+                                        indexPath.row == rowCount - 1);
+    LGSetNativeIconCellCheckmark(cell,
+        [self lg_rowIsActive:indexPath.row tableView:tableView]);
+}
+
+- (void)lg_captureNativeTypographyFromCell:(UITableViewCell *)cell {
+    if (!cell.textLabel.font || !cell.detailTextLabel.font) return;
+    BOOL changed = ![_nativeTitleFont isEqual:cell.textLabel.font] ||
+        ![_nativeDesignerFont isEqual:cell.detailTextLabel.font] ||
+        ![_nativeTitleColor isEqual:cell.textLabel.textColor] ||
+        ![_nativeDesignerColor isEqual:cell.detailTextLabel.textColor];
+    if (!changed) return;
+
+    _nativeTitleFont = cell.textLabel.font;
+    _nativeDesignerFont = cell.detailTextLabel.font;
+    _nativeTitleColor = cell.textLabel.textColor;
+    _nativeDesignerColor = cell.detailTextLabel.textColor;
+
+    // A native row can be configured after an added row during a reload.
+    // Refresh any already-visible additions as soon as the native values are
+    // known rather than waiting for them to scroll offscreen and back.
+    UITableView *tableView = self.tableView;
+    for (NSIndexPath *visiblePath in tableView.indexPathsForVisibleRows) {
+        if (![self lg_addedEntryForRow:visiblePath.row tableView:tableView]) continue;
+        UITableViewCell *visibleCell = [tableView cellForRowAtIndexPath:visiblePath];
+        if (visibleCell) {
+            [self lg_styleAddedUltraCell:visibleCell tableView:tableView atIndexPath:visiblePath];
+        }
+    }
 }
 
 - (void)lg_reassertVisibleNativeRows {
@@ -2804,11 +3177,15 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     for (NSIndexPath *indexPath in tableView.indexPathsForVisibleRows) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         if (!cell) continue;
+        if ([self lg_addedEntryForRow:indexPath.row tableView:tableView]) {
+            [self lg_styleAddedUltraCell:cell tableView:tableView atIndexPath:indexPath];
+            continue;
+        }
         LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                             indexPath.row == 0,
                                             indexPath.row == rowCount - 1);
         LGSetNativeIconCellCheckmark(cell,
-            LGStandardPackRowIsActive(_pack, indexPath.row));
+            [self lg_rowIsActive:indexPath.row tableView:tableView]);
     }
 }
 
@@ -2911,21 +3288,55 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    id source = _sourceController;
-    if (!source) return 0;
-    LGSetForwardedNativeSection(source, _nativeSection);
-    NSInteger count = ((NSInteger (*)(id, SEL, UITableView *, NSInteger))objc_msgSend)(
-        source, @selector(tableView:numberOfRowsInSection:), tableView, 0);
-    LGSetForwardedNativeSection(source, NSNotFound);
-    return count;
+    NSInteger nativeCount = [self lg_nativeRowCountForTableView:tableView];
+    return nativeCount + (_pack == LGStandardPackUltra
+        ? (NSInteger)kLGStandardPackEntries_ultraCount + 1 : 0)
+        + ([self lg_shouldAppendEAPForNativeCount:nativeCount] ? 1 : 0);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if ([self lg_isEAPRow:indexPath.row tableView:tableView]) {
+        static NSString *const reuseID = @"LGAddedSekritIconCell";
+        LGAddedSekritIconCell *cell = (LGAddedSekritIconCell *)
+            [tableView dequeueReusableCellWithIdentifier:reuseID];
+        if (!cell) {
+            cell = [[LGAddedSekritIconCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                                reuseIdentifier:reuseID];
+        }
+        LGConfigureEAPCell(cell);
+        [self lg_styleEAPCell:cell tableView:tableView atIndexPath:indexPath];
+        return cell;
+    }
+    const LGIconRowEntry *addedEntry = [self lg_addedEntryForRow:indexPath.row tableView:tableView];
+    if (addedEntry) {
+        static NSString *const reuseID = @"LGAddedUltraIconCell";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
+        if (!cell) {
+            cell = [[LGAddedUltraIconCell alloc]
+                initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseID];
+        }
+        NSString *iconID = @(addedEntry->iconID);
+        cell.textLabel.text = @(addedEntry->displayName);
+        cell.detailTextLabel.text = @(addedEntry->designer);
+        cell.imageView.image = LGAddedUltraThumbnail(iconID);
+        cell.imageView.layer.cornerRadius = 16.0;
+        cell.imageView.layer.cornerCurve = kCACornerCurveContinuous;
+        cell.imageView.clipsToBounds = YES;
+        // Mark these hand-built rows before willDisplay so the shared settings
+        // theme pass treats their title exactly like a native primary label.
+        [self apollo_applyPrimaryTextColorToCell:cell];
+        [self lg_styleAddedUltraCell:cell tableView:tableView atIndexPath:indexPath];
+        return cell;
+    }
     id source = _sourceController;
     if (!source) return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    NSIndexPath *nativeIndexPath = [self lg_nativeIndexPathForDisplayedIndexPath:indexPath];
+    if (!nativeIndexPath) return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     LGSetForwardedNativeSection(source, _nativeSection);
+    LGSetForwardedUIKitRow(source, indexPath.row);
     UITableViewCell *cell = ((id (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(
-        source, @selector(tableView:cellForRowAtIndexPath:), tableView, indexPath);
+        source, @selector(tableView:cellForRowAtIndexPath:), tableView, nativeIndexPath);
+    LGSetForwardedUIKitRow(source, NSNotFound);
     LGSetForwardedNativeSection(source, NSNotFound);
     // Apollo's specialized Default cell paints its contentView separately.
     // In our inset-grouped wrapper that fill stops before the accessory area,
@@ -2934,7 +3345,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
     LGNormalizeNativeIconCellBackground(cell, _cardBackgroundColor,
                                         indexPath.row == 0, indexPath.row == rowCount - 1);
-    BOOL selected = LGStandardPackRowIsActive(_pack, indexPath.row);
+    BOOL selected = [self lg_rowIsActive:indexPath.row tableView:tableView];
     LGSetNativeIconCellCheckmark(cell, selected);
     return cell;
 }
@@ -2944,15 +3355,36 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     id source = _sourceController;
     if (!source) return;
 
+    if ([self lg_isEAPRow:indexPath.row tableView:tableView]) {
+        [self apollo_applyPrimaryTextColorToCell:cell];
+        [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath];
+        [self lg_styleEAPCell:cell tableView:tableView atIndexPath:indexPath];
+        return;
+    }
+
+    const LGIconRowEntry *addedEntry = [self lg_addedEntryForRow:indexPath.row tableView:tableView];
+    if (addedEntry) {
+        // Mark primary text before the settings base applies the active theme.
+        [self apollo_applyPrimaryTextColorToCell:cell];
+        [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath];
+        [self lg_styleAddedUltraCell:cell tableView:tableView atIndexPath:indexPath];
+        return;
+    }
+    NSIndexPath *nativeIndexPath = [self lg_nativeIndexPathForDisplayedIndexPath:indexPath];
+    if (!nativeIndexPath) return;
+
     // Let the tweak-owned settings base apply its native theme first. Our
     // source-controller bridge and persisted selection state must be the last
     // writers; otherwise this superclass pass can restore Apollo's stale
     // Default accessory and replace the inset-grouped card fill after resume.
     [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath];
     LGSetForwardedNativeSection(source, _nativeSection);
+    LGSetForwardedUIKitRow(source, indexPath.row);
     ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))objc_msgSend)(
-        source, @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, indexPath);
+        source, @selector(tableView:willDisplayCell:forRowAtIndexPath:), tableView, cell, nativeIndexPath);
+    LGSetForwardedUIKitRow(source, NSNotFound);
     LGSetForwardedNativeSection(source, NSNotFound);
+    [self lg_captureNativeTypographyFromCell:cell];
     // Normalize after both native styling passes so every Standard pack keeps
     // the Community-style rounded card from its first presentation onward.
     NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
@@ -2962,9 +3394,9 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     // persisted selection afterward so backgrounding cannot visually revert
     // an active Standard icon to Default.
     LGSetNativeIconCellCheckmark(cell,
-        LGStandardPackRowIsActive(_pack, indexPath.row));
+        [self lg_rowIsActive:indexPath.row tableView:tableView]);
     if (_pack == LGStandardPackUltra) {
-        LGFixLegacyUltraPreview(cell, indexPath.row);
+        LGFixLegacyUltraPreview(cell, nativeIndexPath.row);
         [cell setNeedsLayout];
         [cell layoutIfNeeded];
     }
@@ -2995,9 +3427,28 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     id source = _sourceController;
     if (!source) return UITableViewAutomaticDimension;
+    if ([self lg_isEAPRow:indexPath.row tableView:tableView]) {
+        NSInteger nativeCount = [self lg_nativeRowCountForTableView:tableView];
+        if (nativeCount <= 0) return 104.0;
+        NSIndexPath *templatePath = [NSIndexPath indexPathForRow:nativeCount - 1 inSection:0];
+        LGSetForwardedNativeSection(source, _nativeSection);
+        CGFloat height = ((CGFloat (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(
+            source, @selector(tableView:heightForRowAtIndexPath:), tableView, templatePath);
+        LGSetForwardedNativeSection(source, NSNotFound);
+        return height;
+    }
+
+    NSInteger nativeCount = [self lg_nativeRowCountForTableView:tableView];
+    const LGIconRowEntry *addedEntry = [self lg_addedEntryForRow:indexPath.row tableView:tableView];
+    NSIndexPath *nativeIndexPath = addedEntry
+        ? [NSIndexPath indexPathForRow:MAX(0, nativeCount - 1) inSection:0]
+        : [self lg_nativeIndexPathForDisplayedIndexPath:indexPath];
+    if (nativeCount <= 0 || !nativeIndexPath) return 104.0;
     LGSetForwardedNativeSection(source, _nativeSection);
+    LGSetForwardedUIKitRow(source, indexPath.row);
     CGFloat height = ((CGFloat (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(
-        source, @selector(tableView:heightForRowAtIndexPath:), tableView, indexPath);
+        source, @selector(tableView:heightForRowAtIndexPath:), tableView, nativeIndexPath);
+    LGSetForwardedUIKitRow(source, NSNotFound);
     LGSetForwardedNativeSection(source, NSNotFound);
     return height;
 }
@@ -3019,7 +3470,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     // second time. Besides doing unnecessary work, that path briefly mutates
     // Apollo's private accessory state and makes the persisted checkmark
     // appear to change. End only the table's transient pressed state.
-    if (LGStandardPackRowIsActive(_pack, indexPath.row)) {
+    if ([self lg_rowIsActive:indexPath.row tableView:tableView]) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
         // Do not reload the row while its press-release transform is still
         // animating. In some dark custom themes UIKit keeps the outgoing cell
@@ -3027,6 +3478,45 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
         __weak LGNativeIconPackViewController *weakSelf = self;
         LGPerformNativeIconSelectionWithFeedback(tableView, ^{
             [weakSelf lg_reassertVisibleNativeRows];
+        });
+        return;
+    }
+
+    if ([self lg_isEAPRow:indexPath.row tableView:tableView]) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        __weak UITableView *weakTable = tableView;
+        NSInteger row = indexPath.row;
+        LGPerformNativeIconSelectionWithFeedback(tableView, ^{
+            UITableView *strongTable = weakTable;
+            if (!strongTable) return;
+            LGApplyAlternateIcon(strongTable, kLGEAPIconID, ^(BOOL success) {
+                if (!success) return;
+                LGClearPersistedActiveIconID();
+                LGPersistActiveStandardPackRow(LGStandardPackSekrit, row);
+                [strongTable reloadData];
+            });
+        });
+        return;
+    }
+
+    const LGIconRowEntry *addedEntry = [self lg_addedEntryForRow:indexPath.row tableView:tableView];
+    if (addedEntry) {
+        NSString *iconID = @(addedEntry->iconID);
+        __weak UITableView *weakTable = tableView;
+        LGPerformNativeIconSelectionWithFeedback(tableView, ^{
+            UITableView *strongTable = weakTable;
+            if (!strongTable) return;
+            LGApplyAlternateIcon(strongTable, iconID, ^(BOOL success) {
+                if (!success) return;
+                // These are Standard Ultra icons even though their assets are
+                // supplied by this tweak. Store the Standard pack/row only
+                // after iOS confirms the change.
+                LGClearPersistedActiveIconID();
+                LGPersistActiveStandardPackRow(LGStandardPackUltra, NSNotFound);
+                [NSUserDefaults.standardUserDefaults setObject:iconID
+                    forKey:kLGActiveStandardAddedIconIDDefaultsKey];
+                [strongTable reloadData];
+            });
         });
         return;
     }
@@ -3068,14 +3558,23 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
     __weak UITableView *weakTable = tableView;
     NSInteger nativeSection = _nativeSection;
     LGStandardPack pack = _pack;
+    NSIndexPath *nativeIndexPath = [self lg_nativeIndexPathForDisplayedIndexPath:indexPath];
+    if (!nativeIndexPath) return;
     LGPerformNativeIconSelectionWithFeedback(tableView, ^{
         id strongSource = weakSource;
         UITableView *strongTable = weakTable;
         if (!strongSource || !strongTable) return;
         LGSetForwardedNativeSection(strongSource, nativeSection);
-        LGBeginPendingStandardPackSelection(pack, indexPath.row);
+        LGSetForwardedUIKitRow(strongSource, indexPath.row);
+        // Ultra's inserted sequel rows shift displayed positions, while
+        // Apollo's source controller still identifies native icons by its
+        // original row. Persist that stable native row after confirmation.
+        NSInteger persistedRow = pack == LGStandardPackUltra
+            ? nativeIndexPath.row : indexPath.row;
+        LGBeginPendingStandardPackSelection(pack, persistedRow);
         ((void (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(
-            strongSource, @selector(tableView:didSelectRowAtIndexPath:), strongTable, indexPath);
+            strongSource, @selector(tableView:didSelectRowAtIndexPath:), strongTable, nativeIndexPath);
+        LGSetForwardedUIKitRow(strongSource, NSNotFound);
         LGSetForwardedNativeSection(strongSource, NSNotFound);
     });
 }
@@ -3506,7 +4005,10 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
     sLGAppIconPickerTableView = tableView;
     NSInteger originalCount = %orig;
     if (!LGAlternateIconsAvailable()) return originalCount;
-    return LGInjectedSectionCount() + (originalCount > 2 ? 1 : 0);
+    // Every selectable native collection is represented by the Standard pack
+    // cards. Do not leave Apollo's obsolete standalone SPCA purchase card at
+    // the bottom now that its icon is directly available inside Ultra.
+    return LGInjectedSectionCount();
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -3519,14 +4021,19 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         if (section == LGStandardPacksSectionIndex()) return LGCardRowCount(LGStandardPackCount, columnCount);
         return %orig(tableView, LGRemapSectionToOriginal(section));
     }
-    return %orig;
+    NSInteger nativeCount = %orig;
+    LGRememberEAPAppendDecision(self, section, nativeCount);
+    return nativeCount + (LGShouldAppendEAPRow(section, nativeCount) ? 1 : 0);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSInteger forwardedSection = LGForwardedNativeSection(self);
     if (LGAlternateIconsAvailable() && forwardedSection != NSNotFound) {
         NSIndexPath *nativeIndexPath = [NSIndexPath indexPathForRow:indexPath.row inSection:forwardedSection];
-        LG_REMAP_SCOPE(tableView, forwardedSection, 0);
+        NSInteger uikitRow = LGForwardedUIKitRow(self);
+        LG_REMAP_ROW_SCOPE(tableView, forwardedSection, 0,
+                           uikitRow == NSNotFound ? NSNotFound : nativeIndexPath.row,
+                           uikitRow);
         UITableViewCell *cell = %orig(tableView, nativeIndexPath);
         if (forwardedSection == 0 && indexPath.row == 0) LGCorrectDefaultRowCheckmark(cell);
         return cell;
@@ -3623,6 +4130,9 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         if (r.section == 0 && r.row == 0) LGCorrectDefaultRowCheckmark(cell);
         return cell;
     }
+    if (LGIsAppendedEAPRow(self, indexPath.section, indexPath.row)) {
+        return LGCreateEAPCell();
+    }
     return %orig;
 }
 
@@ -3631,7 +4141,10 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         NSInteger forwardedSection = LGForwardedNativeSection(self);
         if (forwardedSection != NSNotFound) {
             NSIndexPath *nativeIndexPath = [NSIndexPath indexPathForRow:indexPath.row inSection:forwardedSection];
-            LG_REMAP_SCOPE(tableView, forwardedSection, 0);
+            NSInteger uikitRow = LGForwardedUIKitRow(self);
+            LG_REMAP_ROW_SCOPE(tableView, forwardedSection, 0,
+                               uikitRow == NSNotFound ? NSNotFound : nativeIndexPath.row,
+                               uikitRow);
             %orig(tableView, cell, nativeIndexPath);
             if (forwardedSection == 0 && indexPath.row == 0) LGCorrectDefaultRowCheckmark(cell);
             return;
@@ -3645,6 +4158,14 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         // again here so whichever pass is authoritative for final rendering
         // still ends up right.
         if (r.section == 0 && r.row == 0) LGCorrectDefaultRowCheckmark(cell);
+        return;
+    }
+    NSInteger nativeCount = kLGNativeSekritIconCount;
+    if (LGIsAppendedEAPRow(self, indexPath.section, indexPath.row)) {
+        NSIndexPath *templatePath = [NSIndexPath indexPathForRow:nativeCount - 1
+                                                       inSection:indexPath.section];
+        %orig(tableView, cell, templatePath);
+        LGConfigureEAPCell(cell);
         return;
     }
     %orig;
@@ -3677,7 +4198,10 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         NSInteger forwardedSection = LGForwardedNativeSection(self);
         if (forwardedSection != NSNotFound) {
             NSIndexPath *nativeIndexPath = [NSIndexPath indexPathForRow:indexPath.row inSection:forwardedSection];
-            LG_REMAP_SCOPE(tableView, forwardedSection, 0);
+            NSInteger uikitRow = LGForwardedUIKitRow(self);
+            LG_REMAP_ROW_SCOPE(tableView, forwardedSection, 0,
+                               uikitRow == NSNotFound ? NSNotFound : nativeIndexPath.row,
+                               uikitRow);
             return %orig(tableView, nativeIndexPath);
         }
         if (LGHasFeaturedSection() && indexPath.section == LGFeaturedSectionIndex()) return kLGFeaturedStripHeight;
@@ -3686,6 +4210,12 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         NSIndexPath *r = LGRemapIndexPathToOriginal(indexPath);
         LG_REMAP_SCOPE(tableView, r.section, indexPath.section);
         return %orig(tableView, r);
+    }
+    NSInteger nativeCount = kLGNativeSekritIconCount;
+    if (LGIsAppendedEAPRow(self, indexPath.section, indexPath.row)) {
+        NSIndexPath *templatePath = [NSIndexPath indexPathForRow:nativeCount - 1
+                                                       inSection:indexPath.section];
+        return %orig(tableView, templatePath);
     }
     return %orig;
 }
@@ -3717,7 +4247,10 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
             ApolloLog(@"[LGIconPicker] ignoring native icon selection while another change is active");
             return;
         }
-        LG_REMAP_SCOPE(tableView, forwardedSection, 0);
+        NSInteger uikitRow = LGForwardedUIKitRow(self);
+        LG_REMAP_ROW_SCOPE(tableView, forwardedSection, 0,
+                           uikitRow == NSNotFound ? NSNotFound : nativeIndexPath.row,
+                           uikitRow);
         %orig(tableView, nativeIndexPath);
         return;
     }
@@ -3753,6 +4286,14 @@ static void LGScheduleDailyFeaturedRollover(id viewController) {
         }
         LG_REMAP_SCOPE(tableView, r.section, indexPath.section);
         %orig(tableView, r);
+        return;
+    }
+    if (LGIsAppendedEAPRow(self, indexPath.section, indexPath.row)) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        __weak UITableView *weakTable = tableView;
+        LGApplyAlternateIconSerialized(tableView, kLGEAPIconID, ^(BOOL success) {
+            if (success) [weakTable reloadData];
+        });
         return;
     }
     %orig;
@@ -3889,7 +4430,8 @@ static void LGStyleCommunityIconCell(id controller,
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     BOOL replayingSelection = [objc_getAssociatedObject(self, &kLGCommunitySelectionReplayKey) boolValue];
-    if (!replayingSelection && LGStandardPackRowIsActive(LGStandardPackCommunity, indexPath.row)) {
+    if (!replayingSelection &&
+        LGStandardPackRowIsActive(LGStandardPackCommunity, indexPath.row, NSNotFound)) {
         // Match the tweak-owned Standard packs: an already-active row keeps
         // its checkmark and ends only the table's temporary pressed state.
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
@@ -3987,14 +4529,29 @@ static void LGKeepMainSettingsIconSquare(UITableViewCell *cell) {
 
     NSString *activeID = LGActiveIconID();
     const LGIconRow *row = activeID.length ? LGRowForIconID(activeID) : NULL;
-    if (!row) return cell; // true Default, or a stock Apollo icon we don't own — leave Apollo's rendering alone
+    LGStandardPack activePack = LGActiveStandardPack();
+    const LGIconRowEntry *addedStandardEntry = activePack == LGStandardPackUltra
+        ? LGStandardPackAddedEntryForIconID(LGActiveStandardAddedIconID()) : NULL;
+    if (!row && !addedStandardEntry) return cell; // true Default or a stock Apollo icon
 
-    NSString *activeName = LGActiveAlternateIconName();
-    LGIconAppearanceMode mode = LGAppearanceModeFromAlternateIconName(activeName);
-    NSString *variant = mode == LGIconAppearanceModeLight ? @"default"
-        : mode == LGIconAppearanceModeDark ? @"dark"
-        : (LGIsDarkAppearance(cell) ? @"dark" : @"default");
-    UIImage *preview = LGPreviewImage(row->iconID, variant);
+    UIImage *preview = nil;
+    NSString *displayName = nil;
+    if (addedStandardEntry) {
+        NSString *iconID = @(addedStandardEntry->iconID);
+        // Tweak-supplied Ultra additions use generated previews, while SPCA
+        // keeps Apollo's original file-based icon. Match the Ultra detail row
+        // fallback so the parent Settings row refreshes correctly for both.
+        preview = LGPreviewImage(iconID, @"default") ?: LGStandardIconPreview(iconID);
+        displayName = @(addedStandardEntry->displayName);
+    } else {
+        NSString *activeName = LGActiveAlternateIconName();
+        LGIconAppearanceMode mode = LGAppearanceModeFromAlternateIconName(activeName);
+        NSString *variant = mode == LGIconAppearanceModeLight ? @"default"
+            : mode == LGIconAppearanceModeDark ? @"dark"
+            : (LGIsDarkAppearance(cell) ? @"dark" : @"default");
+        preview = LGPreviewImage(row->iconID, variant);
+        displayName = row->displayName;
+    }
     if (preview) {
         cell.imageView.image = LGMainSettingsIconThumbnail(preview);
         LGKeepMainSettingsIconSquare(cell);
@@ -4005,7 +4562,7 @@ static void LGKeepMainSettingsIconSquare(UITableViewCell *cell) {
     // our plain text wins regardless of which one it used.
     if (cell.detailTextLabel) {
         cell.detailTextLabel.attributedText = nil;
-        cell.detailTextLabel.text = row->displayName;
+        cell.detailTextLabel.text = displayName;
     }
 
     return cell;
@@ -4017,7 +4574,12 @@ static void LGKeepMainSettingsIconSquare(UITableViewCell *cell) {
         ![cell.textLabel.text isEqualToString:@"App Icon"]) return;
 
     NSString *activeID = LGActiveIconID();
-    if (activeID.length && LGRowForIconID(activeID)) LGKeepMainSettingsIconSquare(cell);
+    LGStandardPack activePack = LGActiveStandardPack();
+    BOOL addedStandardActive = activePack == LGStandardPackUltra &&
+        LGStandardPackAddedEntryForIconID(LGActiveStandardAddedIconID()) != NULL;
+    if ((activeID.length && LGRowForIconID(activeID)) || addedStandardActive) {
+        LGKeepMainSettingsIconSquare(cell);
+    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {

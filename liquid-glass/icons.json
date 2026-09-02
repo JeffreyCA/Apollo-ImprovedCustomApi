@@ -104,6 +104,16 @@
     { "id": "helios-parallax-halo",     "displayName": "Parallax Halo",       "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-ultra",             "displayName": "Ultra",               "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-ultra-halo",        "displayName": "Ultra Halo",          "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-pixel",             "displayName": "Pixels",              "designer": "IllIIllIllIllII", "group": "helios" }
+    { "id": "helios-pixel",             "displayName": "Pixels",              "designer": "IllIIllIllIllII", "group": "helios" },
+
+    { "id": "in-the-jungle",            "displayName": "Safari",              "designer": "Matthew Skiles",  "standardPack": "ultra" },
+    { "id": "space-paws",               "displayName": "Space Paws",          "designer": "Raphael Lopes",   "standardPack": "ultra" },
+    { "id": "grumpy-space-paws",        "displayName": "Grumpy Space Paws",   "designer": "Raphael Lopes",   "standardPack": "ultra" },
+    { "id": "explorer-of-smiles-ii",    "displayName": "Explorer of Smiles II", "designer": "Raphael Lopes", "standardPack": "ultra", "insertAfterNativeRow": 24 },
+    { "id": "gorilla-gus-ii",           "displayName": "Gorilla Gus II",        "designer": "Alfrey Davilla", "standardPack": "ultra", "insertAfterNativeRow": 32 },
+    { "id": "the-little-prince-ii",     "displayName": "The Little Prince II",  "designer": "Anh Nguyen",     "standardPack": "ultra", "insertAfterNativeRow": 6 },
+    { "id": "under-the-tree-ii",        "displayName": "Under the Tree II",     "designer": "Qi Sandor",      "standardPack": "ultra", "insertAfterNativeRow": 56 },
+    { "id": "under-the-tree-iii",       "displayName": "Under the Tree III",    "designer": "Qi Sandor",      "standardPack": "ultra", "insertAfterNativeRow": 56 },
+    { "id": "wish-maker-ii",            "displayName": "Wish Maker II",         "designer": "Michael Myers",  "standardPack": "ultra", "insertAfterNativeRow": 7 }
   ]
 }

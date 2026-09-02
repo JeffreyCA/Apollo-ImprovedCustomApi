@@ -195,12 +195,87 @@ static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pinned separator nodes (issues #963, #911)
+// ---------------------------------------------------------------------------
+// A one-shot didLoad recolor of these hairlines is not enough: Apollo repaints
+// them AFTER our write, from Swift-internal colour passes with no ObjC entry
+// point to hook (Apollo 1.15.11 addresses, for the next RE session):
+//   * when the full post arrives, CommentsHeaderSectionController re-binds the
+//     header node's link and re-runs its colour pass (sub_1004f2384 ->
+//     sub_1005685c4 -> sub_10056affc), repainting both header hairlines with
+//     the shared gray-role colour (sub_10068cda0) — issue #963's two stock
+//     lines around the quick bar "after loading the whole thread";
+//   * on scene foreground / appearance re-evaluation, a Swift-vtable
+//     "apply colours" override on each cell class (sub_10056ca1c for the
+//     header, sub_1003ad1c8 for ThinSeparatorCellNode) runs the same pass —
+//     issue #911's separators reverting after backgrounding the app.
+// Every one of those passes funnels through -[ASDisplayNode
+// setBackgroundColor:] on the same node instance (created once, at cell init),
+// so instead of chasing each trigger, pin the node itself: isa-swizzle it onto
+// a dynamic subclass whose setBackgroundColor: rewrites any incoming colour to
+// the theme's Separator token while a custom theme is enabled, and passes
+// writes through untouched when it isn't. The subclass overrides nothing ASDK
+// inspects at node init, and the pin is installed from didLoad (main thread,
+// node quiescent).
+static Class ApolloThemePinnedSeparatorClassForBase(Class base) {
+    static NSMutableDictionary<NSString *, Class> *sPinnedClasses;  // main-thread only (didLoad)
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ sPinnedClasses = [NSMutableDictionary new]; });
+    NSString *baseName = NSStringFromClass(base);
+    Class cached = sPinnedClasses[baseName];
+    if (cached) return cached;
+
+    NSString *name = [@"ApolloRebornPinnedSeparator_" stringByAppendingString:baseName];
+    Class pinned = objc_getClass(name.UTF8String);
+    if (!pinned) {
+        SEL sel = @selector(setBackgroundColor:);
+        Method proto = class_getInstanceMethod(base, sel);
+        if (!proto) return Nil;
+        pinned = objc_allocateClassPair(base, name.UTF8String, 0);
+        if (!pinned) return Nil;
+        // Message super from `base` explicitly rather than from
+        // class_getSuperclass(object_getClass(node)) — if KVO ever stacks its
+        // own subclass on top of the pin, the latter would loop back into this
+        // IMP forever.
+        IMP imp = imp_implementationWithBlock(^(id node, UIColor *color) {
+            UIColor *out = color;
+            if (color && ApolloThemeCurrentSnapshot()->enabled) {
+                UIColor *separator = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
+                if (separator) out = separator;
+            }
+            if (out != color && sDebugLogging.load(std::memory_order_relaxed)) {
+                ApolloLog(@"ThemeRuntime: pinned separator %p rewrote #%06X -> Separator",
+                          node, ApolloThemeRGBFromUIColor(color));
+            }
+            struct objc_super sup = { node, base };
+            ((void (*)(struct objc_super *, SEL, UIColor *))objc_msgSendSuper)(&sup, sel, out);
+        });
+        class_addMethod(pinned, sel, imp, method_getTypeEncoding(proto));
+        objc_registerClassPair(pinned);
+    }
+    sPinnedClasses[baseName] = pinned;
+    return pinned;
+}
+
+static void ApolloThemePinSeparatorNode(ASDisplayNode *node) {
+    if (!node) return;
+    const char *cname = class_getName(object_getClass(node));
+    if (strncmp(cname, "ApolloRebornPinnedSeparator_", 28) == 0) return;  // already pinned
+    if (strncmp(cname, "NSKVONotifying_", 15) == 0) return;  // never slide under a KVO isa
+    Class pinned = ApolloThemePinnedSeparatorClassForBase(object_getClass(node));
+    if (pinned) object_setClass(node, pinned);
+}
+
 static void ApplyThemeThinSeparatorNode(_TtC6Apollo21ThinSeparatorCellNode *cellNode) {
     if (!ApolloThemeCurrentSnapshot()->enabled || !cellNode) return;
     Ivar separatorIvar = class_getInstanceVariable(object_getClass(cellNode), "separatorNode");
     ASDisplayNode *separatorNode = separatorIvar ? object_getIvar(cellNode, separatorIvar) : nil;
     UIColor *separator = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
-    if (separatorNode && separator) separatorNode.backgroundColor = separator;
+    if (separatorNode && separator) {
+        ApolloThemePinSeparatorNode(separatorNode);
+        separatorNode.backgroundColor = separator;
+    }
 }
 
 static ASDisplayNode *ApolloThemeObjectIvar(id owner, const char *name) {
@@ -216,8 +291,14 @@ static void ApplyThemeCommentsHeaderSeparators(_TtC6Apollo22CommentsHeaderCellNo
 
     ASDisplayNode *quickBarSeparator = ApolloThemeObjectIvar(headerNode, "quickBarSeparatorNode");
     ASDisplayNode *commentsSeparator = ApolloThemeObjectIvar(headerNode, "commentsSeparatorNode");
-    if (quickBarSeparator) quickBarSeparator.backgroundColor = separator;
-    if (commentsSeparator) commentsSeparator.backgroundColor = separator;
+    if (quickBarSeparator) {
+        ApolloThemePinSeparatorNode(quickBarSeparator);
+        quickBarSeparator.backgroundColor = separator;
+    }
+    if (commentsSeparator) {
+        ApolloThemePinSeparatorNode(commentsSeparator);
+        commentsSeparator.backgroundColor = separator;
+    }
 }
 
 static void RecordImageBounds(const struct mach_header *mh, intptr_t slide, uintptr_t *outStart, uintptr_t *outEnd) {
@@ -1973,7 +2054,10 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 // Hopper (Apollo 1.15.11, sub_1003acddc) shows separatorNode receiving
 // sub_10068cda0: Apollo's shared gray/muted-text palette helper. Override the
 // semantic sink after the cell finishes loading so the line follows the
-// Separators editor token without globally reclassifying muted text colors.
+// Separators editor token without globally reclassifying muted text colors —
+// and pin the node so Apollo's later colour passes (foreground/appearance
+// re-runs of sub_1003acddc via its vtable thunk sub_1003ad1c8, issue #911)
+// can't repaint it back to the stock gray.
 %hook _TtC6Apollo21ThinSeparatorCellNode
 
 - (void)didLoad {
@@ -2044,7 +2128,10 @@ static void ApolloThemeRestoreOverlayPillText(id node) {
 
 // The post header uses its own pair of ASDisplayNode hairlines, so these do not
 // pass through UITableView or ThinSeparatorCellNode. Apply the same semantic
-// separator token once Apollo has finished constructing/loading the header.
+// separator token once Apollo has finished constructing/loading the header,
+// and pin both nodes: the full-post rebind repaints them right after load
+// (issue #963's two stock lines around the quick bar) and the foreground
+// colour pass repaints them again (issue #911) — see the pin comment above.
 %hook _TtC6Apollo22CommentsHeaderCellNode
 
 - (void)didLoad {

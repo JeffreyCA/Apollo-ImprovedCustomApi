@@ -315,6 +315,19 @@ static const CGFloat kApolloFeedGalleryReleaseHandOffOverscroll = 16.0;
 // decides from release position and needs no velocity at all.
 static const CGFloat kApolloFeedGalleryHandOffMinimumVelocity = 150.0;
 
+// Flick criterion for the release path. A real flick past the first/last page
+// releases almost immediately, before rubber-band travel reaches the 16pt
+// positional threshold above — the finger is gone while the overscroll is
+// still small, so the positional test alone reads the release as a bounce.
+// (Synthetic sim drags always release fully displaced, which is why the miss
+// only shows up on device.) UIScrollView's willEndDragging velocity is
+// reliable at release (unlike the begin-time hysteresis read), so a release
+// that is past the edge at all AND still moving past it commits too. Values:
+// same 150pt/s floor as the begin path, expressed in UIScrollView's pt/ms;
+// 2pt of overscroll to ignore boundary-pixel noise on a stationary release.
+static const CGFloat kApolloFeedGalleryReleaseFlickVelocity = 0.15;
+static const CGFloat kApolloFeedGalleryReleaseFlickOverscroll = 2.0;
+
 // ApolloNavigationController keeps the pages popped by swipe-back in a Swift
 // [UIViewController] ivar named poppedViewControllers; its goForward command
 // and right-side navigation pan re-push from it (RE: the class's ivar list and
@@ -458,6 +471,10 @@ static BOOL ApolloFeedGalleryCanGoForward(UINavigationController *navigationCont
 @property (nonatomic) BOOL needsPageGeometry;
 @property (nonatomic) BOOL dragBeganAtLeadingEdge;
 @property (nonatomic) BOOL dragBeganAtTrailingEdge;
+// UIScrollView's release velocity (points/ms, sign = direction contentOffset
+// is heading), captured in scrollViewWillEndDragging for the release-time
+// hand-off below. Reset when a new drag begins.
+@property (nonatomic) CGFloat releaseVelocityX;
 - (void)configureWithItems:(NSArray<NSDictionary *> *)items
                  albumNode:(id)albumNode
                       nsfw:(BOOL)nsfw
@@ -841,12 +858,14 @@ static BOOL ApolloFeedGalleryCanGoForward(UINavigationController *navigationCont
     self.dragBeganAtLeadingEdge = maximumOffset > 0.5 && scrollView.contentOffset.x <= 0.5;
     self.dragBeganAtTrailingEdge = maximumOffset > 0.5 &&
         scrollView.contentOffset.x >= maximumOffset - 0.5;
+    self.releaseVelocityX = 0.0;
 }
 
 - (void)scrollViewWillEndDragging:(UIScrollView *)scrollView
                      withVelocity:(CGPoint)velocity
               targetContentOffset:(inout CGPoint *)targetContentOffset {
     if (scrollView != self.scrollView || !targetContentOffset) return;
+    self.releaseVelocityX = velocity.x;
     CGFloat width = CGRectGetWidth(scrollView.bounds);
     if (width <= 0.0) return;
     [self apollo_loadNearIndex:[self apollo_clampIndex:(NSInteger)llround(targetContentOffset->x / width)]];
@@ -863,11 +882,30 @@ static BOOL ApolloFeedGalleryCanGoForward(UINavigationController *navigationCont
     CGFloat maximumOffset = scrollView.contentSize.width - CGRectGetWidth(scrollView.bounds);
     if (maximumOffset <= 0.5) return;
     CGFloat offset = scrollView.contentOffset.x;
+    CGFloat velocityX = self.releaseVelocityX;
+    // Two ways a release past the edge commits: a deliberate pull held 16pt of
+    // overscroll deep, or a flick — barely past the edge but still moving past
+    // it at release (see the flick constants above for why both are needed).
     BOOL pastLeading = self.dragBeganAtLeadingEdge &&
-        offset < -kApolloFeedGalleryReleaseHandOffOverscroll;
+        (offset < -kApolloFeedGalleryReleaseHandOffOverscroll ||
+         (offset < -kApolloFeedGalleryReleaseFlickOverscroll &&
+          velocityX <= -kApolloFeedGalleryReleaseFlickVelocity));
     BOOL pastTrailing = self.dragBeganAtTrailingEdge &&
-        offset > maximumOffset + kApolloFeedGalleryReleaseHandOffOverscroll;
-    if (!pastLeading && !pastTrailing) return;
+        (offset > maximumOffset + kApolloFeedGalleryReleaseHandOffOverscroll ||
+         (offset > maximumOffset + kApolloFeedGalleryReleaseFlickOverscroll &&
+          velocityX >= kApolloFeedGalleryReleaseFlickVelocity));
+    if (!pastLeading && !pastTrailing) {
+        // An edge-started drag that released overscrolled but didn't qualify is
+        // exactly the case that separates "feature off/unavailable" from "the
+        // thresholds missed a real gesture" in user logs — keep it visible.
+        BOOL overLeading = self.dragBeganAtLeadingEdge && offset < -0.5;
+        BOOL overTrailing = self.dragBeganAtTrailingEdge && offset > maximumOffset + 0.5;
+        if (overLeading || overTrailing) {
+            ApolloLog(@"[FeedGallery] edge release below thresholds (overscroll=%.1f velocity=%.2fpt/ms)",
+                      overLeading ? -offset : offset - maximumOffset, velocityX);
+        }
+        return;
+    }
 
     BOOL rightToLeft = self.effectiveUserInterfaceLayoutDirection ==
         UIUserInterfaceLayoutDirectionRightToLeft;
@@ -879,14 +917,14 @@ static BOOL ApolloFeedGalleryCanGoForward(UINavigationController *navigationCont
     if (navigationController.transitionCoordinator) return;
     if (wantsBack) {
         if (navigationController.viewControllers.count <= 1) return;
-        ApolloLog(@"[FeedGallery] released past edge; navigating back (overscroll=%.0f)",
-                  pastLeading ? -offset : offset - maximumOffset);
+        ApolloLog(@"[FeedGallery] released past edge; navigating back (overscroll=%.1f velocity=%.2f)",
+                  pastLeading ? -offset : offset - maximumOffset, velocityX);
         [navigationController popViewControllerAnimated:YES];
     } else {
         if (!ApolloFeedGalleryCanGoForward(navigationController)) return;
         if (![navigationController respondsToSelector:@selector(goForward)]) return;
-        ApolloLog(@"[FeedGallery] released past edge; navigating forward (overscroll=%.0f)",
-                  pastLeading ? -offset : offset - maximumOffset);
+        ApolloLog(@"[FeedGallery] released past edge; navigating forward (overscroll=%.1f velocity=%.2f)",
+                  pastLeading ? -offset : offset - maximumOffset, velocityX);
         ((void (*)(id, SEL))objc_msgSend)(navigationController, @selector(goForward));
     }
 }
@@ -1165,8 +1203,9 @@ static void ApolloFeedGallerySettingChanged(void) {
     sApolloFeedGalleryPINAvailable =
         [UIImageView instancesRespondToSelector:@selector(pin_setImageFromURL:)] &&
         [UIImageView instancesRespondToSelector:@selector(pin_cancelImageDownload)];
-    ApolloLog(@"[FeedGallery] loaded enabled=%d pinAvailable=%d",
-              (int)sFeedGalleryCarousel, (int)sApolloFeedGalleryPINAvailable);
+    ApolloLog(@"[FeedGallery] loaded enabled=%d edgeNav=%d pinAvailable=%d",
+              (int)sFeedGalleryCarousel, (int)sFeedGalleryEdgeSwipeNav,
+              (int)sApolloFeedGalleryPINAvailable);
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloFeedGalleryCarouselChangedNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
