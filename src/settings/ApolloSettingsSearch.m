@@ -599,10 +599,17 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
 
 #pragma mark - Pull to search
 
-// The nav-bar search field is always visible, but a deliberate downward pull on
-// the settings list also opens it. Overscroll is read off the table's own pan
-// recognizer, so Apollo's scroll delegate remains untouched.
-static const CGFloat kPullActivateThreshold = 78.0;
+// A deliberate downward pull on the settings list opens search outright, rather
+// than only revealing the field the way the system does.
+//
+// This coexists with the native reveal rather than replacing it. UIKit spends
+// the first part of a downward drag expanding the search bar back into the
+// navigation palette, and grows adjustedContentInset.top by exactly what it
+// expands — so the overscroll below stays at zero for that whole stretch and
+// only starts counting once the field is fully on screen. Keep pulling from
+// there and search opens. Overscroll is read off the table's own pan
+// recognizer, so Apollo's scroll delegate is untouched.
+static const CGFloat kPullActivateThreshold = 62.0;
 static const CGFloat kPullRevealStart = 6.0;
 
 @interface ApolloSettingsSearchPullToActivate : NSObject
@@ -639,6 +646,9 @@ static const CGFloat kPullRevealStart = 6.0;
     [host addSubview:label];
 
     [container addSubview:host];
+    // Anchored to the safe area, which tracks the navigation palette: while the
+    // system is still expanding the search bar the affordance rides down with
+    // it, then sits in the overscroll gap the pull opens underneath the field.
     UILayoutGuide *safe = container.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [host.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6.0],
@@ -749,6 +759,11 @@ void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
     results.searchController = searchController;
 
     settingsVC.navigationItem.searchController = searchController;
+    // Start pinned so the bar is laid out visible on the very first appearance
+    // (Apollo's Settings root has no large title, and with scroll-away on from
+    // the start UIKit parks the bar off-screen until you pull down — the search
+    // field is then invisible on arrival). ApolloSettingsSearchEnableScrollAway
+    // flips this to the native scroll-away behavior once the screen is up.
     settingsVC.navigationItem.hidesSearchBarWhenScrolling = NO;
     settingsVC.definesPresentationContext = YES;
 
@@ -765,4 +780,45 @@ void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
     }
 
     ApolloLog(@"[SettingsSearch] attached to %@", settingsVC);
+}
+
+static char kApolloSettingsSearchScrollAwayKey;
+
+void ApolloSettingsSearchEnableScrollAway(UIViewController *settingsVC) {
+    if (!settingsVC || !objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
+    // Once only, and only after the first appearance: hand the bar over to the
+    // system's scroll-away behavior with it already on screen, so it collapses
+    // as the list scrolls up and comes back on a scroll to the top. Re-running
+    // this on later appearances would re-expand the bar mid-scroll when you pop
+    // back to a screen you had scrolled down.
+    if (objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchScrollAwayKey)) return;
+    objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchScrollAwayKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    settingsVC.navigationItem.hidesSearchBarWhenScrolling = YES;
+    ApolloLog(@"[SettingsSearch] scroll-away enabled");
+}
+
+// Tapping an already-selected tab makes Apollo scroll that tab's table to
+// -safeAreaInsets.top (SceneDelegate's tabBarController:shouldSelectViewController:).
+// With the search bar scrolled away that measures the navigation bar alone, so
+// the list lands one search-bar short of the real top and the field stays
+// hidden — the entry point vanishes for a tap that was meant to bring the user
+// home. Put the bar back in the palette *before* Apollo measures, so its own
+// arithmetic carries the field along, then hand it back to scroll-away once the
+// scroll has settled.
+void ApolloSettingsSearchPrepareForScrollToTop(UIViewController *settingsVC) {
+    if (!settingsVC || !objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
+    // Still pinned (before the first -viewDidAppear:): nothing has scrolled away.
+    if (!objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchScrollAwayKey)) return;
+
+    settingsVC.navigationItem.hidesSearchBarWhenScrolling = NO;
+    [settingsVC.view.window layoutIfNeeded];
+}
+
+void ApolloSettingsSearchFinishScrollToTop(UIViewController *settingsVC) {
+    if (!settingsVC || !objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
+    if (!objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchScrollAwayKey)) return;
+
+    settingsVC.navigationItem.hidesSearchBarWhenScrolling = YES;
 }

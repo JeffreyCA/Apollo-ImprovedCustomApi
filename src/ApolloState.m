@@ -74,6 +74,8 @@ BOOL sInfoRowTapTranslation = YES; // effective default ON via registerDefaults 
 NSInteger sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleAutomatic;
 BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
+NSInteger sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleClassic;
+NSInteger sSubredditFeedLayout = ApolloSubredditFeedLayoutRows;
 BOOL sHideSubredditListDescriptions = NO;
 BOOL sHideMultiredditDescriptions = NO;
 BOOL sEnableFlairColors = NO;
@@ -143,6 +145,8 @@ NSString *sTranslationTargetLanguage = nil;
 NSString *sTranslationProvider = nil;
 NSString *sLibreTranslateURL = nil;
 NSString *sLibreTranslateAPIKey = nil;
+NSString *sMicrosoftTranslateAPIKey = nil;
+NSString *sMicrosoftTranslateRegion = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
 BOOL sAppleTranslateSheet = NO;
 

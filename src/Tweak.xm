@@ -21,6 +21,7 @@
 #import "ApolloBarkNotifications.h"
 #import "ApolloLiquidGlassIconSelectionState.h"
 #import "ApolloState.h"
+#import "ApolloTranslation.h"
 #import "Tweak.h"
 #import "settings/CustomAPIViewController.h"
 #import "Version.h"
@@ -3654,6 +3655,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyTrendingSubredditsSource: defaultTrendingSubredditsSource,
                                     UDKeyReadPostMaxCount: @0,
                                     UDKeySubredditListEnhancements: @YES,
+                                    UDKeySubredditFeedIconStyle: @(ApolloSubredditFeedIconStyleClassic),
+                                    UDKeySubredditFeedLayout: @(ApolloSubredditFeedLayoutRows),
                                     UDKeyModernSubredditDividers: @YES,
                                     UDKeyShowDeletedComments: @NO,
                                     UDKeyTapToRevealDeletedComments: @NO,
@@ -3735,8 +3738,10 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyTranslatePostTitles: @NO,
                                     UDKeyTranslationTargetLanguage: @"",
                                     UDKeyTranslationProviderUserSelected: @NO,
-                                    UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
+                                    UDKeyLibreTranslateURL: @"https://libretranslate.com/translate",
                                     UDKeyLibreTranslateAPIKey: @"",
+                                    UDKeyMicrosoftTranslateAPIKey: @"",
+                                    UDKeyMicrosoftTranslateRegion: @"",
                                     UDKeyTranslationSkipLanguages: @[],
                                     UDKeyAppleTranslateSheet: @NO,
                                     UDKeyEnableAISummaries: @NO,
@@ -4032,6 +4037,18 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
+    sSubredditFeedIconStyle = [standardDefaults integerForKey:UDKeySubredditFeedIconStyle];
+    sSubredditFeedLayout = [standardDefaults integerForKey:UDKeySubredditFeedLayout];
+    if (sSubredditFeedIconStyle < ApolloSubredditFeedIconStyleClassic ||
+        sSubredditFeedIconStyle > ApolloSubredditFeedIconStyleSolidTile) {
+        sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleClassic;
+        [standardDefaults setInteger:sSubredditFeedIconStyle forKey:UDKeySubredditFeedIconStyle];
+    }
+    if (sSubredditFeedLayout < ApolloSubredditFeedLayoutRows ||
+        sSubredditFeedLayout > ApolloSubredditFeedLayoutIconDock) {
+        sSubredditFeedLayout = ApolloSubredditFeedLayoutRows;
+        [standardDefaults setInteger:sSubredditFeedLayout forKey:UDKeySubredditFeedLayout];
+    }
     sHideSubredditListDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideSubredditListDescriptions];
     sHideMultiredditDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideMultiredditDescriptions];
     sEnableFlairColors = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
@@ -4055,6 +4072,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
         sTranslationProvider = @"libre";
     } else if ([provider isEqualToString:@"google"]) {
         sTranslationProvider = @"google";
+    } else if ([provider isEqualToString:@"microsoft"]) {
+        sTranslationProvider = @"microsoft";
     } else if ([provider isEqualToString:@"apple"] && IsAppleTranslationSupported()) {
         sTranslationProvider = @"apple";
     } else {
@@ -4064,11 +4083,22 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
         [standardDefaults setBool:NO forKey:UDKeyTranslationProviderUserSelected];
     }
 
+    // Normalizes empty AND migrates the dead libretranslate.de public-instance
+    // default many users have persisted (issue #995) to the current default.
     NSString *libreURL = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyLibreTranslateURL];
-    sLibreTranslateURL = [libreURL length] > 0 ? [libreURL copy] : @"https://libretranslate.de/translate";
+    sLibreTranslateURL = [ApolloNormalizedLibreTranslateURLSetting(libreURL) copy];
+    if (libreURL.length > 0 && ![sLibreTranslateURL isEqualToString:libreURL]) {
+        // Persist the migration so the settings screen shows the working URL.
+        [standardDefaults setObject:sLibreTranslateURL forKey:UDKeyLibreTranslateURL];
+    }
 
     NSString *libreAPIKey = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = [libreAPIKey length] > 0 ? [libreAPIKey copy] : nil;
+
+    NSString *msKey = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyMicrosoftTranslateAPIKey];
+    sMicrosoftTranslateAPIKey = [msKey length] > 0 ? [msKey copy] : nil;
+    NSString *msRegion = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyMicrosoftTranslateRegion];
+    sMicrosoftTranslateRegion = [msRegion length] > 0 ? [msRegion copy] : nil;
 
     {
         id raw = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationSkipLanguages];

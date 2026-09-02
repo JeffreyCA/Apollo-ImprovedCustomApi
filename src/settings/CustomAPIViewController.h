@@ -29,6 +29,11 @@
 @interface ApolloSubredditsSettingsViewController : CustomAPIViewController // Features → Subreddits
 @end
 
+// Container for the pinned preview and its declarative form-table child.
+@interface ApolloFeedShortcutsSettingsViewController : UIViewController // Subreddits → Feed Shortcuts
+- (instancetype)initWithStyle:(UITableViewStyle)style;
+@end
+
 @interface ApolloInterfaceSettingsViewController : CustomAPIViewController // Features → Interface
 @end
 

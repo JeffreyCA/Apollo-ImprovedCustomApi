@@ -5,6 +5,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloFollowingSection.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "ApolloAccountCredentials.h"
@@ -170,7 +171,14 @@ static NSString *ApolloMultiEditLeftmostLabelText(UIView *root) {
 
 // Resolves a section's header title (uppercased) by checking the visible
 // header first, then asking the delegate to build one.
+// While ApolloFollowingSection's section remap is engaged, the index paths
+// reaching this module's hooks are already in Apollo's NATIVE section space,
+// where the on-screen header walk (visible space) would lie — ask that module
+// for the canonical native title instead.
 static NSString *ApolloMultiEditSectionTitle(id delegate, UITableView *tableView, NSInteger section) {
+    NSString *canonical = ApolloFollowingCanonicalTitleForNativeSection(tableView, section);
+    if (canonical) return canonical.length > 0 ? canonical : nil;
+
     if (!tableView || section < 0 || section >= tableView.numberOfSections) return nil;
 
     UIView *header = [tableView headerViewForSection:section];

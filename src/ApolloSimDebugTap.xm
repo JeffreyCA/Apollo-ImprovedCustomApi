@@ -20,6 +20,7 @@
 #import "ApolloCommon.h"
 #import "ApolloFloatingTabs.h"
 #import "ApolloLinkPreviewFetcher.h"
+#import "ApolloTranslation.h"
 #import "ApolloGalleryImageLoader.h"
 #import "ApolloWebTextDecoding.h"
 #import "ApolloState.h"
@@ -553,6 +554,15 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
                           urlString, preview.siteName ?: @"(nil)", preview.title ?: @"(nil)",
                           preview.desc ?: @"(nil)", preview.imageURL.absoluteString ?: @"(nil)");
             }];
+            return;
+        }
+        // "translate <google|libre|auto> <text>" command: run text through the
+        // real translation provider pipeline and log the result. Needs no
+        // Reddit session — isolates provider/network failures (issue #995).
+        if ([contents hasPrefix:@"translate "]) {
+            NSString *spec = [[contents substringFromIndex:10] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            ApolloTranslationDebugProbe(spec);
             return;
         }
         if ([contents hasPrefix:@"text "]) {

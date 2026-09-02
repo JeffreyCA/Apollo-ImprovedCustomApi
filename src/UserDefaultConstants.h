@@ -37,9 +37,19 @@ static NSString *const UDKeyRandomSubredditsSource = @"RandomSubredditsSource";
 static NSString *const UDKeyRandNsfwSubredditsSource = @"RandNsfwSubredditsSource";
 static NSString *const UDKeyTrendingSubredditsSource = @"TrendingSubredditsSource";
 static NSString *const UDKeyTrendingSubredditsLimit = @"TrendingSubredditsLimit";
-// Master toggle (short-term fix) for all subreddit list polish/enhancements. Default
-// YES. Modern Subreddit Dividers depends on it — that row hides when this is off.
+// Master toggle for subreddit list polish/enhancements. Default YES. Feed
+// Shortcuts is independent; Modern Subreddit Dividers remains a sub-option.
 static NSString *const UDKeySubredditListEnhancements = @"SubredditListEnhancements";
+// Home / Popular / All / Moderator icon appearance and arrangement. Independent
+// of Subreddit List Enhancements. Defaults: Classic icons + Rows.
+static NSString *const UDKeySubredditFeedIconStyle = @"SubredditFeedIconStyle";
+static NSString *const UDKeySubredditFeedLayout = @"SubredditFeedLayout";
+// Apollo-native visibility preferences for the optional meta-feed rows. Reborn
+// mirrors these on Feed Shortcuts and deliberately keeps Home always visible.
+static NSString *const UDKeyHideRPopularRedditList = @"HideRPopularRedditList";
+static NSString *const UDKeyHideRAllRedditList = @"HideRAllRedditList";
+static NSString *const UDKeyHideModeratorRedditList = @"HideModeratorRedditList";
+static NSString *const ApolloFeedShortcutsChangedNotification = @"ApolloFeedShortcutsChangedNotification";
 // Subreddits the user moderates but chose to hide from the Subreddits list
 // (Reddit offers no way to leave or delete some dead subreddits). Array of
 // display names, compared case-insensitively.
@@ -57,6 +67,20 @@ static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = 
 // contains). Default NO. See ApolloMultiredditEdit.xm.
 static NSString *const UDKeyHideMultiredditDescriptions = @"HideMultiredditDescriptions";
 static NSString *const ApolloHideMultiredditDescriptionsChangedNotification = @"ApolloHideMultiredditDescriptionsChangedNotification";
+// Pull followed users (the u_<name> profile "subreddits" Reddit mixes into
+// subscriptions) out of the A-Z sections into a dedicated FOLLOWING section in
+// the Subreddits list. Default NO. See ApolloFollowingSection.xm.
+static NSString *const UDKeySeparateFollowedUsers = @"SeparateFollowedUsers";
+// Display order of the Favorites/Multireddits/Moderator/Following sections in
+// the Subreddits list: an array of the tokens declared in
+// ApolloFollowingSection.h. Missing/unknown tokens fall back to the native
+// order (favorites, multireddits, moderator, following).
+static NSString *const UDKeySubredditSectionOrder = @"SubredditSectionOrder";
+// Custom display order of the FOLLOWING section's rows (array of u_<name>
+// subscription names, matched case-insensitively). Users not in the array
+// append in their natural alphabetical order.
+static NSString *const UDKeyFollowedUsersOrder = @"FollowedUsersOrder";
+static NSString *const ApolloSubredditSectionsChangedNotification = @"ApolloSubredditSectionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
@@ -323,10 +347,16 @@ static NSString *const UDKeyShowTranslationTitleDetails = @"ShowTranslationTitle
 static NSString *const UDKeyTranslationMarkerUseThemeColor = @"TranslationMarkerUseThemeColor";
 static NSString *const UDKeyTranslatePostTitles = @"TranslatePostTitles";
 static NSString *const UDKeyTranslationTargetLanguage = @"TranslationTargetLanguage";
-static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre | apple
+static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre | apple | microsoft
 static NSString *const UDKeyTranslationProviderUserSelected = @"TranslationProviderUserSelected";
 static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
+// Microsoft (Azure AI Translator) — bring-your-own-key, like LibreTranslate.
+// Azure's free F0 tier is 2M characters/month, so unlike the free Google
+// endpoints it is an official, documented API that won't rate-limit ordinary
+// use. Region is required for regional resources ("global" for global ones).
+static NSString *const UDKeyMicrosoftTranslateAPIKey = @"MicrosoftTranslateAPIKey";
+static NSString *const UDKeyMicrosoftTranslateRegion = @"MicrosoftTranslateRegion";
 // Array<String> of 2-letter language codes to leave untranslated (detected source language).
 static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";
 // Redirects Apollo's OWN Translate button (the native action-sheet item on
