@@ -495,7 +495,9 @@ static BOOL ApolloSubredditIndexStringLooksLikeSubredditName(NSString *string) {
             @"Posts across all subreddits",
             @"Posts from moderated subreddits",
             @"FAVORITES",
-            @"MODERATOR"
+            @"MODERATOR",
+            @"MULTIREDDITS",
+            @"FOLLOWING" // ApolloFollowingSection's synthetic section
         ]];
     });
     if ([blocked containsObject:trimmed]) return NO;
@@ -514,6 +516,7 @@ static BOOL ApolloSubredditIndexStringLooksLikeHeaderTitle(NSString *string) {
     NSString *trimmed = [string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trimmed.length == 0) return NO;
     if ([trimmed isEqualToString:@"FAVORITES"] || [trimmed isEqualToString:@"MODERATOR"] || [trimmed isEqualToString:@"MULTIREDDITS"]) return YES;
+    if ([trimmed isEqualToString:@"FOLLOWING"]) return YES; // ApolloFollowingSection's synthetic section
     if (trimmed.length == 1) {
         unichar ch = [trimmed characterAtIndex:0];
         if ([[NSCharacterSet uppercaseLetterCharacterSet] characterIsMember:ch]) return YES;

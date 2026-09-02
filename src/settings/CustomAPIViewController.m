@@ -48,6 +48,8 @@
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/ApolloSubredditLayoutViewController.h"
+#import "settings/ApolloSubredditSectionsViewController.h"
+#import "ApolloFollowingSection.h"
 #import "settings/TranslationSettingsViewController.h"
 #import "PictureInPictureViewController.h"
 #import "TagFiltersViewController.h"
@@ -2034,23 +2036,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (ApolloSettingsSection *)buildSubredditsMainSection {
     __weak typeof(self) weakSelf = self;
 
-    ApolloSettingsRow *enhancements =
-        [ApolloSettingsRow switchRowWithID:@"sub.enhancements"
-                                     title:@"Subreddit List Enhancements"
-                                      isOn:^BOOL { return sSubredditListEnhancements; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf subredditListEnhancementsSwitchToggled:sender]; }];
-
-    ApolloSettingsRow *modernDividers =
-        [ApolloSettingsRow switchRowWithID:@"sub.modernDividers"
-                                     title:@"Modern Subreddit Dividers"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf modernSubredditDividersSwitchToggled:sender]; }];
-    // Sub-option: only exists while Subreddit List Enhancements is on.
-    modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
-
     // Deliberately NOT gated on the enhancements master: hides the description
     // subtitles under Home/Popular/All/Moderator in both classic and modern lists.
-    // A subreddit-LIST feature, so it stays here beside the list toggles rather
+    // A subreddit-LIST feature, so it stays here beside the list rows rather
     // than moving into the Subreddit Layout (header) screen below.
     ApolloSettingsRow *hideDescriptions =
         [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
@@ -2080,9 +2068,30 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return [[ApolloSubredditLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
+    // Pushes the dedicated Subreddit Sections screen: the FOLLOWING section
+    // for followed users, drag-to-reorder for the special sections, and a
+    // live preview of the list layout (see ApolloSubredditSectionsViewController).
+    ApolloSettingsRow *subredditSections =
+        [self hubDisclosureRowWithID:@"sub.sections"
+                                title:@"Subreddit Sections"
+                             subtitle:^NSString * { return [weakSelf subredditSectionsSummaryText]; }
+                                 push:^UIViewController * {
+            return [[ApolloSubredditSectionsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts. Multireddits show the subreddits they contain, or a custom description — tap a multireddit while editing the list to rename it or change its description. Hide Multireddit Descriptions blanks that line entirely."
-                                              rows:@[ enhancements, modernDividers, hideDescriptions, hideMultiredditDescriptions, subredditLayout ]];
+                                            footer:@"Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts. Multireddits show the subreddits they contain, or a custom description — tap a multireddit while editing the list to rename it or change its description. Hide Multireddit Descriptions blanks that line entirely. Subreddit Sections arranges the subreddit list (its style toggles live there); Subreddit Layout customizes subreddit pages."
+                                              rows:@[ hideDescriptions, hideMultiredditDescriptions, subredditSections, subredditLayout ]];
+}
+
+- (NSString *)subredditSectionsSummaryText {
+    BOOL separate = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySeparateFollowedUsers];
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *token in ApolloSubredditSectionsResolvedOrder()) {
+        if (!separate && [token isEqualToString:ApolloSubredditSectionTokenFollowing]) continue;
+        [parts addObject:ApolloSubredditSectionDisplayName(token)];
+    }
+    return [parts componentsJoinedByString:@" · "];
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -3535,23 +3544,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [self reloadRowWithID:@"api.redirectURI"];
 }
 
-- (void)subredditListEnhancementsSwitchToggled:(UISwitch *)sender {
-    BOOL wasOn = sSubredditListEnhancements;
-    sSubredditListEnhancements = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sSubredditListEnhancements forKey:UDKeySubredditListEnhancements];
-    if (sSubredditListEnhancements == wasOn) return;
-
-    // The Modern Dividers row only exists while the master toggle is on.
-    [self visibilityDidChange];
-
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
-}
-
-- (void)modernSubredditDividersSwitchToggled:(UISwitch *)sender {
-    sModernSubredditDividers = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sModernSubredditDividers forKey:UDKeyModernSubredditDividers];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
-}
+// Subreddit List Enhancements and Modern Subreddit Dividers live on the
+// Subreddit Sections screen now (ApolloSubredditSectionsViewController),
+// beside the live preview that shows what they change.
 
 - (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
     sHideSubredditListDescriptions = sender.isOn;
@@ -3949,6 +3944,12 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildSubredditsMainSection],
               [self buildSubredditsSourcesSection] ];
+}
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // Refresh the Subreddit Sections summary after returning from that screen
+    // (the order / Following toggle may have just changed).
+    [self reloadRowWithID:@"sub.sections"];
 }
 @end
 
