@@ -2861,13 +2861,13 @@ static UIImage *LGNormalizedEAPThumbnail(void) {
 
 static UITableViewCell *LGConfigureEAPCell(UITableViewCell *cell) {
     cell.textLabel.text = @"Icons Drop Test";
-    cell.detailTextLabel.text = @"EverythingApplePro";
+    cell.detailTextLabel.text = nil;
     cell.imageView.image = LGNormalizedEAPThumbnail();
     cell.imageView.contentMode = UIViewContentModeScaleAspectFit;
     cell.imageView.clipsToBounds = NO;
     BOOL selected = [UIApplication.sharedApplication.alternateIconName isEqualToString:kLGEAPIconID];
     LGSetApolloCellNativeCheckmark(cell, selected);
-    cell.accessibilityLabel = @"Icons Drop Test, EverythingApplePro";
+    cell.accessibilityLabel = @"Icons Drop Test";
     return cell;
 }
 
@@ -3088,7 +3088,7 @@ static void LGNormalizeNativeIconCellBackground(UITableViewCell *cell,
               tableView:(UITableView *)tableView
             atIndexPath:(NSIndexPath *)indexPath {
     [self apollo_applyPrimaryTextColorToCell:cell];
-    cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    if (_nativeTitleFont) cell.textLabel.font = _nativeTitleFont;
     cell.tintColor = ApolloThemeAccentColor() ?: tableView.tintColor;
     cell.selectedBackgroundView = nil;
     NSInteger rowCount = [self tableView:tableView numberOfRowsInSection:indexPath.section];
