@@ -120,20 +120,20 @@ extern BOOL sProfileShowSocialLinks;
 extern BOOL sProfileShowActions;
 extern NSInteger sProfileAvatarStyle; // 0 Full snoovatar, 1 Circle, 2 Square
 extern BOOL sShowSubredditHeaders;
-// Subreddit Layout density has three user-visible states:
-// New = sShowSubredditHeaders + sSubredditHeaderImmersive,
-// Classic = sShowSubredditHeaders + !sSubredditHeaderImmersive,
-// Native = !sShowSubredditHeaders (Apollo's current/pre-3.5 header).
+// Header Style maps onto the existing boolean preferences:
+// Immersive = sShowSubredditHeaders && sSubredditHeaderImmersive
+// Compact   = sShowSubredditHeaders && !sSubredditHeaderImmersive
+// Native    = !sShowSubredditHeaders
 extern BOOL sSubredditHeaderImmersive;
-// Per-section show switches on the subreddit header (banner / Join button /
-// display name) — same "turn off the bands you don't need" pattern as the
-// profile header's per-section switches.
 extern BOOL sSubredditShowBanner;
 extern BOOL sSubredditShowJoinButton;
 // Whether the community's big bold title (e.g. "Reddit Science") shows above
 // the r/name line. Direct on/off choice rather than the old auto-hide-if-
 // similar-to-r/name heuristic, so behavior is predictable across subreddits.
 extern BOOL sSubredditShowDisplayName;
+// Whether the r/name + member-count subtitle appears below the display name.
+extern BOOL sSubredditShowSubtitle;
+extern BOOL sSubredditShowDescription;
 // Backing booleans for the single Community Highlights mode picker:
 //   Off     = both NO
 //   Partial = sCommunityHighlights YES, sCommunityHighlightsWeb NO

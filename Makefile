@@ -76,6 +76,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSubredditCustomBannerCache.m \
     $(SRC_DIR)/ApolloSubredditCustomIconCache.m \
     $(SRC_DIR)/ApolloSubredditDefaultAssets.c \
+    $(SRC_DIR)/ApolloSubredditLayout.m \
     $(SRC_DIR)/ApolloImmersiveHeaderBackground.m \
     $(SRC_DIR)/ApolloIdentityHeaderLayout.m \
     $(SRC_DIR)/ApolloUserAvatars.xm \
@@ -238,6 +239,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSignInSplash.xm \
     $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
     $(SRC_DIR)/settings/CustomAPIViewController.m \
+    $(SRC_DIR)/settings/ApolloSubredditLayoutPreview.m \
     $(SRC_DIR)/settings/ApolloSubredditLayoutViewController.m \
     $(SRC_DIR)/settings/ApolloSubredditSectionsViewController.m \
     $(SRC_DIR)/settings/ApolloAISettingsViewController.m \
