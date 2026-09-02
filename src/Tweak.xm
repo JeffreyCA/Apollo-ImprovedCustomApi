@@ -21,6 +21,7 @@
 #import "ApolloBarkNotifications.h"
 #import "ApolloLiquidGlassIconSelectionState.h"
 #import "ApolloState.h"
+#import "ApolloTranslation.h"
 #import "Tweak.h"
 #import "settings/CustomAPIViewController.h"
 #import "Version.h"
@@ -3662,11 +3663,15 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyFeedTextPostThumbnails: @YES,
                                     UDKeyFeedGalleryCarousel: @YES,
-                                    UDKeyFeedGalleryEdgeSwipeNav: @YES,
+                                    UDKeyFeedGalleryEdgeSwipeNav: @NO,
+                                    UDKeyForwardSwipeForgetAfterScrolling: @NO,
                                     UDKeySwipeUpForComments: @YES,
                                     UDKeySportsClipsInlineVideo: @YES,
                                     UDKeyDevvitInteractivePosts: @NO,
                                     UDKeyDevvitFeedWidgets: @YES,
+                                    UDKeyFloatingPostTabs: @NO,
+                                    UDKeyFloatingPostTabsMagnet: @YES,
+                                    UDKeyFloatingPostTabsPreview: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0,
                                     UDKeyUnmuteFeedVideos: @0,
@@ -3730,8 +3735,10 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyTranslatePostTitles: @NO,
                                     UDKeyTranslationTargetLanguage: @"",
                                     UDKeyTranslationProviderUserSelected: @NO,
-                                    UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
+                                    UDKeyLibreTranslateURL: @"https://libretranslate.com/translate",
                                     UDKeyLibreTranslateAPIKey: @"",
+                                    UDKeyMicrosoftTranslateAPIKey: @"",
+                                    UDKeyMicrosoftTranslateRegion: @"",
                                     UDKeyTranslationSkipLanguages: @[],
                                     UDKeyAppleTranslateSheet: @NO,
                                     UDKeyEnableAISummaries: @NO,
@@ -3793,9 +3800,13 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sFeedTextPostThumbnails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails];
     sFeedGalleryCarousel = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedGalleryCarousel];
     sFeedGalleryEdgeSwipeNav = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedGalleryEdgeSwipeNav];
+    sForwardSwipeForgetAfterScrolling = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyForwardSwipeForgetAfterScrolling];
     sSwipeUpForComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySwipeUpForComments];
     sDevvitInteractivePosts = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts];
     sDevvitFeedWidgets = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets];
+    sFloatingPostTabs = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabs];
+    sFloatingPostTabsMagnet = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabsMagnet];
+    sFloatingPostTabsPreview = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabsPreview];
     sPreferredGIFFallbackFormat = ([[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sReadPostMaxCount = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyReadPostMaxCount];
     sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];
@@ -4034,6 +4045,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
         sTranslationProvider = @"libre";
     } else if ([provider isEqualToString:@"google"]) {
         sTranslationProvider = @"google";
+    } else if ([provider isEqualToString:@"microsoft"]) {
+        sTranslationProvider = @"microsoft";
     } else if ([provider isEqualToString:@"apple"] && IsAppleTranslationSupported()) {
         sTranslationProvider = @"apple";
     } else {
@@ -4043,11 +4056,22 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
         [standardDefaults setBool:NO forKey:UDKeyTranslationProviderUserSelected];
     }
 
+    // Normalizes empty AND migrates the dead libretranslate.de public-instance
+    // default many users have persisted (issue #995) to the current default.
     NSString *libreURL = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyLibreTranslateURL];
-    sLibreTranslateURL = [libreURL length] > 0 ? [libreURL copy] : @"https://libretranslate.de/translate";
+    sLibreTranslateURL = [ApolloNormalizedLibreTranslateURLSetting(libreURL) copy];
+    if (libreURL.length > 0 && ![sLibreTranslateURL isEqualToString:libreURL]) {
+        // Persist the migration so the settings screen shows the working URL.
+        [standardDefaults setObject:sLibreTranslateURL forKey:UDKeyLibreTranslateURL];
+    }
 
     NSString *libreAPIKey = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = [libreAPIKey length] > 0 ? [libreAPIKey copy] : nil;
+
+    NSString *msKey = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyMicrosoftTranslateAPIKey];
+    sMicrosoftTranslateAPIKey = [msKey length] > 0 ? [msKey copy] : nil;
+    NSString *msRegion = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyMicrosoftTranslateRegion];
+    sMicrosoftTranslateRegion = [msRegion length] > 0 ? [msRegion copy] : nil;
 
     {
         id raw = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationSkipLanguages];

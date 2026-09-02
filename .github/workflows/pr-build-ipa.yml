@@ -120,7 +120,10 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_26.0.1.app
 
       - name: Build rootful tweak package
-        run: make package FINALPACKAGE=1
+        # The .deb is only an intermediate here (and a short-lived PR artifact),
+        # so skip Theos's default lzma -9 packaging (~16s on the runner) in
+        # favour of the fastest level. Release builds keep the default.
+        run: make package FINALPACKAGE=1 THEOS_PLATFORM_DEB_COMPRESSION_LEVEL=1
         env:
           THEOS: ${{ github.workspace }}/theos
 
@@ -158,20 +161,37 @@ jobs:
           brew install xcodegen
           xcodegen --version
 
+      - name: Restore cached widget extension build
+        id: widget_cache
+        # The widget appex (+ its dSYM) only depends on widgets/** and the Xcode
+        # used to build it, so most PRs can reuse the last build (~45s saved).
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: widgets/build/Build/Products/Release-iphoneos
+          key: widget-appex-xcode-26.0.1-${{ hashFiles('widgets/**') }}
+
       - name: Download Apollo IPA
         run: |
           curl -L --fail --retry 3 "$APOLLO_IPA_URL" -o Apollo.ipa
           unzip -t Apollo.ipa >/dev/null
 
       - name: Build IPA variants
+        # PR builds skip the two GLASS icons-only variants; release builds still
+        # produce all six.
         run: |
+          WIDGET_ARGS=()
+          if [ "${{ steps.widget_cache.outputs.cache-hit }}" = "true" ]; then
+            WIDGET_ARGS=(--widget-appex widgets/build/Build/Products/Release-iphoneos/ApolloRebornWidgets.appex)
+          fi
           bash ./scripts/build_release_variants.sh \
             --ipa ./Apollo.ipa \
             --deb "${{ steps.rootful_deb.outputs.deb_path }}" \
-            --output-dir ./dist/out
+            --output-dir ./dist/out \
+            --no-glass-icons \
+            "${WIDGET_ARGS[@]}"
 
       - name: Validate IPA variants
-        run: bash ./scripts/validate_release_variants.sh ./dist/out
+        run: bash ./scripts/validate_release_variants.sh --no-glass-icons ./dist/out
 
       - name: Collect widget debug symbols
         run: |
@@ -189,9 +209,9 @@ jobs:
           SHORT_SHA=$(echo "${{ github.event.pull_request.head.sha }}" | cut -c1-7)
           PREFIX="Apollo-Reborn-PR${{ github.event.pull_request.number }}-${SHORT_SHA}"
           # build_release_variants.sh stamps the tweak version into filenames; the
-          # standard IPA is the only one without a -NOEXTENSIONS/-GLASS/-GLASSICONS
-          # suffix, so recover the base name from it for the exact upload paths.
-          STD=$(ls dist/out/*.ipa | grep -vE -- '-(NOEXTENSIONS|GLASS|GLASSICONS)' | head -1)
+          # standard IPA is the only one without a -NOEXTENSIONS/-GLASS suffix, so
+          # recover the base name from it for the exact upload paths.
+          STD=$(ls dist/out/*.ipa | grep -vE -- '-(NOEXTENSIONS|GLASS)' | head -1)
           if [ -z "$STD" ]; then
             echo "Error: could not locate the standard IPA in dist/out" >&2
             ls -la dist/out
@@ -211,6 +231,7 @@ jobs:
           name: ${{ steps.meta.outputs.prefix }}-Standard
           path: dist/out/${{ steps.meta.outputs.base }}.ipa
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          compression-level: 0
 
       - name: Upload No-Extensions IPA
         id: art_noext
@@ -219,6 +240,7 @@ jobs:
           name: ${{ steps.meta.outputs.prefix }}-NoExtensions
           path: dist/out/${{ steps.meta.outputs.base }}-NOEXTENSIONS.ipa
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          compression-level: 0
 
       - name: Upload GLASS IPA
         id: art_glass
@@ -227,6 +249,7 @@ jobs:
           name: ${{ steps.meta.outputs.prefix }}-GLASS
           path: dist/out/${{ steps.meta.outputs.base }}-GLASS.ipa
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          compression-level: 0
 
       - name: Upload GLASS No-Extensions IPA
         id: art_glass_noext
@@ -235,22 +258,7 @@ jobs:
           name: ${{ steps.meta.outputs.prefix }}-GLASS-NoExtensions
           path: dist/out/${{ steps.meta.outputs.base }}-GLASS-NOEXTENSIONS.ipa
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-
-      - name: Upload GLASS Icons IPA
-        id: art_glassicons
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ${{ steps.meta.outputs.prefix }}-GLASSIcons
-          path: dist/out/${{ steps.meta.outputs.base }}-GLASSICONS.ipa
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-
-      - name: Upload GLASS Icons No-Extensions IPA
-        id: art_glassicons_noext
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ${{ steps.meta.outputs.prefix }}-GLASSIcons-NoExtensions
-          path: dist/out/${{ steps.meta.outputs.base }}-GLASSICONS-NOEXTENSIONS.ipa
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          compression-level: 0
 
       - name: Upload debug symbols artifact
         id: art_symbols
@@ -267,6 +275,7 @@ jobs:
           name: ${{ steps.meta.outputs.prefix }}-deb
           path: ${{ steps.rootful_deb.outputs.deb_path }}
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          compression-level: 0
 
       - name: Build success comment
         env:
@@ -274,8 +283,6 @@ jobs:
           URL_NOEXT: ${{ steps.art_noext.outputs.artifact-url }}
           URL_GLASS: ${{ steps.art_glass.outputs.artifact-url }}
           URL_GLASS_NOEXT: ${{ steps.art_glass_noext.outputs.artifact-url }}
-          URL_GLASSICONS: ${{ steps.art_glassicons.outputs.artifact-url }}
-          URL_GLASSICONS_NOEXT: ${{ steps.art_glassicons_noext.outputs.artifact-url }}
           URL_SYMBOLS: ${{ steps.art_symbols.outputs.artifact-url }}
           URL_DEB: ${{ steps.art_deb.outputs.artifact-url }}
           DEB_PATH: ${{ steps.rootful_deb.outputs.deb_path }}
@@ -295,8 +302,6 @@ jobs:
             echo "| No Extensions | [⬇️ Download](${URL_NOEXT}) | $(size_of "${BASE}-NOEXTENSIONS.ipa") |"
             echo "| GLASS | [⬇️ Download](${URL_GLASS}) | $(size_of "${BASE}-GLASS.ipa") |"
             echo "| GLASS · No Extensions | [⬇️ Download](${URL_GLASS_NOEXT}) | $(size_of "${BASE}-GLASS-NOEXTENSIONS.ipa") |"
-            echo "| GLASS Icons | [⬇️ Download](${URL_GLASSICONS}) | $(size_of "${BASE}-GLASSICONS.ipa") |"
-            echo "| GLASS Icons · No Extensions | [⬇️ Download](${URL_GLASSICONS_NOEXT}) | $(size_of "${BASE}-GLASSICONS-NOEXTENSIONS.ipa") |"
             echo "| Tweak package (rootful \`.deb\`) | [⬇️ Download](${URL_DEB}) | $(du -h "${DEB_PATH}" 2>/dev/null | cut -f1 || echo "?") |"
             echo ""
             echo "Debug symbols: [⬇️ dSYMs](${URL_SYMBOLS}) · [workflow run](${RUN_URL})"

@@ -25,6 +25,31 @@ static NSInteger const kApolloGalleryViewerLoadAheadSlack = 4;
 
 static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
 
+// Pages display through FLAnimatedImageView — a UIImageView subclass out of
+// Apollo's own bundled framework — so an animated GIF streams its frames
+// instead of being held in RAM all at once (see ApolloGalleryImageLoader.h and
+// issue #1000). Everything else about the page is unchanged: it is still a
+// UIImageView, so contentMode, `image`, and the zoom geometry all behave.
+// Resolved once; a nil result means GIFs fall back to their poster frame.
+static Class ApolloGalleryPageImageViewClass(void) {
+    static Class viewClass;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        viewClass = NSClassFromString(@"FLAnimatedImageView") ?: UIImageView.class;
+    });
+    return viewClass;
+}
+
+// FLAnimatedImageView goes on animating whatever it was last handed until the
+// animation is cleared explicitly — its -setImage: only clears it when the new
+// image is non-nil, so `imageView.image = nil` on a recycled cell would leave
+// the previous GIF playing. Every path that changes what a page shows goes
+// through here.
+static void ApolloGalleryPageSetAnimation(UIImageView *imageView, id animatedImage) {
+    if (![imageView respondsToSelector:@selector(setAnimatedImage:)]) return;
+    ((void (*)(id, SEL, id))objc_msgSend)(imageView, @selector(setAnimatedImage:), animatedImage);
+}
+
 // Mute state is sticky across pages and launches: someone browsing a video
 // subreddit in public wants it to stay off, and re-muting every clip by hand
 // would be miserable.
@@ -123,7 +148,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
         _mediaContainerView.backgroundColor = UIColor.blackColor;
         [_zoomView addSubview:_mediaContainerView];
 
-        _imageView = [[UIImageView alloc] initWithFrame:_mediaContainerView.bounds];
+        _imageView = [[ApolloGalleryPageImageViewClass() alloc] initWithFrame:_mediaContainerView.bounds];
         _imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         _imageView.contentMode = UIViewContentModeScaleAspectFit;
         _imageView.backgroundColor = UIColor.blackColor;
@@ -150,13 +175,23 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     return self.player != nil;
 }
 
+// The one place a page's picture changes. `animation` non-nil streams a GIF;
+// nil clears any previous one before showing the still.
+- (void)apollo_displayImage:(UIImage *)image animation:(id)animation {
+    BOOL canAnimate = [self.imageView respondsToSelector:@selector(setAnimatedImage:)];
+    ApolloGalleryPageSetAnimation(self.imageView, animation);
+    // Without FLAnimatedImageView there is nothing to hand the animation to, so
+    // show its poster frame rather than leaving the page blank.
+    if (!animation || !canAnimate) self.imageView.image = image;
+}
+
 - (void)prepareForReuse {
     [super prepareForReuse];
     [self.request cancel];
     self.request = nil;
     self.imageURL = nil;
     [self teardownPlayer];
-    self.imageView.image = nil;
+    [self apollo_displayImage:nil animation:nil];
     self.fullImageLoaded = NO;
     self.zoomGeometrySize = CGSizeZero;
     self.zoomView.zoomScale = 1.0;
@@ -298,8 +333,8 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     // immediately so the page is never a black rectangle, then swap in the
     // full-size version when it lands.
     UIImage *placeholder = item.thumbnailURL ? [[ApolloGalleryImageLoader sharedLoader] cachedThumbnailForURL:item.thumbnailURL] : nil;
-    UIImage *full = url ? [[ApolloGalleryImageLoader sharedLoader] cachedImageForURL:url] : nil;
-    self.imageView.image = full ?: placeholder;
+    ApolloGalleryDecodedImage *full = url ? [[ApolloGalleryImageLoader sharedLoader] cachedImageForURL:url] : nil;
+    [self apollo_displayImage:(full.image ?: placeholder) animation:full.animatedImage];
     self.fullImageLoaded = (full != nil);
     // The fit rect depends on the image's proportions, so re-derive it whenever
     // the displayed image changes — including the placeholder→full swap, which
@@ -315,15 +350,15 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     __weak typeof(self) weakSelf = self;
     self.request = [[ApolloGalleryImageLoader sharedLoader] loadImageAtURL:url
                                                                   progress:nil
-                                                                completion:^(UIImage *image, NSData *data) {
+                                                                completion:^(ApolloGalleryDecodedImage *decoded, NSData *data) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         // The cell may have been recycled onto a different picture while this
         // download was in flight.
         if (![strongSelf.imageURL isEqual:url]) return;
         [strongSelf.spinner stopAnimating];
-        if (image) {
-            strongSelf.imageView.image = image;
+        if (decoded) {
+            [strongSelf apollo_displayImage:decoded.image animation:decoded.animatedImage];
             strongSelf.fullImageLoaded = YES;
             [strongSelf apollo_resetZoomGeometry];
         }

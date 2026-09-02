@@ -312,6 +312,8 @@ static void OpenAccountManager(void) {
 
     if (profileVC && [profileVC respondsToSelector:@selector(accountsBarButtonItemTappedWithSender:)]) {
         [profileVC performSelector:@selector(accountsBarButtonItemTappedWithSender:) withObject:nil];
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [feedback impactOccurred];
     } else {
         ApolloLog(@"[LiquidGlassTabBar] Unable to find ProfileViewController for account manager");
     }

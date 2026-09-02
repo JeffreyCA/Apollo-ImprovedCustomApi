@@ -118,6 +118,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloMediaAutoplay.m \
     $(SRC_DIR)/ApolloCommentsCollapse.xm \
     $(SRC_DIR)/ApolloInboxCommentScroll.xm \
+    $(SRC_DIR)/ApolloFindInComments.xm \
     $(SRC_DIR)/ApolloStatsRowTouch.xm \
     $(SRC_DIR)/ApolloCommentVoteFlicker.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \
@@ -143,6 +144,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloHiddenContentViewController.m \
     $(SRC_DIR)/ApolloHiddenContentMenu.xm \
     $(SRC_DIR)/ApolloHideLinksBatchFix.xm \
+    $(SRC_DIR)/ApolloSavedItemsDeduplicator.m \
     $(SRC_DIR)/ApolloSavedCategories.xm \
     $(SRC_DIR)/ApolloSwiftIvarBridge.swift \
     $(SRC_DIR)/ApolloUserFlair.xm \
@@ -165,12 +167,15 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAppleTranslateSheet.xm \
     $(SRC_DIR)/ApolloVideoUnmute.xm \
     $(SRC_DIR)/ApolloFeedVideoScrubber.xm \
+    $(SRC_DIR)/ApolloForwardSwipeExpiry.xm \
     $(SRC_DIR)/ApolloVideoSwipeFix.xm \
     $(SRC_DIR)/ApolloVideoPlaybackSpeed.xm \
     $(SRC_DIR)/ApolloVideoHoldSpeed.xm \
     $(SRC_DIR)/ApolloPictureInPicture.xm \
+    $(SRC_DIR)/ApolloFloatingTabs.xm \
     $(SRC_DIR)/ApolloMediaPreviewErrorFix.xm \
     $(SRC_DIR)/ApolloSubredditIndexPolish.xm \
+    $(SRC_DIR)/ApolloSubredditListLaunchSettle.xm \
     $(SRC_DIR)/ApolloQuickActions.xm \
     $(SRC_DIR)/ApolloHideModSubreddits.xm \
     $(SRC_DIR)/ApolloMultiredditEdit.xm \
@@ -194,6 +199,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloThemeShareImage.m \
     $(SRC_DIR)/ApolloThemeQRScanViewController.m \
     $(SRC_DIR)/ApolloSearchInPlace.xm \
+    $(SRC_DIR)/ApolloSearchNativeBar.xm \
+    $(SRC_DIR)/ApolloJumpBarSuggestionTint.xm \
     $(SRC_DIR)/ApolloSearchHeaderOverlapFix.xm \
     $(SRC_DIR)/ApolloSearchTabFixes.xm \
     $(SRC_DIR)/ApolloImageChestResolver.m \

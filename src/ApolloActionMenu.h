@@ -113,6 +113,22 @@ typedef NS_ENUM(NSInteger, ApolloActionMenuPlacement) {
 // Register a spec. Call from a feature's %ctor, after %init.
 void ApolloActionMenuRegister(ApolloActionMenuSpec *spec);
 
+// The square box menu row icons are fitted into, in points. Apollo's own
+// option-* assets are ~24pt on the long edge and its legacy sheet shows them
+// at natural size, so 24 is the weight a row icon needs to sit next to them
+// (#985 review).
+static const CGFloat ApolloActionMenuIconBoxSide = 24.0;
+
+// An SF Symbol rendered as a plain template raster carrying the same visual
+// weight as Apollo's option-* assets in the glass menu. UIMenu renders symbol
+// images through its own (smaller, text-derived) symbol configuration no
+// matter what configuration the image was created with, so a spec row that
+// hands UIMenu a raw symbol sits visibly lighter than the native rows around
+// it. Flattening the symbol into a bitmap sized to ApolloActionMenuIconBoxSide
+// takes UIMenu's restyling out of the loop entirely. Returns nil for unknown
+// symbol names.
+UIImage *_Nullable ApolloActionMenuSymbolIcon(NSString *symbolName);
+
 // Glass path entry point, called once by ApolloNativeActionMenuBuildMenu while
 // assembling a sheet's UIMenu children, after Apollo's own native actions have
 // been appended and before the array is wrapped into the final UIMenu.
