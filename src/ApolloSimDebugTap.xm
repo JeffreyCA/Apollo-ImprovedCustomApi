@@ -18,6 +18,7 @@
 #import "ApolloAccountCredentials.h"
 #import "ApolloCommentVoteInsights.h"
 #import "ApolloCommon.h"
+#import "ApolloFloatingTabs.h"
 #import "ApolloLinkPreviewFetcher.h"
 #import "ApolloGalleryImageLoader.h"
 #import "ApolloWebTextDecoding.h"
@@ -549,6 +550,16 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             NSString *payload = [[contents substringFromIndex:5] stringByTrimmingCharactersInSet:
                 NSCharacterSet.newlineCharacterSet];
             ApolloSimDebugTypeText(payload);
+            return;
+        }
+        // "floattab <keep|state|tap N|close N|release N cx cy vx vy>": drive
+        // the Floating Post Tabs feature headlessly (create a tab from the
+        // topmost comments view, tap/close bubbles, run the real end-of-drag
+        // pipeline for magnet/tuck/dock testing, dump tab state to the log).
+        if ([contents hasPrefix:@"floattab "]) {
+            NSString *payload = [[contents substringFromIndex:9] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            ApolloFloatingTabsDebugCommand(payload);
             return;
         }
         BOOL isSwipe = [contents hasPrefix:@"swipe "];
