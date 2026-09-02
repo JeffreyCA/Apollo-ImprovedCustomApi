@@ -86,6 +86,15 @@ void ApolloModernChatControllerUpdateInteractiveBack(UIViewController * _Nullabl
                                                      CGFloat progress);
 void ApolloModernChatControllerFinishInteractiveBack(UIViewController * _Nullable controller,
                                                      BOOL commit, CGFloat velocity);
+// The gesture rules the two chat-hierarchy swipes share (the Inbox hub's
+// mode-pan and the standalone Chat screen's own back-pan). YES when `pan`
+// starts over horizontally scrollable web content inside `hostView` (a
+// carousel in a bubble), which keeps its drag; and the release rule — commit
+// past the halfway point, or on a decisive same-direction throw.
+BOOL ApolloModernChatPanStartsOverHorizontalScroller(UIPanGestureRecognizer * _Nullable pan,
+                                                     UIView * _Nullable hostView);
+BOOL ApolloModernChatBackSwipeCommits(UIGestureRecognizerState state, CGFloat progress,
+                                      CGFloat velocity, CGPoint translation);
 // API-key-free accounts cannot use Apollo's OAuth-only native new-Modmail
 // endpoints. This presents Reddit's current cookie-authenticated Modmail inbox
 // in the same isolated, Apollo-themed mailbox shell as modern Chat.

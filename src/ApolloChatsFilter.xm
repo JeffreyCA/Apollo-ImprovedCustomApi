@@ -1452,27 +1452,6 @@ static void ApolloInboxFinishModeTransition(UIViewController *host, BOOL commit,
     }];
 }
 
-// A drag that begins over horizontally scrollable web content belongs to that
-// content, not to the conversation back-swipe (a media carousel inside a
-// bubble, a horizontal picker row). WebKit backs every CSS overflow scroller
-// with a real, private UIScrollView in the public view hierarchy, so one hit
-// test answers this. Measure in WINDOW coordinates: locationInView: reads a
-// stale view-local cache for synthesized touches (only _locationInWindow is
-// maintained), which would make the simulator's own driver probe the wrong
-// point.
-static BOOL ApolloInboxPanStartsOverHorizontalScroller(UIPanGestureRecognizer *pan, UIView *hubView) {
-    if (!pan || !hubView.window) return NO;
-    CGPoint point = [hubView convertPoint:[pan locationInView:nil] fromView:nil];
-    if (!CGRectContainsPoint(hubView.bounds, point)) return NO;
-    UIView *hit = [hubView hitTest:point withEvent:nil];
-    for (UIView *view = hit; view && view != hubView; view = view.superview) {
-        if (![view isKindOfClass:[UIScrollView class]]) continue;
-        UIScrollView *scrollView = (UIScrollView *)view;
-        if (scrollView.contentSize.width > CGRectGetWidth(scrollView.bounds) + 8.0) return YES;
-    }
-    return NO;
-}
-
 // Delegate for the singleton inbox mode-pan. It lives on the host view above
 // two scroll surfaces (the notifications ASTableView and the Chat hub's
 // WKWebView scroll view), whose pan recognizers begin on ANY drag — and once a
@@ -1541,7 +1520,7 @@ static BOOL ApolloInboxPanStartsOverHorizontalScroller(UIPanGestureRecognizer *p
         // performs. A drag that starts over horizontally scrollable web
         // content still belongs to that content.
         if (ApolloModernChatControllerIsOnConversationRoute(hub.chatController) &&
-            ApolloInboxPanStartsOverHorizontalScroller(pan, hub.viewIfLoaded)) {
+            ApolloModernChatPanStartsOverHorizontalScroller(pan, hub.viewIfLoaded)) {
             return NO;
         }
         return YES;
@@ -2173,17 +2152,12 @@ static NSArray *ApolloChatFilterOutChats(NSArray *messages) {
             sInboxSwipeKind = ApolloInboxSwipeKindNone;
             sInboxSwipeInteractive = NO;
             if (kind == ApolloInboxSwipeKindNone) break;
-            // Commit like an interactive pop: past the halfway point, or a
-            // decisive throw in the same direction. The flick arm keeps its own
-            // axis-dominance check — the begin gate only samples the FIRST
-            // velocity, so a drag that starts horizontal and turns into a
-            // vertical list scroll can still end with residual horizontal
-            // velocity, and without the test that diagonal release flipped
-            // tabs mid-scroll.
-            BOOL flick = commitVelocity > 350.0 && progress > 0.12 &&
-                         fabs(translation.x) > fabs(translation.y);
-            BOOL commit = pan.state == UIGestureRecognizerStateEnded &&
-                          (progress >= 0.5 || flick);
+            // One commit rule for every chat-hierarchy swipe (the standalone
+            // Chat screen's back-pan uses the same one): past the halfway
+            // point, or a decisive throw in the same direction — with the
+            // axis-dominance check that keeps a drag which turned into a
+            // vertical list scroll from flipping tabs on release.
+            BOOL commit = ApolloModernChatBackSwipeCommits(pan.state, progress, commitVelocity, translation);
             if (kind == ApolloInboxSwipeKindConversationBack) {
                 if (commit) ChatsFilterLog(@"Inbox (All) swipe: Chat conversation -> chat list");
                 if (interactive) {
