@@ -361,6 +361,7 @@ static void ApolloSimDebugForceBottomInset(CGFloat bottom) {
 // ObjC++, so plain C++ linkage matches).
 const void *ApolloScrollEdgeEffectTopStampKey(void);
 const void *ApolloScrollEdgeEffectForcedHiddenStampKey(void);
+void ApolloSubredditListDiagRearm(void);
 
 static void ApolloSimDebugDumpHeaderEffectsInView(UIView *view) {
     if ([view isKindOfClass:[UIScrollView class]]) {
@@ -485,6 +486,14 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         // state (pointer, hidden, style, tweak stamps) for header debugging.
         if ([contents hasPrefix:@"headerdump"]) {
             ApolloSimDebugDumpHeaderEffects();
+            return;
+        }
+        // "listdiag" command: re-arm the subreddit-list launch geometry
+        // recorder (ApolloSubredditListLaunchSettle) against the list
+        // controller, so the settle can be observed on a pop-back without a
+        // cold launch.
+        if ([contents hasPrefix:@"listdiag"]) {
+            ApolloSubredditListDiagRearm();
             return;
         }
         // "headerstyle N" command: switch the Header Style setting through the
