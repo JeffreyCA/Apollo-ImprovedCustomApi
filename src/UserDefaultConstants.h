@@ -37,9 +37,19 @@ static NSString *const UDKeyRandomSubredditsSource = @"RandomSubredditsSource";
 static NSString *const UDKeyRandNsfwSubredditsSource = @"RandNsfwSubredditsSource";
 static NSString *const UDKeyTrendingSubredditsSource = @"TrendingSubredditsSource";
 static NSString *const UDKeyTrendingSubredditsLimit = @"TrendingSubredditsLimit";
-// Master toggle (short-term fix) for all subreddit list polish/enhancements. Default
-// YES. Modern Subreddit Dividers depends on it — that row hides when this is off.
+// Master toggle for subreddit list polish/enhancements. Default YES. Feed
+// Shortcuts is independent; Modern Subreddit Dividers remains a sub-option.
 static NSString *const UDKeySubredditListEnhancements = @"SubredditListEnhancements";
+// Home / Popular / All / Moderator icon appearance and arrangement. Independent
+// of Subreddit List Enhancements. Defaults: Classic icons + Rows.
+static NSString *const UDKeySubredditFeedIconStyle = @"SubredditFeedIconStyle";
+static NSString *const UDKeySubredditFeedLayout = @"SubredditFeedLayout";
+// Apollo-native visibility preferences for the optional meta-feed rows. Reborn
+// mirrors these on Feed Shortcuts and deliberately keeps Home always visible.
+static NSString *const UDKeyHideRPopularRedditList = @"HideRPopularRedditList";
+static NSString *const UDKeyHideRAllRedditList = @"HideRAllRedditList";
+static NSString *const UDKeyHideModeratorRedditList = @"HideModeratorRedditList";
+static NSString *const ApolloFeedShortcutsChangedNotification = @"ApolloFeedShortcutsChangedNotification";
 // Subreddits the user moderates but chose to hide from the Subreddits list
 // (Reddit offers no way to leave or delete some dead subreddits). Array of
 // display names, compared case-insensitively.

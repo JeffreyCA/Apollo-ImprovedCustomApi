@@ -740,7 +740,12 @@ UITableView *ApolloInheritedSettingsThemeSourceTableView(UITableViewController *
     if (!controller) return nil;
 
     NSArray<UIViewController *> *stack = controller.navigationController.viewControllers;
-    NSUInteger index = [stack indexOfObject:controller];
+    UIViewController *stackController = controller;
+    NSUInteger index = [stack indexOfObject:stackController];
+    while (index == NSNotFound && stackController.parentViewController) {
+        stackController = stackController.parentViewController;
+        index = [stack indexOfObject:stackController];
+    }
     if (index == NSNotFound || index == 0) return nil;
 
     UIViewController *source = stack[index - 1];
@@ -781,8 +786,8 @@ void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller) {
         ?: ApolloThemePageBackgroundColor() ?: controller.tableView.backgroundColor;
     controller.view.backgroundColor = backgroundColor;
     controller.tableView.backgroundColor = backgroundColor;
-    controller.tableView.separatorColor = (stale ? nil : source.separatorColor)
-        ?: ApolloThemeSeparatorColor() ?: [UIColor separatorColor];
+    controller.tableView.separatorColor = ApolloThemeSeparatorColor()
+        ?: [UIColor opaqueSeparatorColor];
 }
 
 #pragma mark - LinkButtonNode URL extraction

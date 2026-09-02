@@ -252,8 +252,26 @@ BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController);
 // cluster; unrelated windows and navigation stacks are never traversed.
 void ApolloSubredditRequestTitleRelayout(UINavigationItem *navigationItem);
 extern BOOL sModernSubredditDividers;
-// Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
+// Master toggle for subreddit list polish; Feed Shortcuts remains independent.
 extern BOOL sSubredditListEnhancements;
+typedef NS_ENUM(NSInteger, ApolloSubredditFeedIconStyle) {
+    ApolloSubredditFeedIconStyleClassic = 0,
+    ApolloSubredditFeedIconStyleCircle = 1,
+    ApolloSubredditFeedIconStyleTinted = 2,
+    ApolloSubredditFeedIconStyleSoftTile = 3,
+    ApolloSubredditFeedIconStyleSolidTile = 4,
+};
+typedef NS_ENUM(NSInteger, ApolloSubredditFeedLayout) {
+    ApolloSubredditFeedLayoutRows = 0,
+    ApolloSubredditFeedLayoutGrid = 1,
+    ApolloSubredditFeedLayoutSideBySide = 2,
+    ApolloSubredditFeedLayoutIconDock = 3,
+};
+// Home / Popular / All / Moderator icon appearance and arrangement. Independent
+// of the subreddit-list polish master.
+extern NSInteger sSubredditFeedIconStyle;
+extern NSInteger sSubredditFeedLayout;
+
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;

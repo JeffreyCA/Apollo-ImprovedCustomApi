@@ -3655,6 +3655,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyTrendingSubredditsSource: defaultTrendingSubredditsSource,
                                     UDKeyReadPostMaxCount: @0,
                                     UDKeySubredditListEnhancements: @YES,
+                                    UDKeySubredditFeedIconStyle: @(ApolloSubredditFeedIconStyleClassic),
+                                    UDKeySubredditFeedLayout: @(ApolloSubredditFeedLayoutRows),
                                     UDKeyModernSubredditDividers: @YES,
                                     UDKeyShowDeletedComments: @NO,
                                     UDKeyTapToRevealDeletedComments: @NO,
@@ -4022,6 +4024,18 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
+    sSubredditFeedIconStyle = [standardDefaults integerForKey:UDKeySubredditFeedIconStyle];
+    sSubredditFeedLayout = [standardDefaults integerForKey:UDKeySubredditFeedLayout];
+    if (sSubredditFeedIconStyle < ApolloSubredditFeedIconStyleClassic ||
+        sSubredditFeedIconStyle > ApolloSubredditFeedIconStyleSolidTile) {
+        sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleClassic;
+        [standardDefaults setInteger:sSubredditFeedIconStyle forKey:UDKeySubredditFeedIconStyle];
+    }
+    if (sSubredditFeedLayout < ApolloSubredditFeedLayoutRows ||
+        sSubredditFeedLayout > ApolloSubredditFeedLayoutIconDock) {
+        sSubredditFeedLayout = ApolloSubredditFeedLayoutRows;
+        [standardDefaults setInteger:sSubredditFeedLayout forKey:UDKeySubredditFeedLayout];
+    }
     sHideSubredditListDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideSubredditListDescriptions];
     sHideMultiredditDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideMultiredditDescriptions];
     sEnableFlairColors = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
