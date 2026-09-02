@@ -309,10 +309,16 @@ static NSString *const UDKeyShowTranslationTitleDetails = @"ShowTranslationTitle
 static NSString *const UDKeyTranslationMarkerUseThemeColor = @"TranslationMarkerUseThemeColor";
 static NSString *const UDKeyTranslatePostTitles = @"TranslatePostTitles";
 static NSString *const UDKeyTranslationTargetLanguage = @"TranslationTargetLanguage";
-static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre | apple
+static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre | apple | microsoft
 static NSString *const UDKeyTranslationProviderUserSelected = @"TranslationProviderUserSelected";
 static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
+// Microsoft (Azure AI Translator) — bring-your-own-key, like LibreTranslate.
+// Azure's free F0 tier is 2M characters/month, so unlike the free Google
+// endpoints it is an official, documented API that won't rate-limit ordinary
+// use. Region is required for regional resources ("global" for global ones).
+static NSString *const UDKeyMicrosoftTranslateAPIKey = @"MicrosoftTranslateAPIKey";
+static NSString *const UDKeyMicrosoftTranslateRegion = @"MicrosoftTranslateRegion";
 // Array<String> of 2-letter language codes to leave untranslated (detected source language).
 static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";
 // Redirects Apollo's OWN Translate button (the native action-sheet item on

@@ -142,6 +142,8 @@ NSString *sTranslationTargetLanguage = nil;
 NSString *sTranslationProvider = nil;
 NSString *sLibreTranslateURL = nil;
 NSString *sLibreTranslateAPIKey = nil;
+NSString *sMicrosoftTranslateAPIKey = nil;
+NSString *sMicrosoftTranslateRegion = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
 BOOL sAppleTranslateSheet = NO;
 
