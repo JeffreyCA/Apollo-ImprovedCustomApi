@@ -7036,14 +7036,23 @@ static UIView *ApolloFindTrailingButtonContainer(UINavigationItem *navItem, UIBu
     return nil;
 }
 
-// Detach the globe from any container it was merged into, restoring that
-// container's original button layout (shift back, shrink).
+// Detach the globe from a container WE merged it into, restoring that
+// container's original button layout (shift back, shrink). A merged container
+// is recognised by the shift we recorded on it; any other superview is left
+// alone. That matters for the standalone fallback: once the globe is a bar
+// item of its own, UIKit hosts it inside its own item wrapper, and ripping it
+// out of that wrapper (the old "detach from whatever superview" behaviour) is
+// exactly how the search-results screen ended up with a globe-sized hole in
+// its trailing capsule — the item still reserved the slot, but every refresh
+// pulled the button back out of UIKit's wrapper.
 static void ApolloDetachGlobeFromContainer(UIButton *globe) {
-    if (!globe || ![globe.superview isKindOfClass:[UIView class]]) return;
     UIView *container = globe.superview;
-    // Undo exactly the right-shift we applied when merging (stored on the
-    // container), falling back to the slot width if unknown.
-    CGFloat shift = [objc_getAssociatedObject(container, kApolloGlobeMergeShiftKey) doubleValue];
+    if (!container) return;
+    NSNumber *storedShift = objc_getAssociatedObject(container, kApolloGlobeMergeShiftKey);
+    if (!storedShift) return;  // not a container we merged into — nothing to unpack
+    // Undo exactly the right-shift we applied when merging, falling back to
+    // the slot width if the stored value is unusable.
+    CGFloat shift = storedShift.doubleValue;
     if (shift <= 0.0) shift = globe.frame.size.width > 1.0 ? globe.frame.size.width : kApolloGlobeMergeSlotWidth;
     [globe removeFromSuperview];
     for (UIView *sub in container.subviews) {
@@ -7099,7 +7108,11 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
 
         CGFloat gw = kApolloGlobeMergeSlotWidth;
         CGFloat h = container.bounds.size.height > 1.0 ? container.bounds.size.height : 44.0;
-        [globe removeFromSuperview];  // out of any previous (stale) container
+        // Out of any previous host: unpack a stale merged container properly
+        // (restore its layout), then leave whatever else held it — e.g. the
+        // wrapper of the standalone item we just dropped above.
+        ApolloDetachGlobeFromContainer(globe);
+        [globe removeFromSuperview];
 
         // Measure Apollo's button cluster and the container's trailing inset so
         // we can insert the globe and keep the whole group SYMMETRIC inside the
@@ -7197,15 +7210,24 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     // setRightBarButtonItem(s) hook re-runs this as soon as Apollo sets its
     // container. Only fall back to standalone if the globe truly has nowhere to
     // go (already detached and no container appeared).
-    if (globe.superview && ![globe.superview isKindOfClass:[UIView class]]) {
-        // shouldn't happen, but normalize
+    //
+    // This path runs on EVERY refresh (viewWillAppear/viewDidAppear, the
+    // staggered state refreshes, each viewDidLayoutSubviews settle), so it has
+    // to be a strict no-op once the standalone item is in place: from then on
+    // UIKit owns the globe's superview (its bar-item wrapper). Screens whose
+    // only trailing button is a plain image item — PostsSearchResultsViewController
+    // with its sort bullseye — live on this path permanently.
+    ApolloDetachGlobeFromContainer(globe);  // only unpacks a container we merged into
+    if (standalone && standalone.customView == globe && [navItem.rightBarButtonItems containsObject:standalone]) {
+        return;  // already hosted as its own item — leave UIKit's wrapper alone
     }
-    ApolloDetachGlobeFromContainer(globe);
     globe.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
     globe.frame = CGRectMake(0.0, 0.0, kApolloGlobeMergeSlotWidth, 32.0);
     if (!standalone) {
         standalone = [[UIBarButtonItem alloc] initWithCustomView:globe];
         objc_setAssociatedObject(navItem, kApolloGlobeStandaloneItemKey, standalone, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[Translation] Globe: no trailing container to merge into on '%@' - hosting as a standalone bar item",
+                  navItem.title ?: @"(untitled)");
     } else if (standalone.customView != globe) {
         standalone.customView = globe;
     }
@@ -7236,6 +7258,9 @@ static void ApolloRemoveGlobeMergeForNavItem(UINavigationItem *navItem) {
             sApplyingGlobeMerge = NO;
         }
     }
+    // The globe is gone for good on this nav item: make sure no host (a
+    // standalone item's wrapper included) keeps drawing it.
+    [globe removeFromSuperview];
     objc_setAssociatedObject(navItem, kApolloGlobeStandaloneItemKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(navItem, kApolloGlobeMergeButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // The stock container is asymmetric inside the glass capsule; with the
