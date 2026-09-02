@@ -583,6 +583,24 @@ static NSString *const UDKeyDevvitInteractivePosts = @"DevvitInteractivePosts";
 // only consulted while DevvitInteractivePosts is on.
 static NSString *const UDKeyDevvitFeedWidgets = @"DevvitFeedWidgets";
 
+// Floating Post Tabs: chat-heads-style bubbles (max 5) that keep posts open
+// for instant return, created from the comments "..." menu. Default OFF
+// (opt-in). See ApolloFloatingTabs.xm.
+static NSString *const UDKeyFloatingPostTabs = @"FloatingPostTabs";
+// Sub-toggle: bubbles released near each other magnetize into a draggable
+// pile (tap fans it apart). Default ON; only consulted while the master
+// toggle is on. Turning it off fans existing piles out.
+static NSString *const UDKeyFloatingPostTabsMagnet = @"FloatingPostTabsMagnet";
+// Sub-toggle: holding a bubble pops a snapshot preview card with
+// peek-and-pop semantics (release opens the post, slide away first to
+// cancel). Default ON; only consulted while the master toggle is on. Off =
+// long-press does nothing (bubbles only tap and drag).
+static NSString *const UDKeyFloatingPostTabsPreview = @"FloatingPostTabsPreview";
+// Persisted open tabs (array of dicts: linkKey/permalink/title/subreddit +
+// dock state), rewritten on every tab mutation so bubbles survive relaunch.
+// Deliberately NOT registered with a default — absent means "no tabs".
+static NSString *const UDKeyFloatingPostTabsSaved = @"FloatingPostTabsSaved";
+
 // Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
 static NSString *const UDKeyLinkPreviewBodyMode = @"LinkPreviewBodyMode";
 static NSString *const UDKeyLinkPreviewCommentsMode = @"LinkPreviewCommentsMode";
