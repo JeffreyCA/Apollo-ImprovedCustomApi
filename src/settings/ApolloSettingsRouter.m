@@ -17,6 +17,7 @@
 #import "settings/InlineMediaSettingsViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/ApolloSubredditLayoutViewController.h"
+#import "settings/ApolloSubredditSectionsViewController.h"
 #import "settings/ApolloProfileLayoutViewController.h"
 #import "settings/TranslationSettingsViewController.h"
 
@@ -68,6 +69,7 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
             return [[ApolloFeedShortcutsSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         });
         add(@"subreddit-layout", @"Subreddit Layout", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloSubredditLayoutViewController class]));
+        add(@"subreddit-sections", @"Subreddit Sections", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloSubredditSectionsViewController class]));
         add(@"profiles", @"Profiles", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloProfilesSettingsViewController class]));
         add(@"profile-layout", @"Profile Layout", @"Apollo Reborn → Features → Profiles", ApolloSettingsInsetGrouped([ApolloProfileLayoutViewController class]));
         add(@"interface", @"Interface", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloInterfaceSettingsViewController class]));

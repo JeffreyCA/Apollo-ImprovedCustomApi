@@ -144,6 +144,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloHiddenContentViewController.m \
     $(SRC_DIR)/ApolloHiddenContentMenu.xm \
     $(SRC_DIR)/ApolloHideLinksBatchFix.xm \
+    $(SRC_DIR)/ApolloSavedItemsDeduplicator.m \
     $(SRC_DIR)/ApolloSavedCategories.xm \
     $(SRC_DIR)/ApolloSwiftIvarBridge.swift \
     $(SRC_DIR)/ApolloUserFlair.xm \
@@ -179,6 +180,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloQuickActions.xm \
     $(SRC_DIR)/ApolloHideModSubreddits.xm \
     $(SRC_DIR)/ApolloMultiredditEdit.xm \
+    $(SRC_DIR)/ApolloFollowingSection.xm \
     $(SRC_DIR)/ApolloSubredditSidebar.xm \
     $(SRC_DIR)/ApolloTagFilters.xm \
     $(SRC_DIR)/ApolloThemeTokens.m \
@@ -237,6 +239,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
     $(SRC_DIR)/settings/CustomAPIViewController.m \
     $(SRC_DIR)/settings/ApolloSubredditLayoutViewController.m \
+    $(SRC_DIR)/settings/ApolloSubredditSectionsViewController.m \
     $(SRC_DIR)/settings/ApolloAISettingsViewController.m \
     $(SRC_DIR)/settings/ApolloDeletedCommentsSettingsViewController.m \
     $(SRC_DIR)/settings/ApolloProfileLayoutViewController.m \
