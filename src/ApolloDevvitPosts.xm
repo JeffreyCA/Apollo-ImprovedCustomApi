@@ -1391,7 +1391,7 @@ static ASDisplayNode *ApolloDevvitEnsureHostNode(id parentNode) {
 }
 
 static ApolloDevvitWidgetView *ApolloDevvitWidgetInHost(ASDisplayNode *host);
-static ApolloDevvitWidgetView *ApolloDevvitAdoptDetachedWidget(NSString *fullName);
+static ApolloDevvitWidgetView *ApolloDevvitAdoptDetachedWidget(NSString *fullName, BOOL feedContext);
 static void ApolloDevvitReloadRowForParent(id parentNode, NSString *fullName);
 static BOOL ApolloDevvitHasStoredHeight(NSString *fullName);
 
@@ -1465,7 +1465,7 @@ static void ApolloDevvitInstallWidget(ASDisplayNode *host, RDKLink *link, BOOL f
         // A row reloaded for a height correction hands its live widget over
         // through the detached map — re-adopt it (same permalink means
         // configureForPermalink early-returns and the loaded page survives).
-        widget = ApolloDevvitAdoptDetachedWidget(ApolloDevvitFullName(link));
+        widget = ApolloDevvitAdoptDetachedWidget(ApolloDevvitFullName(link), feedContext);
         if (widget) {
             ApolloLog(@"[Devvit] re-adopted live widget for %@ after row reload", ApolloDevvitFullName(link));
         } else {
@@ -1617,12 +1617,26 @@ static BOOL ApolloDevvitBurnReloadBudget(NSString *fullName) {
 // case the reload was dropped; the widget then tears down for real.
 static NSMutableDictionary<NSString *, ApolloDevvitWidgetView *> *sDevvitDetachedWidgets;
 
-static void ApolloDevvitStashWidgetForReadopt(NSString *fullName) {
-    if (!fullName) return;
-    ApolloDevvitWidgetView *live = nil;
+// Only a widget INSIDE the reloading row is stashed — never "the" live widget
+// for the post. The same post can have two live widgets at once (iPad split
+// view keeps the feed row and the comments header on-window together; on
+// iPhone the feed cap is 2, so pushing comments evicts only one feed widget
+// and the other survives off-window), and a fullName-only match could pull
+// the feed row's widget out from under a row that never reloads: that host
+// then sat empty (no visibility event fires for a row that never leaves the
+// table) while the header adopted a page hydrated for the feed width. `row`
+// is the UIKit cell the reload targets; with no row nothing is stashed.
+static void ApolloDevvitStashWidgetForReadopt(NSString *fullName, UIView *row) {
+    if (!fullName || !row) return;
+    NSArray<ApolloDevvitWidgetView *> *widgets;
     @synchronized ([ApolloDevvitWidgetView class]) {
-        for (ApolloDevvitWidgetView *w in sDevvitLiveWidgets.allObjects) {
-            if (w.webView && [w.fullName isEqualToString:fullName]) { live = w; break; }
+        widgets = sDevvitLiveWidgets.allObjects;
+    }
+    ApolloDevvitWidgetView *live = nil;
+    for (ApolloDevvitWidgetView *w in widgets) {
+        if (w.webView && [w.fullName isEqualToString:fullName] && [w isDescendantOfView:row]) {
+            live = w;
+            break;
         }
     }
     if (!live) return;
@@ -1643,10 +1657,14 @@ static void ApolloDevvitStashWidgetForReadopt(NSString *fullName) {
     });
 }
 
-static ApolloDevvitWidgetView *ApolloDevvitAdoptDetachedWidget(NSString *fullName) {
+static ApolloDevvitWidgetView *ApolloDevvitAdoptDetachedWidget(NSString *fullName, BOOL feedContext) {
     if (!fullName) return nil;
     ApolloDevvitWidgetView *w = sDevvitDetachedWidgets[fullName];
     if (!w) return nil;
+    // Same scoping on the way back in: a widget detached from a feed row is
+    // only re-adopted by a feed host, a comments-header one only by a comments
+    // host. A mismatch stays in the map for the row that actually reloaded.
+    if (w.feedContext != feedContext) return nil;
     [sDevvitDetachedWidgets removeObjectForKey:fullName];
     w.stashedForReadopt = NO;
     if (!w.webView || w.failed) return nil;  // torn down (memory warning) while detached
@@ -1672,7 +1690,7 @@ static void ApolloDevvitScheduleRowReload(UITableView *table, NSIndexPath *index
                 ApolloLog(@"[Devvit] %@ reload dropped — row no longer visible (heals on next sight)", fullName);
                 return;
             }
-            ApolloDevvitStashWidgetForReadopt(fullName);
+            ApolloDevvitStashWidgetForReadopt(fullName, [table cellForRowAtIndexPath:indexPath]);
             [UIView performWithoutAnimation:^{
                 [table reloadRowsAtIndexPaths:@[indexPath]
                              withRowAnimation:UITableViewRowAnimationNone];
