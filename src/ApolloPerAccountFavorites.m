@@ -1,7 +1,12 @@
 #import "ApolloPerAccountFavorites.h"
 
 #import "ApolloAccountCredentials.h"
+#ifdef APOLLO_PER_ACCOUNT_FAVORITES_TESTING
+// Keep the state-machine regression harness Foundation-only on the build host.
+#define ApolloLog(fmt, ...) NSLog((fmt), ##__VA_ARGS__)
+#else
 #import "ApolloCommon.h"
+#endif
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 
@@ -11,6 +16,7 @@ static NSString *const kApolloPerAccountFavoritesVersionKey = @"version";
 static NSString *const kApolloPerAccountFavoritesBucketsKey = @"buckets";
 static NSString *const kApolloPerAccountFavoritesAnonymousIdentity = @"anonymous";
 static NSString *const kApolloPerAccountFavoritesSharedIdentity = @"shared";
+static NSString *const kApolloPerAccountFavoritesProjectionRefreshKey = @"ApolloPerAccountFavoritesProjectionRefresh";
 static const NSInteger kApolloPerAccountFavoritesStoreVersion = 1;
 
 typedef NS_ENUM(NSInteger, ApolloPerAccountFavoritesStoreStatus) {
@@ -300,7 +306,9 @@ static void ApolloPerAccountFavoritesScheduleNativeRefresh(void) {
         sApolloPerAccountFavoritesRefreshScheduled = NO;
         if (sApolloPerAccountFavoritesSuspendedForRestore) return;
         [[NSNotificationCenter defaultCenter]
-            postNotificationName:ApolloFavoriteSubredditsUpdatedNotification object:nil];
+            postNotificationName:ApolloFavoriteSubredditsUpdatedNotification
+                          object:nil
+                        userInfo:@{ kApolloPerAccountFavoritesProjectionRefreshKey: @YES }];
     });
 }
 
@@ -876,7 +884,12 @@ void ApolloPerAccountFavoritesStart(void) {
         addObserverForName:ApolloFavoriteSubredditsUpdatedNotification
                     object:nil
                      queue:[NSOperationQueue mainQueue]
-                usingBlock:^(__unused NSNotification *note) {
+                usingBlock:^(NSNotification *note) {
+        // A queued projection refresh is not a native edit. In particular, it
+        // must not mark the outgoing list as mutated if identity became unknown
+        // before delivery. Filter only this observer callback: a genuine native
+        // defaults write from another observer must still be captured.
+        if ([note.userInfo[kApolloPerAccountFavoritesProjectionRefreshKey] isEqual:@YES]) return;
         ApolloPerAccountFavoritesNativeFavoritesDidChange();
     }];
 
