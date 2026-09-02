@@ -195,6 +195,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloThemeShareImage.m \
     $(SRC_DIR)/ApolloThemeQRScanViewController.m \
     $(SRC_DIR)/ApolloSearchInPlace.xm \
+    $(SRC_DIR)/ApolloSearchNativeBar.xm \
+    $(SRC_DIR)/ApolloJumpBarSuggestionTint.xm \
     $(SRC_DIR)/ApolloSearchHeaderOverlapFix.xm \
     $(SRC_DIR)/ApolloSearchTabFixes.xm \
     $(SRC_DIR)/ApolloImageChestResolver.m \

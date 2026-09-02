@@ -1459,20 +1459,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     // "Color Flairs" now rides Appearance → Flair (native injection) —
     // -flairColorsSwitchToggled: below stays as the shared toggle handler.
-    ApolloSettingsRow *keepSearchInPlace =
-        [ApolloSettingsRow customRowWithID:@"gen.keepSearchInPlace"
-                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
-            BOOL lgSupported = IsLiquidGlass();
-            UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_KeepSearchInPlace"
-                                                                 label:@"Keep Search Bar Visible"
-                                                                detail:@"Requires Liquid Glass."
-                                                                    on:lgSupported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace]
-                                                               enabled:lgSupported
-                                                                action:@selector(keepSearchBarInPlaceSwitchToggled:)];
-            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        }
-                                  onSelect:nil];
-
     ApolloSettingsRow *titleGapCentering =
         [ApolloSettingsRow customRowWithID:@"gen.titleGapCentering"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -1518,7 +1504,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Customize tab-bar labels and Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ iconOnlyTabBar, tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
+                                              rows:@[ iconOnlyTabBar, tabBarIdle, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -3630,11 +3616,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sDevvitFeedWidgets = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sDevvitFeedWidgets forKey:UDKeyDevvitFeedWidgets];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDevvitFeedOwnershipChangedNotification object:nil];
-}
-
-- (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
-    sKeepSearchBarInPlace = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
 }
 
 - (void)lgTitleGapCenteringSwitchToggled:(UISwitch *)sender {
