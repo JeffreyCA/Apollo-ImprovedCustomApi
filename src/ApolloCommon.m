@@ -786,7 +786,7 @@ void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller) {
         ?: ApolloThemePageBackgroundColor() ?: controller.tableView.backgroundColor;
     controller.view.backgroundColor = backgroundColor;
     controller.tableView.backgroundColor = backgroundColor;
-    controller.tableView.separatorColor = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator)
+    controller.tableView.separatorColor = ApolloThemeSeparatorColor()
         ?: [UIColor opaqueSeparatorColor];
 }
 
