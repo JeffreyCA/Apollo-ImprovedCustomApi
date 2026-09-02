@@ -16,18 +16,53 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import subprocess
 import sys
 
-_ICTOOL_CANDIDATES = [
-    # Standalone Icon Composer from developer.apple.com/icon-composer/
-    "/Applications/Icon Composer.app/Contents/Executables/ictool",
-    # Bundled inside Xcode
-    "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool",
-]
-ICTOOL = next((p for p in _ICTOOL_CANDIDATES if os.path.isfile(p)), _ICTOOL_CANDIDATES[0])
+
+def find_ictool() -> str:
+    """Locate ictool without depending on one maintainer's Xcode path."""
+    candidates = ["/Applications/Icon Composer.app/Contents/Executables/ictool"]
+
+    # Prefer the standalone composer, including side-by-side versioned apps.
+    for app in sorted(glob.glob("/Applications/Icon Composer*.app"), reverse=True):
+        candidates.append(os.path.join(app, "Contents", "Executables", "ictool"))
+
+    # Respect DEVELOPER_DIR and the active xcode-select toolchain.
+    developer_dirs = [os.environ.get("DEVELOPER_DIR", "")]
+    result = subprocess.run(["xcode-select", "-p"], capture_output=True, text=True)
+    if result.returncode == 0:
+        developer_dirs.append(result.stdout.strip())
+    for developer_dir in developer_dirs:
+        if developer_dir:
+            candidates.append(os.path.normpath(os.path.join(
+                developer_dir, "..", "Applications", "Icon Composer.app",
+                "Contents", "Executables", "ictool",
+            )))
+
+    # Cover side-by-side stable and beta Xcodes.
+    for app in sorted(glob.glob("/Applications/Xcode*.app")):
+        candidates.append(os.path.join(
+            app, "Contents", "Applications", "Icon Composer.app",
+            "Contents", "Executables", "ictool",
+        ))
+
+    # Some toolchains expose the composer through xcrun. Keep this last: Xcode
+    # 27 also ships an unrelated Asset Catalog ictool with incompatible flags.
+    result = subprocess.run(["xcrun", "--find", "ictool"], capture_output=True, text=True)
+    if result.returncode == 0 and result.stdout.strip():
+        candidates.append(result.stdout.strip())
+
+    for path in dict.fromkeys(candidates):
+        if os.path.isfile(path):
+            return path
+    return candidates[0]
+
+
+ICTOOL = find_ictool()
 
 # Maps preview filename stem → ictool rendition name
 VARIANTS: dict[str, str] = {
@@ -44,7 +79,7 @@ PREVIEW_SCALE = 1
 
 
 def export_variant(icon_file: str, rendition: str, out_path: str, size: int) -> bool:
-    cmd = [
+    legacy_cmd = [
         ICTOOL, icon_file,
         "--export-image",
         "--output-file", out_path,
@@ -54,7 +89,17 @@ def export_variant(icon_file: str, rendition: str, out_path: str, size: int) -> 
         "--height", str(size),
         "--scale",  str(PREVIEW_SCALE),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(legacy_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        # Icon Composer 27 replaced the named --export-image options with a
+        # positional --export-preview interface. Try it for any legacy-command
+        # failure: different releases report the unsupported option through
+        # either stdout or stderr and use different wording.
+        modern_cmd = [
+            ICTOOL, icon_file, "--export-preview", "iOS", rendition,
+            str(size), str(size), str(PREVIEW_SCALE), out_path,
+        ]
+        result = subprocess.run(modern_cmd, capture_output=True, text=True)
     if result.returncode != 0 or not os.path.isfile(out_path):
         print(f"  ERROR: ictool failed for rendition={rendition}", file=sys.stderr)
         if result.stderr.strip():
@@ -95,7 +140,8 @@ def main() -> int:
     with open(registry_path) as fp:
         registry = json.load(fp)
 
-    all_ids = [entry["id"] for entry in registry["icons"]]
+    entries_by_id = {entry["id"]: entry for entry in registry["icons"]}
+    all_ids = list(entries_by_id)
     if args.icons:
         selected = [s.strip() for s in args.icons.split(",")]
         unknown = [i for i in selected if i not in all_ids]
@@ -119,7 +165,8 @@ def main() -> int:
 
         print(f"[{icon_id}] Exporting from {os.path.basename(icon_file)} ...")
         ok = True
-        for stem, rendition in VARIANTS.items():
+        variants = {"default": VARIANTS["default"]} if entries_by_id[icon_id].get("standardPack") else VARIANTS
+        for stem, rendition in variants.items():
             out_path = os.path.join(icon_dir, f"{stem}.png")
             success  = export_variant(icon_file, rendition, out_path, size)
             status   = "OK" if success else "FAIL"

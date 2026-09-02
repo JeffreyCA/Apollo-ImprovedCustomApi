@@ -18,13 +18,16 @@
 #import "ApolloAccountCredentials.h"
 #import "ApolloCommentVoteInsights.h"
 #import "ApolloCommon.h"
+#import "ApolloFloatingTabs.h"
 #import "ApolloLinkPreviewFetcher.h"
 #import "ApolloTranslation.h"
+#import "ApolloGalleryImageLoader.h"
 #import "ApolloWebTextDecoding.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "UIWindow+Apollo.h"
 #import <objc/message.h>
+#import <mach/mach.h>
 
 @interface UITouch (ApolloSimDebugTap)
 - (void)setPhase:(UITouchPhase)phase;
@@ -384,6 +387,88 @@ static void ApolloSimDebugDumpHeaderEffects(void) {
     }
 }
 
+#pragma mark - gifmem probe (issue #1000)
+
+static double ApolloSimDebugFootprintMB(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return -1.0;
+    return info.phys_footprint / 1048576.0;
+}
+
+// Keeps the probe's view + image alive between samples.
+static UIImageView *sApolloSimDebugGIFView = nil;
+static UIImage *sApolloSimDebugGIFImage = nil;
+
+static void ApolloSimDebugSampleGIFMemory(NSInteger remaining, double baseline) {
+    ApolloLog(@"[gifmem] t+%lds footprint %.0f MB (+%.0f)",
+              (long)(6 - remaining), ApolloSimDebugFootprintMB(), ApolloSimDebugFootprintMB() - baseline);
+    if (remaining <= 0) {
+        [sApolloSimDebugGIFView removeFromSuperview];
+        sApolloSimDebugGIFView = nil;
+        sApolloSimDebugGIFImage = nil;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloLog(@"[gifmem] released: footprint %.0f MB (+%.0f)",
+                      ApolloSimDebugFootprintMB(), ApolloSimDebugFootprintMB() - baseline);
+        });
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ApolloSimDebugSampleGIFMemory(remaining - 1, baseline);
+    });
+}
+
+static void ApolloSimDebugMeasureGIFMemory(NSString *source) {
+    double baseline = ApolloSimDebugFootprintMB();
+    ApolloLog(@"[gifmem] baseline footprint %.0f MB, source %@", baseline, source);
+
+    void (^measure)(NSData *) = ^(NSData *data) {
+        if (data.length == 0) { ApolloLog(@"[gifmem] no bytes"); return; }
+        ApolloLog(@"[gifmem] %.1f MB of source bytes", data.length / 1048576.0);
+
+        UIWindow *window = nil;
+        for (UIWindow *candidate in ApolloAllWindows()) if (candidate.isKeyWindow) { window = candidate; break; }
+        window = window ?: ApolloAllWindows().firstObject;
+        if (!window) { ApolloLog(@"[gifmem] no window"); return; }
+
+        NSDate *start = NSDate.date;
+        ApolloGalleryDecodedImage *decoded = [ApolloGalleryImageLoader apollo_debugDecodeData:data];
+        if (!decoded) { ApolloLog(@"[gifmem] decode returned nil"); return; }
+        ApolloLog(@"[gifmem] decoded %.0fx%.0f in %.2fs, animated=%@",
+                  decoded.image.size.width, decoded.image.size.height,
+                  -[start timeIntervalSinceNow], decoded.animatedImage ? @"YES" : @"NO");
+
+        // Mounted exactly the way a viewer page mounts it, so the sample covers
+        // the frame traffic UIKit generates during playback and not just the
+        // decode.
+        Class viewClass = NSClassFromString(@"FLAnimatedImageView") ?: UIImageView.class;
+        UIImageView *view = [[viewClass alloc] initWithFrame:window.bounds];
+        if (decoded.animatedImage && [view respondsToSelector:@selector(setAnimatedImage:)]) {
+            [view setValue:decoded.animatedImage forKey:@"animatedImage"];
+        } else {
+            view.image = decoded.image;
+        }
+        sApolloSimDebugGIFImage = decoded.image;
+        double afterDecode = ApolloSimDebugFootprintMB();
+        ApolloLog(@"[gifmem] after build: footprint %.0f MB (+%.0f)", afterDecode, afterDecode - baseline);
+
+        view.contentMode = UIViewContentModeScaleAspectFit;
+        [window addSubview:view];
+        sApolloSimDebugGIFView = view;
+        ApolloLog(@"[gifmem] installed on screen, sampling for 6s…");
+        ApolloSimDebugSampleGIFMemory(6, baseline);
+    };
+
+    if ([source hasPrefix:@"http"]) {
+        NSURL *url = [NSURL URLWithString:source];
+        [[NSURLSession.sharedSession dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+            dispatch_async(dispatch_get_main_queue(), ^{ measure(data); });
+        }] resume];
+    } else {
+        measure([NSData dataWithContentsOfFile:source]);
+    }
+}
+
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -439,6 +524,17 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         // needs no Reddit account, so metadata extraction — charset handling
         // above all (issue #945) — can be verified against live foreign-language
         // pages on a signed-out simulator.
+        // "gifmem <path-or-url>" command: measure what the gallery viewer's
+        // animated-GIF path actually costs in resident memory. Decodes with the
+        // shipping loader entry point, hangs the result on a real on-screen
+        // UIImageView, and samples phys_footprint across the first animation
+        // loops — the point where issue #1000's jetsam happened.
+        if ([contents hasPrefix:@"gifmem "]) {
+            NSString *arg = [[contents substringFromIndex:7] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            ApolloSimDebugMeasureGIFMemory(arg);
+            return;
+        }
         if ([contents hasPrefix:@"linkpreview "]) {
             NSString *urlString = [[contents substringFromIndex:12] stringByTrimmingCharactersInSet:
                 NSCharacterSet.whitespaceAndNewlineCharacterSet];
@@ -464,6 +560,16 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             NSString *payload = [[contents substringFromIndex:5] stringByTrimmingCharactersInSet:
                 NSCharacterSet.newlineCharacterSet];
             ApolloSimDebugTypeText(payload);
+            return;
+        }
+        // "floattab <keep|state|tap N|close N|release N cx cy vx vy>": drive
+        // the Floating Post Tabs feature headlessly (create a tab from the
+        // topmost comments view, tap/close bubbles, run the real end-of-drag
+        // pipeline for magnet/tuck/dock testing, dump tab state to the log).
+        if ([contents hasPrefix:@"floattab "]) {
+            NSString *payload = [[contents substringFromIndex:9] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            ApolloFloatingTabsDebugCommand(payload);
             return;
         }
         BOOL isSwipe = [contents hasPrefix:@"swipe "];

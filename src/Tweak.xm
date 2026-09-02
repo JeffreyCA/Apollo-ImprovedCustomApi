@@ -3663,11 +3663,15 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyFeedTextPostThumbnails: @YES,
                                     UDKeyFeedGalleryCarousel: @YES,
-                                    UDKeyFeedGalleryEdgeSwipeNav: @YES,
+                                    UDKeyFeedGalleryEdgeSwipeNav: @NO,
+                                    UDKeyForwardSwipeForgetAfterScrolling: @NO,
                                     UDKeySwipeUpForComments: @YES,
                                     UDKeySportsClipsInlineVideo: @YES,
                                     UDKeyDevvitInteractivePosts: @NO,
                                     UDKeyDevvitFeedWidgets: @YES,
+                                    UDKeyFloatingPostTabs: @NO,
+                                    UDKeyFloatingPostTabsMagnet: @YES,
+                                    UDKeyFloatingPostTabsPreview: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0,
                                     UDKeyUnmuteFeedVideos: @0,
@@ -3796,9 +3800,13 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sFeedTextPostThumbnails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails];
     sFeedGalleryCarousel = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedGalleryCarousel];
     sFeedGalleryEdgeSwipeNav = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedGalleryEdgeSwipeNav];
+    sForwardSwipeForgetAfterScrolling = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyForwardSwipeForgetAfterScrolling];
     sSwipeUpForComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySwipeUpForComments];
     sDevvitInteractivePosts = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts];
     sDevvitFeedWidgets = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets];
+    sFloatingPostTabs = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabs];
+    sFloatingPostTabsMagnet = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabsMagnet];
+    sFloatingPostTabsPreview = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFloatingPostTabsPreview];
     sPreferredGIFFallbackFormat = ([[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sReadPostMaxCount = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyReadPostMaxCount];
     sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];

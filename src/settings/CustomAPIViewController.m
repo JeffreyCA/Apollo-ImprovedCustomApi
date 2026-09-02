@@ -11,6 +11,7 @@
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloDirectChatWeb.h"
 #import "ApolloDevvitPosts.h"        // ApolloDevvitFeedOwnershipChangedNotification
+#import "ApolloFloatingTabs.h"       // close-all / fan-out entry points for the toggles
 #import "settings/ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
@@ -350,6 +351,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)feedVideoScrubberSwitchToggled:(UISwitch *)sender {
     sFeedVideoScrubber = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sFeedVideoScrubber forKey:UDKeyFeedVideoScrubber];
+}
+
+- (void)forwardSwipeForgetSwitchToggled:(UISwitch *)sender {
+    sForwardSwipeForgetAfterScrolling = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sForwardSwipeForgetAfterScrolling
+                                            forKey:UDKeyForwardSwipeForgetAfterScrolling];
 }
 
 - (NSString *)mediaUploadProviderText {
@@ -1388,6 +1395,12 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return sFeedVideoScrubber; }
                                   onToggle:^(UISwitch *sender) { [weakSelf feedVideoScrubberSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *forwardSwipeForget =
+        [ApolloSettingsRow switchRowWithID:@"gen.forwardSwipeForget"
+                                     title:@"Forget Forward Swipe After Scrolling"
+                                      isOn:^BOOL { return sForwardSwipeForgetAfterScrolling; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf forwardSwipeForgetSwitchToggled:sender]; }];
+
     ApolloSettingsRow *blockAnnouncements =
         [ApolloSettingsRow switchRowWithID:@"gen.blockAnnouncements"
                                      title:@"Block Announcements"
@@ -1416,8 +1429,36 @@ typedef NS_ENUM(NSInteger, Tag) {
     devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list. Feed Video Scrubber: drag the progress bar at the bottom of a video — in the feed or on the post itself — to scrub it without opening the video. Live Interactive Posts shows Reddit's Developer Platform posts as their real live widget — match scores and threads, market tickers and trading dashboards, predictions, brackets, polls, and community games — instead of the placeholder text old Reddit gets. Always shown in comments; Show in Feed also puts it on large-mode feed cards, and keeps a pinned one (a subreddit's daily discussion thread, say) in the feed rather than folding it into Community Highlights, where a static card can't show live data."
-                                              rows:@[ textPostThumbnails, infoRow, feedScrubber, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
+                                            footer:@"Small tweaks for the post list.\n\nFeed Video Scrubber: drag the bar under a video to scrub it without opening it.\n\nForget Forward Swipe After Scrolling: Apollo's forward swipe re-opens the post you last swiped back from, however long ago that was. This forgets it once you've scrolled a few posts on, so a stray swipe can't jump to an old post.\n\nLive Interactive Posts: shows Reddit Developer Platform posts as their real widget — live scores, market tickers, predictions, brackets, polls, games — instead of placeholder text. Always on in comments; Show in Feed adds them to large feed cards and keeps a pinned one in the feed instead of Community Highlights."
+                                              rows:@[ textPostThumbnails, infoRow, feedScrubber, forwardSwipeForget, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
+}
+
+- (ApolloSettingsSection *)buildPostsFloatingTabsSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *floatingTabs =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabs"
+                                     title:@"Floating Post Tabs"
+                                      isOn:^BOOL { return sFloatingPostTabs; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsSwitchToggled:sender]; }];
+
+    ApolloSettingsRow *magnet =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabsMagnet"
+                                     title:@"Magnetic Stacking"
+                                      isOn:^BOOL { return sFloatingPostTabsMagnet; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsMagnetSwitchToggled:sender]; }];
+    magnet.visible = ^BOOL { return sFloatingPostTabs; };
+
+    ApolloSettingsRow *preview =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabsPreview"
+                                     title:@"Hold to Preview"
+                                      isOn:^BOOL { return sFloatingPostTabsPreview; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsPreviewSwitchToggled:sender]; }];
+    preview.visible = ^BOOL { return sFloatingPostTabs; };
+
+    return [ApolloSettingsSection sectionWithTitle:@"Floating Tabs"
+                                            footer:@"Keep up to 5 posts open as floating bubbles, chat-heads style. In a post, open the top-right ••• menu and choose Keep in Floating Tab. Drag a bubble anywhere (it snaps to the screen edges), flick it past the edge to tuck it into a slim handle, and tap it to jump back to the post exactly where you left off. To close one, drag it onto the ✕ that appears while dragging. Hold to Preview shows a card of the post while you keep your finger down — release to open it, or slide away first to cancel. Magnetic Stacking snaps bubbles into a pile when you drop one on another — drag the pile to move it together, tap it to fan the bubbles out, and after a moment they spring back into the pile on their own (drag one away while fanned to keep it separate)."
+                                              rows:@[ floatingTabs, magnet, preview ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -1447,20 +1488,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     // "Color Flairs" now rides Appearance → Flair (native injection) —
     // -flairColorsSwitchToggled: below stays as the shared toggle handler.
-    ApolloSettingsRow *keepSearchInPlace =
-        [ApolloSettingsRow customRowWithID:@"gen.keepSearchInPlace"
-                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
-            BOOL lgSupported = IsLiquidGlass();
-            UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_KeepSearchInPlace"
-                                                                 label:@"Keep Search Bar Visible"
-                                                                detail:@"Requires Liquid Glass."
-                                                                    on:lgSupported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace]
-                                                               enabled:lgSupported
-                                                                action:@selector(keepSearchBarInPlaceSwitchToggled:)];
-            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        }
-                                  onSelect:nil];
-
     ApolloSettingsRow *titleGapCentering =
         [ApolloSettingsRow customRowWithID:@"gen.titleGapCentering"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -1506,7 +1533,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Customize tab-bar labels and Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ iconOnlyTabBar, tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
+                                              rows:@[ iconOnlyTabBar, tabBarIdle, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -1744,7 +1771,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                   onToggle:^(UISwitch *sender) { [weakSelf swipeUpCommentsSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Browsing"
-                                            footer:@"Swipe through Reddit image galleries without leaving the feed. With Swipe Past Gallery to Navigate, continuing to swipe at a gallery's first or last image goes back or forward to the previous page instead of bouncing. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
+                                            footer:@"Swipe Through Feed Galleries: page through a gallery post's images without leaving the feed.\n\nSwipe Past Gallery to Navigate: keep swiping at the first or last image to go back or forward a page instead of bouncing. Off by default.\n\nSwipe Up for Comments: in the fullscreen media viewer, swipe up or tap the comments button to open comments over the media."
                                               rows:@[ feedGalleries, edgeSwipeNav, swipeComments ]];
 }
 
@@ -3605,6 +3632,27 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [[NSUserDefaults standardUserDefaults] setBool:sSwipeUpForComments forKey:UDKeySwipeUpForComments];
 }
 
+- (void)floatingPostTabsSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabs = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabs forKey:UDKeyFloatingPostTabs];
+    [self visibilityDidChange];  // drives the "Magnetic Stacking" sub-row
+    // Bubbles must not survive the feature being disabled.
+    if (!sFloatingPostTabs) ApolloFloatingTabsCloseAll();
+}
+
+- (void)floatingPostTabsMagnetSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabsMagnet = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabsMagnet forKey:UDKeyFloatingPostTabsMagnet];
+    // Turning the magnet off fans existing piles apart.
+    ApolloFloatingTabsMagnetSettingChanged();
+}
+
+- (void)floatingPostTabsPreviewSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabsPreview = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabsPreview forKey:UDKeyFloatingPostTabsPreview];
+    // Read live at gesture time — nothing to tear down.
+}
+
 - (void)devvitPostsSwitchToggled:(UISwitch *)sender {
     sDevvitInteractivePosts = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sDevvitInteractivePosts forKey:UDKeyDevvitInteractivePosts];
@@ -3618,11 +3666,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sDevvitFeedWidgets = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sDevvitFeedWidgets forKey:UDKeyDevvitFeedWidgets];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDevvitFeedOwnershipChangedNotification object:nil];
-}
-
-- (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
-    sKeepSearchBarInPlace = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
 }
 
 - (void)lgTitleGapCenteringSwitchToggled:(UISwitch *)sender {
@@ -3876,7 +3919,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSString *)apollo_screenTitle { return @"Posts & Feeds"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildPostsRecentlyReadSection],
-              [self buildPostsFeedSection] ];
+              [self buildPostsFeedSection],
+              [self buildPostsFloatingTabsSection] ];
 }
 @end
 
