@@ -1114,11 +1114,26 @@ static ApolloFollowingMap *ApolloFollowingPresentedMapForTable(UITableView *tabl
 }
 
 - (void)reloadRowsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths withRowAnimation:(UITableViewRowAnimation)animation {
+    // Only Apollo's own reloads carry model-space paths. The tweak's other
+    // modules pass visible ones (ApolloSubredditIndexPolish's delayed star
+    // refresh reloads the rows it found via indexPathForCell:), so gate the
+    // translation the same way indexPathForRowAtPoint: does. The return
+    // address is a safe discriminator on this selector: this module's
+    // constructor runs last, so its hook is the outermost one here and %orig
+    // only descends into ApolloSwipeUpComments' pass-through. The point
+    // windows remain the fallback for Apollo's synchronous star/expand reloads.
+    BOOL windowActive = sApolloFollowingWindowDepth > 0 && (UITableView *)self == sApolloFollowingWindowTable;
+    if (!windowActive && !ApolloFollowingCallerIsApolloBinary(__builtin_return_address(0))) { %orig; return; }
     ApolloFollowingMap *map = ApolloFollowingPresentedMapForTable((UITableView *)self);
     if (!map) { %orig; return; }
     NSMutableArray<NSIndexPath *> *translated = [NSMutableArray arrayWithCapacity:indexPaths.count];
     for (NSIndexPath *nativePath in indexPaths) {
         NSIndexPath *visible = ApolloFollowingVisiblePathForNative(map, nativePath);
+        if (visible && (visible.section != nativePath.section || visible.row != nativePath.row)) {
+            ApolloLog(@"[FollowingSection] reload translate %ld/%ld -> %ld/%ld",
+                      (long)nativePath.section, (long)nativePath.row,
+                      (long)visible.section, (long)visible.row);
+        }
         [translated addObject:visible ?: nativePath];
     }
     %orig(translated, animation);
