@@ -317,6 +317,11 @@ static const CGFloat kApolloIMMinListViewport = 200.0; // list room needed to bo
 // (filled + accent when pinned, outlined + dim when not), and a short caption
 // acknowledges each tap. The controller persists the choice.
 @property (nonatomic) BOOL pinned;
+// Set by the controller while it scrolls the list to bring the spacer row under
+// the stuck card after an unpin, so the block keeps sticking (instead of
+// snapping back into the flow, which would be off-screen) until the row is
+// exactly underneath it. See -apollo_releasePinnedPreview.
+@property (nonatomic) BOOL holdStuck;
 @property (nonatomic, strong) UIButton *pinButton;
 @property (nonatomic, strong) UIImageView *pinIcon;
 @property (nonatomic, strong) UILabel *pinCaption;
@@ -395,7 +400,18 @@ static const CGFloat kApolloIMMinListViewport = 200.0; // list room needed to bo
 }
 
 - (void)apollo_pinTapped {
+    // A drag that starts on the card scrolls the list (the table cancels the
+    // button's touch), so a touch-up that still reaches us mid-drag or while
+    // the list is coasting is not a deliberate tap — ignore it.
+    for (UIView *v = self.superview; v; v = v.superview) {
+        if ([v isKindOfClass:[UIScrollView class]]) {
+            UIScrollView *scrollView = (UIScrollView *)v;
+            if (scrollView.isDragging || scrollView.isDecelerating) return;
+            break;
+        }
+    }
     self.pinned = !self.pinned;
+    ApolloLog(@"[IMPreview] pin toggled → %@", self.pinned ? @"pinned" : @"unpinned");
     [self.pinFeedback selectionChanged];
 
     // Bounce the glyph so the tap reads as a state change.
@@ -980,8 +996,17 @@ static BOOL ApolloIMViewIsInSlider(UIView *view) {
 // Once the slider is tracking, never cancel it to scroll — this is what stops
 // the screen moving up/down during a drag. Other rows keep the default (YES),
 // so normal scrolling by dragging from a row is unaffected.
+//
+// The pinned preview card is covered by its pin button (a UIControl), and
+// UIScrollView's default refuses to cancel a touch that landed on a control —
+// which would make a drag that starts on the card (a third of the screen) not
+// scroll at all. Say YES for anything inside the host: a real drag scrolls the
+// list, a tap still reaches the button.
 - (BOOL)touchesShouldCancelInContentView:(UIView *)view {
     if (ApolloIMViewIsInSlider(view)) return NO;
+    for (UIView *v = view; v; v = v.superview) {
+        if ([v isKindOfClass:[ApolloIMPinnedPreviewHost class]]) return YES;
+    }
     return [super touchesShouldCancelInContentView:view];
 }
 
@@ -1048,17 +1073,30 @@ static char kApolloIMPinnedHostKey;
     CGFloat titleAbove = host.hasTitleSample ? -host.titleOffset.y : 0.0;   // title top → card top
 
     // Stick only when there's real list room left under the block.
-    CGFloat visibleTop = self.contentOffset.y + self.adjustedContentInset.top;
-    CGFloat visibleBottom = self.contentOffset.y + CGRectGetHeight(self.bounds) - self.adjustedContentInset.bottom;
+    CGFloat boundsTop = self.contentOffset.y;                                    // top of the visible bounds, under the bars
+    CGFloat visibleTop = boundsTop + self.adjustedContentInset.top;              // nav bar bottom (0 at rest)
+    CGFloat visibleBottom = boundsTop + CGRectGetHeight(self.bounds) - self.adjustedContentInset.bottom;
     CGFloat listRoom = (visibleBottom - visibleTop) - titleAbove - CGRectGetHeight(row) - kApolloIMStuckTopGap - kApolloIMStuckBottomPad;
     BOOL compactHeight = self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact;
-    BOOL canStick = host.pinned && !compactHeight && listRoom >= kApolloIMMinListViewport;
+    BOOL canStick = (host.pinned || host.holdStuck) && !compactHeight && listRoom >= kApolloIMMinListViewport;
 
-    CGFloat cardY = CGRectGetMinY(row);
+    // A pinned block is locked to the screen in BOTH directions: it sticks
+    // below the bar once its row would scroll away, and it does not rubber-band
+    // with the content on a pull past the top either (visibleTop goes negative
+    // during that bounce; offsetting the resting position by the same amount
+    // keeps the block's screen position fixed while the rows below bounce).
+    CGFloat rowY = CGRectGetMinY(row);
+    CGFloat overscrollTop = MIN(0.0, visibleTop);
+    CGFloat cardY = canStick ? rowY + overscrollTop : rowY;
     if (canStick) cardY = MAX(cardY, visibleTop + kApolloIMStuckTopGap + titleAbove);
-    BOOL stuck = cardY > CGRectGetMinY(row) + 0.5;
+    // "Stuck" = displaced from its flow position in either direction; that is
+    // when the backdrop and the title copy take over from the native header.
+    BOOL stuck = fabs(cardY - rowY) > 0.5;
 
-    CGFloat hostTop = stuck ? visibleTop : CGRectGetMinY(row);
+    // The backdrop starts at the very top of the bounds, not at the bar's
+    // bottom edge: the iOS 26 bar is translucent, so rows that had disappeared
+    // under the block would otherwise show through the bar above it.
+    CGFloat hostTop = stuck ? boundsTop : rowY;
     CGFloat hostBottom = cardY + CGRectGetHeight(row) + (stuck ? kApolloIMStuckBottomPad : 0.0);
     host.frame = CGRectMake(0, hostTop, CGRectGetWidth(self.bounds), hostBottom - hostTop);
     host.card.frame = CGRectMake(cardX, cardY - hostTop, cardW, CGRectGetHeight(row));
@@ -1143,7 +1181,14 @@ static char kApolloIMPinnedHostKey;
     host.pinned = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInlineMediaPreviewPinned];
     host.pinDidChange = ^(BOOL pinned) {
         [[NSUserDefaults standardUserDefaults] setBool:pinned forKey:UDKeyInlineMediaPreviewPinned];
-        // Slide the block into (or out of) its pinned spot instead of snapping:
+        if (!pinned && host.stuck) {
+            // Unpinning a stuck block: the thing under the finger must not fly
+            // off the top. Keep the card where it is and bring the list down to
+            // it instead (see -apollo_releasePinnedPreview).
+            [weakSelf apollo_releasePinnedPreview];
+            return;
+        }
+        // Pinning: slide the block into its pinned spot instead of snapping —
         // the table's layout pass computes the new frames inside the animation.
         UITableView *table = weakSelf.tableView;
         [table setNeedsLayout];
@@ -1169,6 +1214,47 @@ static char kApolloIMPinnedHostKey;
 
 - (ApolloInlineMediaPreviewView *)previewView {
     return self.previewHost.preview;
+}
+
+// Unpin while the block is stuck: scroll the list so the spacer row lands
+// exactly under the card's current screen position. The block keeps sticking
+// (holdStuck) for the duration of that scroll, so the card never moves — the
+// rows slide down beneath it and, once the row is underneath, the layout pass
+// finds the card at its flow position and the native header takes over from
+// the copy without a visible change.
+- (void)apollo_releasePinnedPreview {
+    ApolloIMPinnedPreviewHost *host = self.previewHost;
+    UITableView *table = self.tableView;
+    if (!host || table.numberOfSections <= ApolloIMSectionPreview) return;
+    CGRect row = [table rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:ApolloIMSectionPreview]];
+    CGFloat titleAbove = host.hasTitleSample ? -host.titleOffset.y : 0.0;
+    UIEdgeInsets inset = table.adjustedContentInset;
+    CGFloat target = CGRectGetMinY(row) - (inset.top + kApolloIMStuckTopGap + titleAbove);
+    CGFloat minY = -inset.top;
+    CGFloat maxY = MAX(minY, table.contentSize.height + inset.bottom - CGRectGetHeight(table.bounds));
+    target = MIN(MAX(target, minY), maxY);
+    host.holdStuck = YES;
+    [table setContentOffset:CGPointMake(table.contentOffset.x, target) animated:YES];
+    // Belt and braces: the delegate callback below normally ends the hold; if
+    // the animation is cut short some other way, don't leave the block held.
+    __weak __typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [weakSelf apollo_endPinnedPreviewRelease];
+    });
+}
+
+- (void)apollo_endPinnedPreviewRelease {
+    if (!self.previewHost.holdStuck) return;
+    self.previewHost.holdStuck = NO;
+    [self.tableView setNeedsLayout];
+}
+
+- (void)scrollViewDidEndScrollingAnimation:(UIScrollView *)scrollView {
+    [self apollo_endPinnedPreviewRelease];
+}
+
+- (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
+    [self apollo_endPinnedPreviewRelease];   // the user took over mid-release
 }
 
 // Push every setting this screen owns into the mock. Called from each control's
