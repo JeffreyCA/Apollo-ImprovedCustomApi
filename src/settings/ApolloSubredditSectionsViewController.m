@@ -351,6 +351,11 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
 @property (nonatomic) NSUInteger pinCaptionToken;
 @property (nonatomic, strong) UIView *previewCardView;
 @property (nonatomic, strong) UIView *scrollBoundaryView;
+// Pinned only: an opaque strip in the page colour between the container's
+// top and the pinned host. The table runs under the bars in both modes, so
+// without it rows scrolling up past the card would surface above it, under
+// the transparent bar.
+@property (nonatomic, strong) UIView *pinnedCoverView;
 @property (nonatomic, strong) NSLayoutConstraint *previewContentHeightConstraint;
 // The host's constraints for wherever it is mounted right now (rebuilt on
 // every remount — moving a view drops its cross-hierarchy constraints).
@@ -717,6 +722,18 @@ static BOOL ApolloSubredditSectionsPreviewPinnedPreference(void) {
         [self setContentScrollView:form.tableView forEdge:NSDirectionalRectEdgeAll];
     }
 
+    UIView *pinnedCover = [UIView new];
+    pinnedCover.translatesAutoresizingMaskIntoConstraints = NO;
+    pinnedCover.userInteractionEnabled = NO;
+    self.pinnedCoverView = pinnedCover;
+    [self.view addSubview:pinnedCover];
+    [NSLayoutConstraint activateConstraints:@[
+        [pinnedCover.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [pinnedCover.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [pinnedCover.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [pinnedCover.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+    ]];
+
     NSLayoutConstraint *contentHeight =
         [previewCard.heightAnchor constraintEqualToConstant:1.0];
     self.previewContentHeightConstraint = contentHeight;
@@ -766,6 +783,7 @@ static BOOL ApolloSubredditSectionsPreviewPinnedPreference(void) {
     self.previewPinned = self.previewPinPreference; // room is checked at first layout
     if (self.previewPinned) [self apollo_mountHostInContainer];
     else [self apollo_mountHostAsHeader];
+    pinnedCover.hidden = !self.previewPinned;
     [self apollo_updatePinIcon];
 
     [self apollo_applyPreviewTheme];
@@ -810,6 +828,7 @@ static BOOL ApolloSubredditSectionsPreviewPinnedPreference(void) {
         ?: UIColor.systemGroupedBackgroundColor;
     self.view.backgroundColor = backgroundColor;
     self.previewHost.backgroundColor = backgroundColor;
+    self.pinnedCoverView.backgroundColor = backgroundColor;
     self.previewCardView.backgroundColor = ApolloThemeCardBackgroundColor()
         ?: UIColor.secondarySystemGroupedBackgroundColor;
     self.previewTitleLabel.textColor =
@@ -1016,6 +1035,7 @@ static UIView *ApolloSubredditSectionsSpacerHeader(CGFloat width, CGFloat height
     self.previewPinned = pinned;
     self.previewModeTransitioning = YES;
     [self apollo_updatePinIcon];
+    self.pinnedCoverView.hidden = !pinned;
     BOOL animate = animated && !UIAccessibilityIsReduceMotionEnabled();
 
     // The host animates as the container's subview in both directions.
