@@ -496,18 +496,31 @@ static UIView *ApolloAIModelAccessory(NSString *badge, BOOL selected, UIColor *f
 }
 @end
 
-// A UISlider that carries a weak pointer to the value label shown beside its
-// title, so the value-changed handler can update the text without re-reading
-// the whole row. Used by the detent-slider rows below (post length + detail).
+// A UISlider with one stop per tick label. It carries a weak pointer to the
+// value label shown beside its title, so the value-changed handler can update
+// the text without re-reading the whole row, and to the row of stop labels
+// under the track, which it folds into its own hit area so a tap on a label
+// selects that stop. Used by the detent-slider rows below (post length + detail).
+//
+// Selection works like Inline Media's size slider: dragging confirms a stop
+// crossing from the finger position (hysteresis + 2-frame streak + lockout, one
+// selection tick per crossing) and lifting the finger — a plain tap included —
+// lands on the stop under the release point.
 @interface ApolloAISettingsSlider : UISlider
 @property (nonatomic, weak) UILabel *apollo_valueLabel;
+@property (nonatomic, weak) UIStackView *apollo_tickStack;
 @property (nonatomic, strong) UISelectionFeedbackGenerator *apollo_feedback;
+// The committed stop. Change detection and the value-changed handlers key off
+// THIS, not self.value: setValue:animated:YES reports the thumb's in-flight
+// position while the snap animation runs.
 @property (nonatomic) NSInteger apollo_lastSnappedIndex;
 @property (nonatomic) NSInteger apollo_pendingIndex;
 @property (nonatomic) NSInteger apollo_pendingStreak;
 @property (nonatomic) CFTimeInterval apollo_lastFeedbackTime;
 @property (nonatomic, strong) ApolloAISettingsSliderClaimGesture *apollo_claimGesture;
 @property (nonatomic, strong) NSHashTable<UIGestureRecognizer *> *apollo_wiredBackGestures;
+// Our own tracking flag — see -isTracking.
+@property (nonatomic) BOOL apollo_tracking;
 @end
 
 static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
@@ -579,12 +592,95 @@ static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
     [self apollo_wireSwipeBackFailureRequirements];
 }
 
-- (void)apollo_applyTouch:(UITouch *)touch {
+// The un-snapped index at an x position along the track.
+- (float)apollo_rawValueForX:(CGFloat)x {
     CGRect track = [self trackRectForBounds:self.bounds];
     CGFloat width = MAX(1.0, CGRectGetWidth(track));
-    CGFloat fraction = ([touch locationInView:self].x - CGRectGetMinX(track)) / width;
+    CGFloat fraction = (x - CGRectGetMinX(track)) / width;
     fraction = MIN(1.0, MAX(0.0, fraction));
-    float raw = self.minimumValue + fraction * (self.maximumValue - self.minimumValue);
+    return self.minimumValue + fraction * (self.maximumValue - self.minimumValue);
+}
+
+- (NSInteger)apollo_clampIndex:(NSInteger)index {
+    NSInteger minimum = (NSInteger)self.minimumValue;
+    NSInteger maximum = (NSInteger)self.maximumValue;
+    return MAX(minimum, MIN(index, maximum));
+}
+
+// The stop-label strip under the track, in our coordinates (null when the row
+// has no labels or they aren't laid out yet).
+- (CGRect)apollo_tickStripRect {
+    UIStackView *ticks = self.apollo_tickStack;
+    if (!ticks || !ticks.superview || ticks.hidden || CGRectIsEmpty(ticks.bounds)) return CGRectNull;
+    return [self convertRect:ticks.bounds fromView:ticks];
+}
+
+// Fold the stop labels into the slider's hit area. The labels sit in a
+// non-interactive stack view directly under the track, so a touch on "150" or
+// "Balanced" would otherwise fall through to the table and scroll. Returning
+// YES here makes hit-testing hand that touch to the slider (no subview contains
+// the point, so it tracks like a touch on the bare track), and the table's
+// touchesShouldBegin/ShouldCancel overrides then treat it as a slider touch.
+// The extra 6pt below the labels is the cell's bottom padding — 10pt text is a
+// mean target on its own.
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    if ([super pointInside:point withEvent:event]) return YES;
+    if (!self.enabled) return NO;
+    CGRect strip = [self apollo_tickStripRect];
+    if (CGRectIsNull(strip)) return NO;
+    strip.size.height += 6.0;
+    return CGRectContainsPoint(strip, point);
+}
+
+// The stop a touch at `point` (our coordinates) means: over the label strip it's
+// the label under the finger — the labels are the visible targets, and their
+// equal-width zones don't line up exactly with the nearest-detent zones of the
+// track at every width — otherwise the detent nearest the x position.
+- (NSInteger)apollo_indexForTouchAtPoint:(CGPoint)point {
+    UIStackView *ticks = self.apollo_tickStack;
+    CGRect strip = [self apollo_tickStripRect];
+    if (ticks && !CGRectIsNull(strip) && point.y >= CGRectGetMinY(strip)) {
+        CGFloat x = [self convertPoint:point toView:ticks].x;
+        NSArray<UIView *> *labels = ticks.arrangedSubviews;
+        for (NSUInteger i = 0; i < labels.count; i++) {
+            if (x < CGRectGetMaxX(labels[i].frame) || i + 1 == labels.count) {
+                return [self apollo_clampIndex:(NSInteger)i];
+            }
+        }
+    }
+    return [self apollo_clampIndex:(NSInteger)lroundf([self apollo_rawValueForX:point.x])];
+}
+
+// Commit a stop: one animated thumb move, one selection tick, one action.
+- (void)apollo_commitIndex:(NSInteger)index {
+    self.apollo_lastSnappedIndex = index;
+    self.apollo_pendingIndex = index;
+    self.apollo_pendingStreak = 0;
+    self.apollo_lastFeedbackTime = CACurrentMediaTime();
+    [self setValue:(float)index animated:YES];
+    [self.apollo_feedback selectionChanged];
+    [self.apollo_feedback prepare];
+    [self sendActionsForControlEvents:UIControlEventValueChanged];
+}
+
+// Touch-up: land on the stop under the release point — tap or drag alike. Plain
+// nearest-stop selection on purpose: the hysteresis band and the 2-frame
+// confirmation in apollo_applyTouch: exist to debounce a HELD finger, and
+// neither applies once it has lifted. For a tap they would leave the thumb where
+// it was (a tap is a single frame, so the streak can never confirm); for a drag
+// they could park the thumb a stop short of where the finger was released.
+- (void)apollo_selectIndexForTouch:(UITouch *)touch source:(NSString *)source {
+    NSInteger target = [self apollo_indexForTouchAtPoint:[touch locationInView:self]];
+    if (target != self.apollo_lastSnappedIndex) {
+        ApolloLog(@"[AISlider] %@ → stop %ld (was %ld)", source, (long)target, (long)self.apollo_lastSnappedIndex);
+        [self apollo_commitIndex:target];
+    } else if ((NSInteger)lroundf(self.value) != target) {
+        [self setValue:(float)target animated:YES];   // re-seat a thumb left off-grid
+    }
+}
+
+- (void)apollo_applyTouch:(UITouch *)touch {
+    float raw = [self apollo_rawValueForX:[touch locationInView:self].x];
     NSInteger minimum = (NSInteger)self.minimumValue;
     NSInteger maximum = (NSInteger)self.maximumValue;
     NSInteger candidate = ApolloAISettingsHystereticIndex(raw,
@@ -609,20 +705,50 @@ static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
     BOOL lockedOut = (now - self.apollo_lastFeedbackTime) < 0.15;
     BOOL confirmed = candidate != self.apollo_lastSnappedIndex &&
         self.apollo_pendingStreak >= 2 && !lockedOut;
-    if (!confirmed) return;
+    if (confirmed) [self apollo_commitIndex:candidate];
+}
 
-    self.apollo_lastSnappedIndex = candidate;
-    self.apollo_pendingStreak = 0;
-    self.apollo_lastFeedbackTime = now;
-    [self setValue:(float)candidate animated:YES];
-    [self.apollo_feedback selectionChanged];
-    [self.apollo_feedback prepare];
-    [self sendActionsForControlEvents:UIControlEventValueChanged];
+// MARK: iOS 26 — make UIControl finish the touch sequence
+//
+// On iOS 26 UISlider installs a "fluid" visual element that changes how the
+// CLASSIC UIControl tracking sequence completes, in two ways (both read from the
+// decompiled UIKitCore 26.1; the Inline Media size slider hit the same thing):
+//
+//  1. -[UISlider isTracking] defers to the visual element's own "interactively
+//     changing" flag, which only turns on for a thumb drag the element drives
+//     itself. UIControl's touchesMoved:/touchesEnded: consult -isTracking before
+//     calling continueTracking/endTracking, so a touch we started from the bare
+//     track reported NOT tracking and was dropped after beginTracking.
+//  2. -[UISlider _deferFinalActions] returns YES whenever the fluid element is
+//     installed. With that, UIControl's touchesEnded: does NOT call
+//     endTrackingWithTouch: — it flags the touch-up as deferred and expects the
+//     fluid interaction to finish the sequence later. We refuse that interaction
+//     (see addInteraction:), so the deferral never completed: endTracking /
+//     cancelTracking never fired, and a tap — a single tracking frame, which the
+//     confirmation streak ignores by design — never selected anything.
+//
+// Both overrides simply restore the classic sequence: report our own tracking
+// state, and never defer the final actions.
+- (BOOL)isTracking {
+    return self.apollo_tracking;
+}
+
+- (BOOL)_deferFinalActions {
+    return NO;
 }
 
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
     [self apollo_wireSwipeBackFailureRequirements];
-    self.apollo_lastSnappedIndex = (NSInteger)lroundf(self.value);
+    self.apollo_tracking = YES;
+    // Sync to the settled value before the drag — but only when it IS settled: a
+    // quick second touch while the previous commit's thumb animation is still in
+    // flight would otherwise read a mid-animation, off-grid value and lose the
+    // committed stop the hysteresis keys off.
+    float value = self.value;
+    NSInteger settled = (NSInteger)lroundf(value);
+    if (fabsf(value - (float)settled) < 0.01f) {
+        self.apollo_lastSnappedIndex = [self apollo_clampIndex:settled];
+    }
     self.apollo_pendingIndex = self.apollo_lastSnappedIndex;
     self.apollo_pendingStreak = 0;
     [self.apollo_feedback prepare];
@@ -633,6 +759,23 @@ static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
 - (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
     [self apollo_applyTouch:touch];
     return YES;
+}
+
+// Touch-up (tap or drag): land on the stop under the release point. This is the
+// path that makes a plain tap on the track or on a stop label select it —
+// beginTracking alone never commits, by design of the anti-jitter guards above.
+- (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    [super endTrackingWithTouch:touch withEvent:event];
+    self.apollo_tracking = NO;
+    if (!touch) return;
+    [self apollo_selectIndexForTouch:touch source:@"released"];
+}
+
+// A cancelled touch commits nothing — the thumb stays on the last stop the drag
+// logic confirmed.
+- (void)cancelTrackingWithEvent:(UIEvent *)event {
+    [super cancelTrackingWithEvent:event];
+    self.apollo_tracking = NO;
 }
 @end
 
@@ -1297,6 +1440,9 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
     ticks.userInteractionEnabled = NO;
     ticks.translatesAutoresizingMaskIntoConstraints = NO;
     [cell.contentView addSubview:ticks];
+    // The slider folds the label strip into its hit area: tapping "150" or
+    // "Balanced" selects that stop (see -[ApolloAISettingsSlider pointInside:]).
+    slider.apollo_tickStack = ticks;
 
     UILayoutGuide *margins = cell.contentView.layoutMarginsGuide;
     [NSLayoutConstraint activateConstraints:@[
@@ -1316,10 +1462,14 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
     return cell;
 }
 
+// The stop a value-changed action means. Read the committed stop, not
+// slider.value: the action fires right after setValue:animated:YES, and while
+// the snap animation runs the value reports the thumb's in-flight position,
+// which rounds to the stop it is leaving.
 - (NSInteger)snappedIndexForSlider:(ApolloAISettingsSlider *)slider {
     NSInteger minimum = (NSInteger)slider.minimumValue;
     NSInteger maximum = (NSInteger)slider.maximumValue;
-    NSInteger index = (NSInteger)lroundf(slider.value);
+    NSInteger index = slider.apollo_lastSnappedIndex;
     return MAX(minimum, MIN(index, maximum));
 }
 
