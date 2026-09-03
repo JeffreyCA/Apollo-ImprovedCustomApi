@@ -3690,6 +3690,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyInlineImageAlignment: @(ApolloInlineImageAlignmentCenter),
                                     UDKeyAutoplayInlineGIFs: @(ApolloAutoplayInlineGIFModeDefault),
                                     UDKeyInlineMediaSizePercent: @100,
+                                    UDKeyInlineMediaPreviewPinned: @YES,
                                     UDKeyLinkPreviewBodyMode: @(ApolloLinkPreviewModeFull),
                                     UDKeyLinkPreviewCommentsMode: @(ApolloLinkPreviewModeFull),
                                     UDKeyLinkPreviewCardColor: @(ApolloLinkPreviewCardColorNeutral),

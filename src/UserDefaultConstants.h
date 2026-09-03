@@ -317,6 +317,11 @@ static NSString *const UDKeyAutoplayInlineGIFs = @"AutoplayInlineGIFs";
 // percentage of the row width: 50, 75, or 100 (default).
 static NSString *const UDKeyInlineMediaSizePercent = @"InlineMediaSizePercent";
 
+// Inline Media settings screen: whether the live preview (title + card) stays
+// pinned below the nav bar while the list scrolls (default) or scrolls with it.
+// Toggled by tapping the preview card.
+static NSString *const UDKeyInlineMediaPreviewPinned = @"InlineMediaPreviewPinned";
+
 // Bulk translation feature
 static NSString *const UDKeyEnableBulkTranslation = @"EnableBulkTranslation";
 static NSString *const UDKeyAutoTranslateOnAppear = @"AutoTranslateOnAppear";

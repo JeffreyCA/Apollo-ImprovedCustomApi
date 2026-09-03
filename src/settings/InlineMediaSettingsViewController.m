@@ -215,7 +215,7 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
 
     // Comment header + a line of text.
     self.avatarOne.frame = CGRectMake(margin, y, 22, 22);
-    self.nameOne.frame = CGRectMake(margin + 30, y + 3, rowWidth - 30, 16);
+    self.nameOne.frame = CGRectMake(margin + 30, y + 3, rowWidth - 30 - 40, 16);   // room for the pin glyph
     y += 22 + 6;
     self.textBarOne.frame = CGRectMake(margin, y, rowWidth * 0.86, 8);
     y += 8 + 8;
@@ -309,7 +309,20 @@ static const CGFloat kApolloIMMinListViewport = 200.0; // list room needed to bo
 @property (nonatomic, strong) ApolloInlineMediaPreviewView *preview;
 @property (nonatomic, strong) UILabel *titleLabel;      // pinned copy of the section header
 @property (nonatomic, strong) UIColor *backdropColor;   // table background, shown while stuck
+@property (nonatomic, strong) UIColor *accentColor;     // filled pin glyph
 @property (nonatomic) BOOL stuck;
+// Pin toggle: tapping anywhere on the card flips it. Pinned (default) = the
+// block sticks below the nav bar; unpinned = it scrolls with the list like any
+// row. A small pin glyph in the card's corner shows the state at all times
+// (filled + accent when pinned, outlined + dim when not), and a short caption
+// acknowledges each tap. The controller persists the choice.
+@property (nonatomic) BOOL pinned;
+@property (nonatomic, strong) UIButton *pinButton;
+@property (nonatomic, strong) UIImageView *pinIcon;
+@property (nonatomic, strong) UILabel *pinCaption;
+@property (nonatomic, strong) UISelectionFeedbackGenerator *pinFeedback;
+@property (nonatomic) NSUInteger pinCaptionToken;
+@property (nonatomic, copy) void (^pinDidChange)(BOOL pinned);
 // Sampled from the native header: the label's origin relative to the card's
 // resting origin (y is negative — the title sits above the card) and its size.
 @property (nonatomic) BOOL hasTitleSample;
@@ -336,8 +349,76 @@ static const CGFloat kApolloIMMinListViewport = 200.0; // list room needed to bo
         _titleLabel = [[UILabel alloc] init];
         _titleLabel.hidden = YES;
         [self addSubview:_titleLabel];
+
+        // UIControl target/action does not retain its target, so the host can
+        // be the target without a host → card → button → host cycle.
+        _pinButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        _pinButton.backgroundColor = [UIColor clearColor];
+        [_pinButton addTarget:self action:@selector(apollo_pinTapped) forControlEvents:UIControlEventTouchUpInside];
+        [_card addSubview:_pinButton];
+        _pinIcon = [[UIImageView alloc] init];
+        _pinIcon.contentMode = UIViewContentModeCenter;
+        _pinIcon.userInteractionEnabled = NO;
+        [_card addSubview:_pinIcon];
+        _pinCaption = [[UILabel alloc] init];
+        _pinCaption.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+        _pinCaption.textColor = [UIColor secondaryLabelColor];
+        _pinCaption.textAlignment = NSTextAlignmentRight;
+        _pinCaption.alpha = 0.0;
+        _pinCaption.userInteractionEnabled = NO;
+        [_card addSubview:_pinCaption];
+        _pinFeedback = [[UISelectionFeedbackGenerator alloc] init];
+        _pinned = YES;
+        [self apollo_updatePinIcon];
     }
     return self;
+}
+
+- (void)setPinned:(BOOL)pinned {
+    _pinned = pinned;
+    [self apollo_updatePinIcon];
+}
+
+- (void)setAccentColor:(UIColor *)accentColor {
+    _accentColor = accentColor;
+    [self apollo_updatePinIcon];
+}
+
+- (void)apollo_updatePinIcon {
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:13.0 weight:UIImageSymbolWeightSemibold];
+    self.pinIcon.image = [UIImage systemImageNamed:self.pinned ? @"pin.fill" : @"pin" withConfiguration:config];
+    self.pinIcon.tintColor = self.pinned
+        ? (self.accentColor ?: [UIColor systemBlueColor])
+        : [UIColor tertiaryLabelColor];
+    self.pinButton.accessibilityLabel = self.pinned ? @"Unpin preview" : @"Pin preview";
+}
+
+- (void)apollo_pinTapped {
+    self.pinned = !self.pinned;
+    [self.pinFeedback selectionChanged];
+
+    // Bounce the glyph so the tap reads as a state change.
+    self.pinIcon.transform = CGAffineTransformMakeScale(1.3, 1.3);
+    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ self.pinIcon.transform = CGAffineTransformIdentity; }
+                     completion:nil];
+
+    // Brief caption next to the glyph, replaced (not stacked) by a quick re-tap.
+    NSUInteger token = ++self.pinCaptionToken;
+    self.pinCaption.text = self.pinned ? @"Pinned" : @"Unpinned";
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    [UIView animateWithDuration:0.15 animations:^{ self.pinCaption.alpha = 1.0; }];
+    __weak __typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __strong __typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.pinCaptionToken != token) return;
+        [UIView animateWithDuration:0.3 animations:^{ strongSelf.pinCaption.alpha = 0.0; }];
+    });
+
+    if (self.pinDidChange) self.pinDidChange(self.pinned);
 }
 
 // The header's text label, wherever this iOS version nests it.
@@ -391,7 +472,16 @@ static UILabel *ApolloIMFindHeaderLabel(UIView *view) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    self.preview.frame = self.card.bounds;
+    CGRect cardBounds = self.card.bounds;
+    self.preview.frame = cardBounds;
+    self.pinButton.frame = cardBounds;
+    CGFloat side = 22.0;
+    self.pinIcon.frame = CGRectMake(CGRectGetWidth(cardBounds) - kApolloIMPreviewInset - side, kApolloIMPreviewPad - 1.0, side, side);
+    [self.pinCaption sizeToFit];
+    CGSize captionSize = self.pinCaption.bounds.size;
+    self.pinCaption.frame = CGRectMake(CGRectGetMinX(self.pinIcon.frame) - 6.0 - captionSize.width,
+                                       CGRectGetMidY(self.pinIcon.frame) - captionSize.height * 0.5,
+                                       captionSize.width, captionSize.height);
 }
 
 @end
@@ -962,7 +1052,7 @@ static char kApolloIMPinnedHostKey;
     CGFloat visibleBottom = self.contentOffset.y + CGRectGetHeight(self.bounds) - self.adjustedContentInset.bottom;
     CGFloat listRoom = (visibleBottom - visibleTop) - titleAbove - CGRectGetHeight(row) - kApolloIMStuckTopGap - kApolloIMStuckBottomPad;
     BOOL compactHeight = self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact;
-    BOOL canStick = !compactHeight && listRoom >= kApolloIMMinListViewport;
+    BOOL canStick = host.pinned && !compactHeight && listRoom >= kApolloIMMinListViewport;
 
     CGFloat cardY = CGRectGetMinY(row);
     if (canStick) cardY = MAX(cardY, visibleTop + kApolloIMStuckTopGap + titleAbove);
@@ -972,7 +1062,10 @@ static char kApolloIMPinnedHostKey;
     CGFloat hostBottom = cardY + CGRectGetHeight(row) + (stuck ? kApolloIMStuckBottomPad : 0.0);
     host.frame = CGRectMake(0, hostTop, CGRectGetWidth(self.bounds), hostBottom - hostTop);
     host.card.frame = CGRectMake(cardX, cardY - hostTop, cardW, CGRectGetHeight(row));
-    host.titleLabel.hidden = !(stuck && host.hasTitleSample);
+    // Alpha rather than hidden so a pin/unpin toggle (run inside an animation
+    // block by the controller) fades the title along with the sliding card.
+    host.titleLabel.hidden = !host.hasTitleSample;
+    host.titleLabel.alpha = (stuck && host.hasTitleSample) ? 1.0 : 0.0;
     if (host.hasTitleSample) {
         host.titleLabel.frame = CGRectMake(cardX + host.titleOffset.x, cardY - hostTop + host.titleOffset.y,
                                            host.titleSize.width, host.titleSize.height);
@@ -1047,6 +1140,18 @@ static char kApolloIMPinnedHostKey;
     host.cardWidthDidChange = ^(CGFloat width) {
         [weakSelf previewCardWidthDidChange:width];
     };
+    host.pinned = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInlineMediaPreviewPinned];
+    host.pinDidChange = ^(BOOL pinned) {
+        [[NSUserDefaults standardUserDefaults] setBool:pinned forKey:UDKeyInlineMediaPreviewPinned];
+        // Slide the block into (or out of) its pinned spot instead of snapping:
+        // the table's layout pass computes the new frames inside the animation.
+        UITableView *table = weakSelf.tableView;
+        [table setNeedsLayout];
+        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.9 initialSpringVelocity:0
+                            options:UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{ [table layoutIfNeeded]; }
+                         completion:nil];
+    };
     self.previewHost = host;
     [self.tableView addSubview:host];
     objc_setAssociatedObject(self.tableView, &kApolloIMPinnedHostKey, host, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1094,7 +1199,8 @@ static char kApolloIMPinnedHostKey;
         tableBackground = [UIColor systemGroupedBackgroundColor];
     }
     host.backdropColor = tableBackground;
-    host.preview.accentColor = [self apollo_themeAccentColor];
+    host.accentColor = [self apollo_themeAccentColor];
+    host.preview.accentColor = host.accentColor;
     [host.preview refresh];
 }
 
