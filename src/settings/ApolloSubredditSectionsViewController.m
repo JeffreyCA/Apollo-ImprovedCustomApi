@@ -125,7 +125,7 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
     // in its letter section — the same "row.username" key, so it slides
     // between the two places when the toggle flips.
     [blocks addObject:ApolloSectionsPreviewBand(@"band.letter", @"U", modern)];
-    [blocks addObject:ApolloSectionsPreviewRow(@"row.unixporn", @"unixporn", nil, UIColor.systemPurpleColor, NO)];
+    [blocks addObject:ApolloSectionsPreviewRow(@"row.ukulele", @"ukulele", nil, UIColor.systemPurpleColor, NO)];
     if (!separate) {
         [blocks addObject:ApolloSectionsPreviewRow(@"row.username", @"u/username", nil, UIColor.systemOrangeColor, NO)];
     }
@@ -363,7 +363,7 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
     modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
     ApolloSettingsSection *optionsSection =
         [ApolloSettingsSection sectionWithTitle:@"Options"
-                                         footer:@"Separate Followed Users moves the users you follow out of the alphabetical list into their own Following section; reorder them from the list's Edit mode, like Favorites. Multireddit rows show a custom description or their included subreddits unless hidden. Subreddit List Enhancements adds modern accent-colored section dividers. The preview shows what each option changes."
+                                         footer:@"Followed users get their own Following section, reorderable from the list's Edit mode. Multireddit rows show a description or their subreddits. Enhancements add accent-colored dividers — the preview shows what each option changes."
                                            rows:@[ separateFollowing, hideMultiredditDescriptions, enhancements, modernDividers ]];
 
     // --- Section order (drag to reorder) ---
