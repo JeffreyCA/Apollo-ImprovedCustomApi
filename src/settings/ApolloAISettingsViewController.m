@@ -1030,7 +1030,7 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
                                          footer:providerFooter
                                            rows:@[ provider, providerKey, providerModel, providerModels, providerBaseURL ]],
         [ApolloSettingsSection sectionWithTitle:@"Summaries"
-                                         footer:@"Minimum Post Length applies to Reddit text-post bodies; linked articles remain eligible independently. Brief gives the essentials, Balanced matches the standard summary, and In-depth adds useful context without reproducing the source.\n\nWhen Opening a Thread controls how enabled summaries appear:\n\n• Generate on Open — summaries generate as you open a thread and wait, collapsed, until you tap them.\n• Open Automatically — summaries generate and expand on their own.\n• Tap to Summarize — nothing generates until you tap a summary card, which then opens once it's ready."
+                                         footer:@"Minimum Post Length only applies to text posts, not linked articles. Brief, Balanced and In-depth set how much detail a summary goes into.\n\nWhen Opening a Thread: Generate on Open prepares summaries in the background and keeps them collapsed until you tap. Open Automatically expands them on their own. Tap to Summarize only starts when you tap a summary card."
                                            rows:@[ postSummaries, postThreshold, postDetail, commentSummaries, commentDetail, summaryMode ]],
         [ApolloSettingsSection sectionWithTitle:@"Availability"
                                          footer:availabilityFooter
