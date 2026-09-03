@@ -164,6 +164,7 @@ static void ApolloSubredditApplyIconForHeader(ApolloSubredditHeaderView *header,
 static void ApolloSubredditDismissHeaderPickersForViewController(UIViewController *viewController);
 static void ApolloSubredditRefreshBannerForSubreddit(NSString *subredditName);
 static void ApolloSubredditRefreshIconForSubreddit(NSString *subredditName);
+static NSString *ApolloNormalizedSubredditName(NSString *subredditName);
 static BOOL ApolloSubredditNamesEqual(NSString *left, NSString *right);
 static void ApolloSubredditLayoutWrappedHeader(UIView *wrappedHeader,
                                                ApolloSubredditHeaderView *header,
@@ -543,9 +544,11 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     CGFloat width = self.bounds.size.width > 0 ? self.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
     CGFloat heightBefore = [self preferredHeightForWidth:width];
 
-    // Retain both identity strings even while their switches are off so a live
-    // toggle can reveal them again without waiting for another metadata fetch.
-    NSString *displayName = info.displayName;
+    // Use the short name with Apollo's display casing, not Reddit's custom title.
+    // Keep it populated while hidden so enabling the switch needs no fetch.
+    NSString *displayName = subredditName.length > 0 ? subredditName : info.subredditName;
+    NSString *navigationName = ApolloNormalizedSubredditName(self.hostViewController.navigationItem.title);
+    if (ApolloSubredditNamesEqual(navigationName, displayName)) displayName = navigationName;
     self.displayNameLabel.text = displayName.length > 0 ? displayName : nil;
     self.aboutLabel.text = info.aboutText.length > 0 ? info.aboutText : nil;
     self.memberCountText = info && info.subscriberCount >= 0
