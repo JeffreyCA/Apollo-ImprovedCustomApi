@@ -125,6 +125,13 @@ static CGFloat sNSBDismissTargetTop = 0.0;
 static const void *kNSBBridgeKey     = &kNSBBridgeKey;      // VC -> bridge delegate object
 static const void *kNSBFeedTableKey  = &kNSBFeedTableKey;   // ASTableView -> @YES (native-managed feed)
 static const void *kNSBAppearedKey   = &kNSBAppearedKey;    // VC -> @YES once it has appeared at least once
+// VC -> @YES when the feed was resting at its top the last time it disappeared,
+// so a re-appearance can lay the bar out revealed for its transition (see the
+// lifecycle hooks below).
+static const void *kNSBLeftAtTopKey  = &kNSBLeftAtTopKey;
+// The re-appearing feed whose bar is being held revealed through its
+// transition: the layout-pass policy flip stands down for it until didAppear.
+static __weak UIViewController *sNSBRevealHoldVC = nil;
 static CGFloat sNSBToolbarBand = 45.0; // Apollo's resting toolbar height (the band its inset reserves)
 // How far above the safe area a resting write may sit and still count as one:
 // the toolbar band (45pt fresh, 37pt on a feed restored after a post) plus
@@ -1011,9 +1018,33 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
     if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchFeedVC(self)) return;
     NSBAttachNativeSearch((UIViewController *)self);
     NSBHideApolloToolbar((UIViewController *)self);
+    UINavigationItem *navItem = [(UIViewController *)self navigationItem];
+
+    // Re-appearance of a feed that was resting at its top when it left: the
+    // forward swipe re-pushing Home from the subreddit list, a pop back to
+    // it, a tab return. The scroll-away policy has been on since the first
+    // appearance, and with no large title UIKit lays a scroll-away bar out
+    // COLLAPSED for the transition, so the feed slid in bar-less and the
+    // top-rest reveal (NSBEnsureBarRevealedAtTop) only expanded the palette
+    // once it had landed — the whole feed shoving down a bar's height a beat
+    // late (measured on the forward swipe from Subreddits to Home; a fresh
+    // feed never did this because it attaches with the policy off). Give the
+    // re-appearance the first appearance's treatment: policy off for the
+    // transition so the bar is on screen from the first frame, restored in
+    // viewDidAppear. Held against the layout-pass flip below, which would
+    // otherwise put the policy back on the first layout of the transition.
+    // Never while a search is active (its palette is UIKit's to run) or
+    // inside a dismiss window (which pins the policy on its own schedule).
+    UISearchController *reappearSC = navItem.searchController;
+    if (reappearSC && !reappearSC.active && navItem.hidesSearchBarWhenScrolling &&
+        objc_getAssociatedObject(self, kNSBLeftAtTopKey) != nil && !sNSBDismissWindow) {
+        navItem.hidesSearchBarWhenScrolling = NO;
+        sNSBRevealHoldVC = (UIViewController *)self;
+        ApolloLog(@"[NativeSearch] re-appearance at top rest: holding the bar revealed through the transition");
+    }
+
     // Returning to a live search (e.g. back from an opened result): keep the
     // native bar's text in step with Apollo's field so the query stays visible.
-    UINavigationItem *navItem = [(UIViewController *)self navigationItem];
     UISearchBar *bar = navItem.searchController.searchBar;
     UITextField *field = (UITextField *)ApolloNSBObjectIvar(self, "searchTextField");
     if ([field isKindOfClass:[UITextField class]] && field.text.length > 0) {
@@ -1040,6 +1071,9 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
     // search controller is attached late this is the only thing that tells that
     // pass the first appearance is behind us.
     objc_setAssociatedObject(self, kNSBAppearedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // The transition is over: release the re-appearance hold (viewWillAppear)
+    // so the policy flip right below — and the layout-pass one — apply again.
+    if (sNSBRevealHoldVC == (UIViewController *)self) sNSBRevealHoldVC = nil;
     UINavigationItem *navItem = [(UIViewController *)self navigationItem];
     if (!navItem.searchController) return;
     // Scroll-away policy. Flipped here, after the first layout, so the bar is
@@ -1060,6 +1094,17 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
     %orig;
     if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchFeedVC(self)) return;
     sNSBTransitioning = YES;
+    // Remember whether the feed is leaving from its top rest; a re-appearance
+    // uses it to lay the bar out revealed for the transition (viewWillAppear).
+    // Measured live here, before the deactivation below can move the palette:
+    // once the view is off-screen its safe area — and so the adjusted inset
+    // the rest is measured against — is no longer trustworthy.
+    UIScrollView *leavingTable = NSBTableForVC((UIViewController *)self);
+    BOOL leavingAtTop = leavingTable &&
+        leavingTable.contentOffset.y <= -leavingTable.adjustedContentInset.top + 2.0;
+    objc_setAssociatedObject(self, kNSBLeftAtTopKey, leavingAtTop ? @YES : nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (sNSBRevealHoldVC == (UIViewController *)self) sNSBRevealHoldVC = nil;
     // Leaving the feed (e.g. opening a result) with the search UI presented:
     // deactivate it cleanly. Keeping it active across a push leaves UIKit's
     // presentation half-restored after the pop (missing nav bar, collapsed
@@ -1086,6 +1131,7 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
     UINavigationItem *policyItem = [(UIViewController *)self navigationItem];
     if (policyItem.searchController && !policyItem.hidesSearchBarWhenScrolling &&
         objc_getAssociatedObject(self, kNSBAppearedKey) != nil &&
+        sNSBRevealHoldVC != (UIViewController *)self &&
         !sNSBRevealInFlight && !sNSBDismissWindow) {
         policyItem.hidesSearchBarWhenScrolling = YES;
     }
