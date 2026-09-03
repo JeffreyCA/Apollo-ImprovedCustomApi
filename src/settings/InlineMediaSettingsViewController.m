@@ -283,13 +283,14 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
 
 // The preview card. A direct subview of the table view — never a cell — sized
 // to the transparent spacer row that reserves its resting place under the
-// "Preview" header. While that row is on screen the card sits exactly on it and
-// scrolls like any other row; once the header would slide under the nav bar the
-// header AND the card stick just below the bar instead (an opaque backdrop
-// hides the rows passing underneath), so every control further down is adjusted
-// with the preview still in view. Positioning lives in
-// ApolloIMSettingsTableView's layoutSubviews, which UIScrollView runs on every
-// content-offset change.
+// "Preview" header. Unpinned, the card sits exactly on that row and scrolls like
+// any other row. Pinned, the header AND the card simply never leave their
+// resting screen position: the scroll is cancelled out of their frame (an opaque
+// backdrop hides the rows passing underneath), so every control further down is
+// adjusted with the preview still in view and nothing up top ever moves — not
+// on the way down, not on the way back, not on a pull past the top. Positioning
+// lives in ApolloIMSettingsTableView's layoutSubviews, which UIScrollView runs
+// on every content-offset change.
 //
 // The pinned "Preview" title is a copy of UIKit's own section header label —
 // text, font, colour and position are sampled from the real header view while
@@ -300,7 +301,6 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
 // Height-constrained layouts (landscape phones, tiny screens) don't stick:
 // pinning a ~400pt card there would leave no usable list, so the card just
 // scrolls with the content as it always did.
-static const CGFloat kApolloIMStuckTopGap = 8.0;       // nav bar bottom → card top
 static const CGFloat kApolloIMStuckBottomPad = 8.0;    // backdrop below the card
 static const CGFloat kApolloIMMinListViewport = 200.0; // list room needed to bother sticking
 
@@ -1070,25 +1070,22 @@ static char kApolloIMPinnedHostKey;
     if (headerView) {
         [host sampleTitleFromHeaderView:headerView inTable:self cardOrigin:CGPointMake(cardX, CGRectGetMinY(row))];
     }
-    CGFloat titleAbove = host.hasTitleSample ? -host.titleOffset.y : 0.0;   // title top → card top
-
-    // Stick only when there's real list room left under the block.
+    // Pin only when there's real list room left under the block.
     CGFloat boundsTop = self.contentOffset.y;                                    // top of the visible bounds, under the bars
-    CGFloat visibleTop = boundsTop + self.adjustedContentInset.top;              // nav bar bottom (0 at rest)
+    CGFloat visibleTop = boundsTop + self.adjustedContentInset.top;              // nav bar bottom: 0 at rest, +scrolled, −pulled past the top
     CGFloat visibleBottom = boundsTop + CGRectGetHeight(self.bounds) - self.adjustedContentInset.bottom;
-    CGFloat listRoom = (visibleBottom - visibleTop) - titleAbove - CGRectGetHeight(row) - kApolloIMStuckTopGap - kApolloIMStuckBottomPad;
+    CGFloat rowY = CGRectGetMinY(row);
+    CGFloat listRoom = (visibleBottom - visibleTop) - (rowY + CGRectGetHeight(row)) - kApolloIMStuckBottomPad;
     BOOL compactHeight = self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact;
     BOOL canStick = (host.pinned || host.holdStuck) && !compactHeight && listRoom >= kApolloIMMinListViewport;
 
-    // A pinned block is locked to the screen in BOTH directions: it sticks
-    // below the bar once its row would scroll away, and it does not rubber-band
-    // with the content on a pull past the top either (visibleTop goes negative
-    // during that bounce; offsetting the resting position by the same amount
-    // keeps the block's screen position fixed while the rows below bounce).
-    CGFloat rowY = CGRectGetMinY(row);
-    CGFloat overscrollTop = MIN(0.0, visibleTop);
-    CGFloat cardY = canStick ? rowY + overscrollTop : rowY;
-    if (canStick) cardY = MAX(cardY, visibleTop + kApolloIMStuckTopGap + titleAbove);
+    // Pinned = locked to the screen at the resting position, full stop. Adding
+    // the scroll distance to the flow position cancels the scroll out of the
+    // block's frame in both directions: it neither slides up to some "pinned
+    // spot" below the bar (which read as a jump each time it engaged) nor
+    // rubber-bands with the content on a pull past the top. The header is part
+    // of the block, so it stays put too.
+    CGFloat cardY = canStick ? rowY + visibleTop : rowY;
     // "Stuck" = displaced from its flow position in either direction; that is
     // when the backdrop and the title copy take over from the native header.
     BOOL stuck = fabs(cardY - rowY) > 0.5;
@@ -1216,23 +1213,17 @@ static char kApolloIMPinnedHostKey;
     return self.previewHost.preview;
 }
 
-// Unpin while the block is stuck: scroll the list so the spacer row lands
-// exactly under the card's current screen position. The block keeps sticking
-// (holdStuck) for the duration of that scroll, so the card never moves — the
-// rows slide down beneath it and, once the row is underneath, the layout pass
-// finds the card at its flow position and the native header takes over from
-// the copy without a visible change.
+// Unpin while the block is stuck: scroll the list back to the top, which is
+// exactly where the spacer row sits under the (never-moved) card. The block
+// keeps sticking (holdStuck) for the duration of that scroll, so the card
+// never moves — the rows slide down beneath it and, once the list is at the
+// top, the layout pass finds the card at its flow position and the native
+// header takes over from the copy without a visible change.
 - (void)apollo_releasePinnedPreview {
     ApolloIMPinnedPreviewHost *host = self.previewHost;
     UITableView *table = self.tableView;
-    if (!host || table.numberOfSections <= ApolloIMSectionPreview) return;
-    CGRect row = [table rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:ApolloIMSectionPreview]];
-    CGFloat titleAbove = host.hasTitleSample ? -host.titleOffset.y : 0.0;
-    UIEdgeInsets inset = table.adjustedContentInset;
-    CGFloat target = CGRectGetMinY(row) - (inset.top + kApolloIMStuckTopGap + titleAbove);
-    CGFloat minY = -inset.top;
-    CGFloat maxY = MAX(minY, table.contentSize.height + inset.bottom - CGRectGetHeight(table.bounds));
-    target = MIN(MAX(target, minY), maxY);
+    if (!host) return;
+    CGFloat target = -table.adjustedContentInset.top;
     host.holdStuck = YES;
     [table setContentOffset:CGPointMake(table.contentOffset.x, target) animated:YES];
     // Belt and braces: the delegate callback below normally ends the hold; if
