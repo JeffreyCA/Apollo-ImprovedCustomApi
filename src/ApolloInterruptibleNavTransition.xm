@@ -40,12 +40,31 @@
 //   0.225s linear when interactive, 0.5s spring (damping 1.0, initial velocity 4.0) otherwise.
 // Apollo's search-mode special cases (hiding the bar while a search is presented) are not
 // reproduced: on Liquid Glass the native search bar module keeps the bar in place anyway.
+//
+// TWO THINGS THE INTERRUPTIBLE PATH CHANGES, HANDLED HERE
+// - UIKit only disables user interaction on the transitioning views for NON-interruptible
+//   animators. Left interactive, the finger that started the edge pan still delivers its
+//   delayed touch to the post cell under it, which lit up the cell's highlight for two
+//   frames at the start of every swipe. Both views are made non-interactive for the
+//   transition and restored on completion, matching what UIKit did before.
+// - The bar now genuinely cross-fades, so the incoming title control exists at partial alpha
+//   for the whole drag. ApolloLiquidGlass installs its title capsule on any title control
+//   that appears, which put a translucent capsule at the incoming title's (differently
+//   centred) position — the "faded bubble in an odd spot" on a cancelled swipe. The capsule
+//   code consults ApolloNavTransitionInFlight() and skips new installs/recentres while an
+//   INTERACTIVE transition runs; the completion below asks it to refresh the settled bar,
+//   where the winning title's capsule fades in. Timed push/pop is left exactly as before.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "ApolloCommon.h"
 
 static const void *kApolloNavAnimatorKey = &kApolloNavAnimatorKey;
+static NSUInteger sApolloNavTransitionsInFlight;
+
+BOOL ApolloNavTransitionInFlight(void) {
+    return sApolloNavTransitionsInFlight > 0;
+}
 static const CGFloat kApolloNavParallaxDivisor = 3.0;
 static const NSTimeInterval kApolloNavInteractiveDuration = 0.225;
 static const NSTimeInterval kApolloNavNonInteractiveDuration = 0.5;
@@ -108,7 +127,21 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
         [container insertSubview:dim belowSubview:shadow];
     }
 
+    // UIKit does this itself for non-interruptible animators; without it the touch that
+    // began the edge pan keeps feeding the cell under the finger (delayed highlight flash).
+    BOOL fromWasInteractive = fromView.userInteractionEnabled;
+    BOOL toWasInteractive = toView.userInteractionEnabled;
+    fromView.userInteractionEnabled = NO;
+    toView.userInteractionEnabled = NO;
+    UINavigationBar *navigationBar = toVC.navigationController.navigationBar
+        ?: fromVC.navigationController.navigationBar;
+
     BOOL interactive = ctx.isInteractive;
+    // Only an interactive transition holds the title capsules back: a finger-driven cross-fade
+    // can sit at partial alpha indefinitely and then reverse, which is where a capsule on the
+    // incoming title reads as a stray bubble. A timed push/pop cross-fades capsule and title
+    // together in half a second, exactly as it always did.
+    if (interactive) sApolloNavTransitionsInFlight++;
     NSTimeInterval duration = interactive ? kApolloNavInteractiveDuration : kApolloNavNonInteractiveDuration;
     UIViewPropertyAnimator *animator;
     if (interactive) {
@@ -144,7 +177,13 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
             // Reversal already put the views back; make the rest frames exact.
             fromView.frame = fromRest;
         }
+        fromView.userInteractionEnabled = fromWasInteractive;
+        toView.userInteractionEnabled = toWasInteractive;
+        if (interactive && sApolloNavTransitionsInFlight > 0) sApolloNavTransitionsInFlight--;
         [ctx completeTransition:!cancelled];
+        // The bar has settled on whichever item won; give the title capsules that were held
+        // back during the cross-fade their chance now (they fade in rather than pop).
+        if (interactive) ApolloNavigationTitleGlassRefreshNavigationBar(navigationBar);
         id strong = weakAnimatorObject;
         if (strong) objc_setAssociatedObject(strong, kApolloNavAnimatorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }];
