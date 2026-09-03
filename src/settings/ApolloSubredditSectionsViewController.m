@@ -709,6 +709,16 @@ static BOOL ApolloSubredditSectionsPreviewPinnedPreference(void) {
     form.view.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:form.view];
     [form didMoveToParentViewController:self];
+    // The tab bar's glass tracks this table for its bottom edge in both
+    // modes. Left to automatic detection, UIKit re-resolves the content
+    // scroll view whenever the hierarchy is rearranged (the host moving
+    // between the container and the table's header, the form's frame
+    // changing) and the bar briefly falls back to its plain look mid-swap
+    // — a visible dip on device. The top edge stays automatic: pinned, the
+    // table is not under the nav bar; unpinned, UIKit finds it there itself.
+    if (@available(iOS 15.0, *)) {
+        [self setContentScrollView:form.tableView forEdge:NSDirectionalRectEdgeBottom];
+    }
 
     NSLayoutConstraint *contentHeight =
         [previewCard.heightAnchor constraintEqualToConstant:1.0];
