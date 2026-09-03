@@ -2346,7 +2346,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Feed Shortcuts customizes the Home, Popular, All and Moderator Posts rows — their icons, layout, visibility and descriptions. Subreddit Sections arranges the subreddit list (its style toggles live there); Subreddit Layout customizes subreddit pages."
+                                            footer:@"Feed Shortcuts customizes the Home, Popular, All and Moderator Posts rows — their icons, layout, visibility and descriptions. Subreddit Sections arranges the rest of the subreddit list — section order, followed users, multireddit descriptions and the list style toggles live there. Subreddit Layout customizes subreddit pages."
                                               rows:@[ feedShortcuts, subredditSections, subredditLayout ]];
 }
 
@@ -2408,13 +2408,10 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     };
 
-    return [ApolloSettingsSection sectionWithTitle:@"Appearance"
-                                            footer:nil
-                                              rows:@[ feedIconStyle, feedLayout ]];
-}
-
-- (ApolloSettingsSection *)buildFeedShortcutsDescriptionsSection {
-    __weak typeof(self) weakSelf = self;
+    // Only the Rows layout has room for a subtitle under each shortcut, so
+    // the descriptions switch rides along with the layout picker (it hides
+    // with any other layout). Hide Multireddit Descriptions lives on the
+    // Subreddit Sections screen beside its preview.
     ApolloSettingsRow *hideFeedDescriptions =
         [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
                                      title:@"Hide Feed Descriptions"
@@ -2424,15 +2421,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         return sSubredditFeedLayout == ApolloSubredditFeedLayoutRows;
     };
 
-    ApolloSettingsRow *hideMultiredditDescriptions =
-        [ApolloSettingsRow switchRowWithID:@"sub.hideMultiredditDescriptions"
-                                     title:@"Hide Multireddit Descriptions"
-                                      isOn:^BOOL { return sHideMultiredditDescriptions; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
-
-    return [ApolloSettingsSection sectionWithTitle:@"Descriptions"
-                                            footer:@"Multireddit rows show either a custom description or their included subreddits."
-                                              rows:@[ hideFeedDescriptions, hideMultiredditDescriptions ]];
+    return [ApolloSettingsSection sectionWithTitle:@"Appearance"
+                                            footer:nil
+                                              rows:@[ feedIconStyle, feedLayout, hideFeedDescriptions ]];
 }
 
 - (NSString *)subredditFeedIconStyleText {
@@ -3959,9 +3950,10 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [self reloadRowWithID:@"api.redirectURI"];
 }
 
-// Subreddit List Enhancements and Modern Subreddit Dividers live on the
-// Subreddit Sections screen now (ApolloSubredditSectionsViewController),
-// beside the live preview that shows what they change.
+// Subreddit List Enhancements, Modern Subreddit Dividers and Hide Multireddit
+// Descriptions live on the Subreddit Sections screen now
+// (ApolloSubredditSectionsViewController), beside the live preview that shows
+// what they change.
 
 - (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
     sHideSubredditListDescriptions = sender.isOn;
@@ -3978,12 +3970,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 - (void)apollo_refreshFeedShortcutsPreviewAnimated:(BOOL)animated {
     (void)animated;
-}
-
-- (void)hideMultiredditDescriptionsSwitchToggled:(UISwitch *)sender {
-    sHideMultiredditDescriptions = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sHideMultiredditDescriptions forKey:UDKeyHideMultiredditDescriptions];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideMultiredditDescriptionsChangedNotification object:nil];
 }
 
 - (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {
@@ -4403,8 +4389,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSString *)apollo_screenTitle { return @"Feed Shortcuts"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildFeedShortcutsVisibilitySection],
-              [self buildFeedShortcutsControlsSection],
-              [self buildFeedShortcutsDescriptionsSection] ];
+              [self buildFeedShortcutsControlsSection] ];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
