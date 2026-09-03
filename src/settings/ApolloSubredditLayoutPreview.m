@@ -14,6 +14,7 @@ static NSString *const ApolloPinnedPostsPreviewMessage =
 
 @interface ApolloSubredditLayoutPreviewCard ()
 @property (nonatomic, strong) ApolloSubredditHeaderPreviewView *preview;
+@property (nonatomic, strong, readwrite) UIControl *pinControl;
 @property (nonatomic, strong) UIImageView *pinIcon;
 @property (nonatomic, strong) UILabel *pinCaption;
 @property (nonatomic, strong) UISelectionFeedbackGenerator *pinFeedback;
@@ -22,6 +23,10 @@ static NSString *const ApolloPinnedPostsPreviewMessage =
 @end
 
 @implementation ApolloSubredditLayoutPreviewCard
+
++ (UIEdgeInsets)previewInsets {
+    return UIEdgeInsetsMake(10.0, 16.0, 10.0, 16.0);
+}
 
 - (instancetype)initWithPreview:(ApolloSubredditHeaderPreviewView *)preview {
     if ((self = [super initWithFrame:CGRectZero])) {
@@ -33,14 +38,19 @@ static NSString *const ApolloPinnedPostsPreviewMessage =
         _preview = preview;
         [self addSubview:preview];
 
+        _pinControl = [UIButton buttonWithType:UIButtonTypeCustom];
+        _pinControl.isAccessibilityElement = YES;
+        _pinControl.accessibilityTraits = UIAccessibilityTraitButton;
+        [_pinControl addTarget:self action:@selector(apollo_togglePin)
+             forControlEvents:UIControlEventTouchUpInside];
         _pinIcon = [[UIImageView alloc] init];
         _pinIcon.contentMode = UIViewContentModeCenter;
-        [self addSubview:_pinIcon];
+        [_pinControl addSubview:_pinIcon];
         _pinCaption = [[UILabel alloc] init];
         _pinCaption.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
         _pinCaption.textAlignment = NSTextAlignmentRight;
         _pinCaption.alpha = 0.0;
-        [self addSubview:_pinCaption];
+        [_pinControl addSubview:_pinCaption];
         _pinFeedback = [[UISelectionFeedbackGenerator alloc] init];
         _pinned = YES;
 
@@ -95,6 +105,9 @@ static NSString *const ApolloPinnedPostsPreviewMessage =
         ? (ApolloThemeAccentColor() ?: self.tintColor) : UIColor.tertiaryLabelColor;
     self.pinCaption.textColor = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel)
         ?: UIColor.secondaryLabelColor;
+    self.pinControl.accessibilityLabel = self.pinned ? @"Unpin preview" : @"Pin preview";
+    self.pinControl.accessibilityValue = self.accessibilityValue;
+    self.pinControl.accessibilityHint = self.accessibilityHint;
 }
 
 - (void)apollo_togglePin {
@@ -126,13 +139,14 @@ static NSString *const ApolloPinnedPostsPreviewMessage =
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    self.preview.frame = CGRectInset(self.bounds, 16.0, 10.0);
-    CGFloat iconX = MAX(0.0, CGRectGetWidth(self.bounds) - 12.0 - 22.0);
+    self.preview.frame = UIEdgeInsetsInsetRect(self.bounds, self.class.previewInsets);
+    CGFloat iconX = MAX(0.0, CGRectGetWidth(self.pinControl.bounds) - 11.0 - 22.0);
+    CGFloat centerY = CGRectGetMidY(self.pinControl.bounds);
     // Use center/bounds while the glyph is transformed by its tap animation.
     self.pinIcon.bounds = CGRectMake(0.0, 0.0, 22.0, 22.0);
-    self.pinIcon.center = CGPointMake(iconX + 11.0, 18.0);
-    CGFloat captionWidth = MAX(0.0, MIN(iconX - 18.0, ceil(self.pinCaption.intrinsicContentSize.width)));
-    self.pinCaption.frame = CGRectMake(iconX - 6.0 - captionWidth, 7.0, captionWidth, 22.0);
+    self.pinIcon.center = CGPointMake(iconX + 11.0, centerY);
+    CGFloat captionWidth = MAX(0.0, MIN(iconX - 6.0, ceil(self.pinCaption.intrinsicContentSize.width)));
+    self.pinCaption.frame = CGRectMake(iconX - 6.0 - captionWidth, centerY - 11.0, captionWidth, 22.0);
 }
 
 @end

@@ -19,7 +19,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface ApolloSubredditLayoutPreviewCard : UIView
 
++ (UIEdgeInsets)previewInsets;
 - (instancetype)initWithPreview:(ApolloSubredditHeaderPreviewView *)preview;
+@property (nonatomic, strong, readonly) UIControl *pinControl;
 @property (nonatomic) BOOL pinned;
 @property (nonatomic, copy, nullable) void (^pinDidChange)(BOOL pinned);
 - (void)apollo_applyCurrentAppearance;

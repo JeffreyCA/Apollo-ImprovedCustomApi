@@ -155,6 +155,7 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
     };
     self.pinnedPreviewCard = card;
     [host addSubview:card];
+    [host addSubview:card.pinControl];
 
     [self.tableView addSubview:host];
     [self apollo_applyTheme];
@@ -229,12 +230,13 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
     CGRect readableFrame = [self apollo_tableReadableFrame];
     CGFloat cardX = CGRectGetMinX(readableFrame);
     CGFloat cardWidth = CGRectGetWidth(readableFrame);
-    CGFloat previewWidth = MAX(1.0, cardWidth - 32.0);
+    UIEdgeInsets previewInsets = ApolloSubredditLayoutPreviewCard.previewInsets;
+    CGFloat previewWidth = MAX(1.0, cardWidth - previewInsets.left - previewInsets.right);
     CGFloat previewHeight = ceil([self.layoutPreviewView preferredPreviewHeightForWidth:previewWidth]);
     CGFloat titleTop = 15.0;
     CGFloat titleHeight = ceil(MAX(20.0, self.pinnedPreviewTitleLabel.font.lineHeight));
     CGFloat cardTop = titleTop + titleHeight + 7.0;
-    CGFloat cardHeight = previewHeight + 20.0;
+    CGFloat cardHeight = previewHeight + previewInsets.top + previewInsets.bottom;
     CGFloat totalHeight = cardTop + cardHeight;
 
     CGFloat oldHeight = self.pinnedPreviewHeight;
@@ -243,8 +245,12 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
     BOOL preserveRowPosition = visibleTop > 0.5 &&
         ([self apollo_canPinPreview] || visibleTop >= oldHeight);
 
+    CGFloat pinControlWidth = MIN(112.0, previewWidth * 0.45);
     self.pinnedPreviewTitleLabel.frame = CGRectMake(cardX + 16.0, titleTop,
-                                                     previewWidth, titleHeight);
+                                                     previewWidth - pinControlWidth, titleHeight);
+    self.pinnedPreviewCard.pinControl.frame = CGRectMake(cardX + cardWidth - 5.0 - pinControlWidth,
+                                                         titleTop + (titleHeight - 44.0) / 2.0,
+                                                         pinControlWidth, 44.0);
     self.pinnedPreviewCard.frame = CGRectMake(cardX, cardTop, cardWidth, cardHeight);
     [self.pinnedPreviewCard setNeedsLayout];
     [self.pinnedPreviewCard layoutIfNeeded];
