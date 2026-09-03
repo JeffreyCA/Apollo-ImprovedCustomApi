@@ -470,6 +470,69 @@ static void ApolloSimDebugMeasureGIFMemory(NSString *source) {
     }
 }
 
+// "scrollto Y" command support: pin the tallest on-screen scroll view (the
+// comments table on a thread) to a content offset, so a test can land on the
+// same comments every run — a synthesized flick's inertia varies run to run.
+static UIScrollView *ApolloSimDebugTallestScrollViewIn(UIView *view) {
+    UIScrollView *best = nil;
+    if ([view isKindOfClass:[UIScrollView class]] && !view.hidden && view.window) {
+        best = (UIScrollView *)view;
+    }
+    for (UIView *sub in view.subviews) {
+        UIScrollView *candidate = ApolloSimDebugTallestScrollViewIn(sub);
+        if (candidate && (!best || candidate.contentSize.height > best.contentSize.height)) {
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+static void ApolloSimDebugScrollTo(CGFloat y) {
+    UIScrollView *best = nil;
+    for (UIWindow *window in ApolloAllWindows()) {
+        if (window.hidden) continue;
+        UIScrollView *candidate = ApolloSimDebugTallestScrollViewIn(window);
+        if (candidate && (!best || candidate.contentSize.height > best.contentSize.height)) {
+            best = candidate;
+        }
+    }
+    if (!best) { ApolloLog(@"[SimDebugTap] scrollto: no scroll view"); return; }
+    CGFloat top = best.adjustedContentInset.top;
+    CGFloat maxY = MAX(-top, best.contentSize.height - best.bounds.size.height + best.adjustedContentInset.bottom);
+    CGFloat target = MIN(MAX(y - top, -top), maxY);
+    [best setContentOffset:CGPointMake(best.contentOffset.x, target) animated:NO];
+    ApolloLog(@"[SimDebugTap] scrollto %.0f -> offset %.0f (%@ content %.0f)",
+              y, target, NSStringFromClass([best class]), best.contentSize.height);
+}
+
+// "lpm on|off" command support: the simulator has no Battery settings pane,
+// so Low Power Mode can't be toggled there. Force -[NSProcessInfo
+// isLowPowerModeEnabled] instead and post the real power-state notification,
+// so the inline-GIF autoplay rules (which must ignore LPM — #634/#1004) and
+// anything else listening to the power state react exactly as on a device.
+// Swizzled by hand on the CONCRETE class of +[NSProcessInfo processInfo]
+// (swift-foundation hands back an _NSSwiftProcessInfo subclass on current
+// iOS, so a plain `%hook NSProcessInfo` never sees the call).
+static BOOL sApolloSimForceLowPowerMode = NO;
+static BOOL (*sApolloSimOrigIsLowPowerModeEnabled)(id, SEL) = NULL;
+
+static BOOL ApolloSimHookedIsLowPowerModeEnabled(id self, SEL _cmd) {
+    if (sApolloSimForceLowPowerMode) return YES;
+    return sApolloSimOrigIsLowPowerModeEnabled ? sApolloSimOrigIsLowPowerModeEnabled(self, _cmd) : NO;
+}
+
+static void ApolloSimInstallLowPowerModeOverride(void) {
+    Class cls = object_getClass(NSProcessInfo.processInfo);
+    Method m = class_getInstanceMethod(cls, @selector(isLowPowerModeEnabled));
+    if (!m) {
+        ApolloLog(@"[SimDebugTap] lpm override: no isLowPowerModeEnabled on %@", NSStringFromClass(cls));
+        return;
+    }
+    sApolloSimOrigIsLowPowerModeEnabled = (BOOL (*)(id, SEL))method_getImplementation(m);
+    method_setImplementation(m, (IMP)ApolloSimHookedIsLowPowerModeEnabled);
+    ApolloLog(@"[SimDebugTap] lpm override installed on %@", NSStringFromClass(cls));
+}
+
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -508,6 +571,29 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:UDKeyScrollEdgeEffectStyle];
             [[NSNotificationCenter defaultCenter] postNotificationName:ApolloScrollEdgeEffectStyleChangedNotification object:nil];
             ApolloLog(@"[SimDebugTap] headerstyle -> %ld", (long)mode);
+            return;
+        }
+        // "gifmode N" command: set Autoplay Inline GIFs (1 Never, 2 WiFi Only,
+        // 3 Always, 4 Tap to Play) through the same defaults write the settings
+        // picker makes, so the KVO reload + live refresh of on-screen GIFs run.
+        if ([contents hasPrefix:@"gifmode "]) {
+            NSInteger mode = [[contents substringFromIndex:8] integerValue];
+            [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:UDKeyAutoplayInlineGIFs];
+            ApolloLog(@"[SimDebugTap] gifmode -> %ld", (long)mode);
+            return;
+        }
+        if ([contents hasPrefix:@"scrollto "]) {
+            ApolloSimDebugScrollTo([[contents substringFromIndex:9] doubleValue]);
+            return;
+        }
+        if ([contents hasPrefix:@"lpm "]) {
+            NSString *payload = [[contents substringFromIndex:4] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            sApolloSimForceLowPowerMode = [payload isEqualToString:@"on"];
+            [[NSNotificationCenter defaultCenter] postNotificationName:NSProcessInfoPowerStateDidChangeNotification
+                                                                object:NSProcessInfo.processInfo];
+            ApolloLog(@"[SimDebugTap] lpm -> %d (isLowPowerModeEnabled=%d)",
+                      sApolloSimForceLowPowerMode, NSProcessInfo.processInfo.isLowPowerModeEnabled);
             return;
         }
         if ([contents hasPrefix:@"crash "]) {
@@ -619,6 +705,7 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
 }
 
 %ctor {
+    ApolloSimInstallLowPowerModeOverride();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
         ApolloSimDebugTapNotification, CFSTR("apollofix.debugtap"), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
