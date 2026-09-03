@@ -3693,6 +3693,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyInlineMediaPreviewPinned: @YES,
                                     UDKeyLinkPreviewBodyMode: @(ApolloLinkPreviewModeFull),
                                     UDKeyLinkPreviewCommentsMode: @(ApolloLinkPreviewModeFull),
+                                    UDKeyLinkPreviewPreviewPinned: @YES,
                                     UDKeyLinkPreviewCardColor: @(ApolloLinkPreviewCardColorNeutral),
                                     UDKeyImageUploadProvider: @(ImageUploadProviderImgur),
                                     UDKeyCommentLinkHost: @(CommentLinkHostOff),

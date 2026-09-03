@@ -636,6 +636,11 @@ static NSString *const UDKeyLinkPreviewCardColor = @"LinkPreviewCardColor";
 // means "Default" (no custom fill — the standard neutral card). A non-empty
 // hex paints the whole card that exact color, with auto-contrasted text.
 static NSString *const UDKeyLinkPreviewCardColorHex = @"LinkPreviewCardColorHex";
+// Whether the Rich Link Previews screen's live preview stays pinned while the
+// rows scroll beneath it (default) or scrolls away with them. Tap the card to
+// toggle (ApolloSettingsPinnedPreview); one key per screen, like
+// UDKeyInlineMediaPreviewPinned.
+static NSString *const UDKeyLinkPreviewPreviewPinned = @"LinkPreviewPreviewPinned";
 static NSString *const ApolloLinkPreviewModeDidChangeNotification = @"ApolloLinkPreviewModeDidChangeNotification";
 // Posted by the Inline Media settings screen when size/alignment changes so
 // visible comments re-measure their inline media immediately.
