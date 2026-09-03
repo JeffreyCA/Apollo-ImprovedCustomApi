@@ -12,6 +12,131 @@ static NSString *const ApolloSubredditLayoutPreviewSubredditName = @"ApolloRebor
 static NSString *const ApolloPinnedPostsPreviewMessage =
     @"Pinned posts appear normally in the subreddit feed.";
 
+@interface ApolloSubredditLayoutPreviewCard ()
+@property (nonatomic, strong) ApolloSubredditHeaderPreviewView *preview;
+@property (nonatomic, strong) UIImageView *pinIcon;
+@property (nonatomic, strong) UILabel *pinCaption;
+@property (nonatomic, strong) UISelectionFeedbackGenerator *pinFeedback;
+@property (nonatomic, strong) UITapGestureRecognizer *pinTap;
+@property (nonatomic) NSUInteger pinCaptionToken;
+@end
+
+@implementation ApolloSubredditLayoutPreviewCard
+
+- (instancetype)initWithPreview:(ApolloSubredditHeaderPreviewView *)preview {
+    if ((self = [super initWithFrame:CGRectZero])) {
+        self.clipsToBounds = YES;
+        self.layer.cornerRadius = 12.0;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.isAccessibilityElement = YES;
+        self.accessibilityTraits = UIAccessibilityTraitButton;
+        _preview = preview;
+        [self addSubview:preview];
+
+        _pinIcon = [[UIImageView alloc] init];
+        _pinIcon.contentMode = UIViewContentModeCenter;
+        [self addSubview:_pinIcon];
+        _pinCaption = [[UILabel alloc] init];
+        _pinCaption.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+        _pinCaption.textAlignment = NSTextAlignmentRight;
+        _pinCaption.alpha = 0.0;
+        [self addSubview:_pinCaption];
+        _pinFeedback = [[UISelectionFeedbackGenerator alloc] init];
+        _pinned = YES;
+
+        // A tap recognizer yields to the table's pan, so dragging the card
+        // scrolls normally instead of toggling its pin state.
+        _pinTap = [[UITapGestureRecognizer alloc]
+            initWithTarget:self action:@selector(apollo_togglePin)];
+        [self addGestureRecognizer:_pinTap];
+        [self apollo_applyCurrentAppearance];
+    }
+    return self;
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    for (UIView *ancestor = self.superview; ancestor; ancestor = ancestor.superview) {
+        if (![ancestor isKindOfClass:UIScrollView.class]) continue;
+        [self.pinTap requireGestureRecognizerToFail:((UIScrollView *)ancestor).panGestureRecognizer];
+        break;
+    }
+}
+
+- (NSString *)accessibilityLabel {
+    return self.preview.accessibilityLabel;
+}
+
+- (NSString *)accessibilityValue {
+    return self.pinned ? @"Pinned" : @"Unpinned";
+}
+
+- (NSString *)accessibilityHint {
+    return self.pinned ? @"Unpin to scroll the preview with settings."
+                       : @"Pin to keep the preview visible while scrolling.";
+}
+
+- (BOOL)accessibilityActivate {
+    [self apollo_togglePin];
+    return YES;
+}
+
+- (void)setPinned:(BOOL)pinned {
+    _pinned = pinned;
+    [self apollo_applyCurrentAppearance];
+}
+
+- (void)apollo_applyCurrentAppearance {
+    UIImageSymbolConfiguration *configuration =
+        [UIImageSymbolConfiguration configurationWithPointSize:13.0 weight:UIImageSymbolWeightSemibold];
+    self.pinIcon.image = [UIImage systemImageNamed:self.pinned ? @"pin.fill" : @"pin"
+                               withConfiguration:configuration];
+    self.pinIcon.tintColor = self.pinned
+        ? (ApolloThemeAccentColor() ?: self.tintColor) : UIColor.tertiaryLabelColor;
+    self.pinCaption.textColor = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel)
+        ?: UIColor.secondaryLabelColor;
+}
+
+- (void)apollo_togglePin {
+    self.pinned = !self.pinned;
+    [self.pinFeedback selectionChanged];
+    if (!UIAccessibilityIsReduceMotionEnabled()) {
+        self.pinIcon.transform = CGAffineTransformMakeScale(1.3, 1.3);
+        [UIView animateWithDuration:0.45 delay:0.0 usingSpringWithDamping:0.5 initialSpringVelocity:0.0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{ self.pinIcon.transform = CGAffineTransformIdentity; }
+                         completion:nil];
+    }
+
+    NSUInteger token = ++self.pinCaptionToken;
+    [self.pinCaption.layer removeAllAnimations];
+    self.pinCaption.text = self.pinned ? @"Pinned" : @"Unpinned";
+    self.pinCaption.alpha = 0.0;
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    [UIView animateWithDuration:0.15 animations:^{ self.pinCaption.alpha = 1.0; }];
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.pinCaptionToken != token) return;
+        [UIView animateWithDuration:0.3 animations:^{ strongSelf.pinCaption.alpha = 0.0; }];
+    });
+    if (self.pinDidChange) self.pinDidChange(self.pinned);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.preview.frame = CGRectInset(self.bounds, 16.0, 10.0);
+    CGFloat iconX = MAX(0.0, CGRectGetWidth(self.bounds) - 12.0 - 22.0);
+    // Use center/bounds while the glyph is transformed by its tap animation.
+    self.pinIcon.bounds = CGRectMake(0.0, 0.0, 22.0, 22.0);
+    self.pinIcon.center = CGPointMake(iconX + 11.0, 18.0);
+    CGFloat captionWidth = MAX(0.0, MIN(iconX - 18.0, ceil(self.pinCaption.intrinsicContentSize.width)));
+    self.pinCaption.frame = CGRectMake(iconX - 6.0 - captionWidth, 7.0, captionWidth, 22.0);
+}
+
+@end
+
 // Settings previews are intentionally deterministic. They use a production-
 // shaped model and bundled artwork rather than touching Reddit or inheriting
 // whatever happens to be in the live subreddit cache.

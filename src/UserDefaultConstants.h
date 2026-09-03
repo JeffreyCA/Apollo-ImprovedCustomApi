@@ -212,6 +212,8 @@ static NSString *const UDKeySubredditShowSubtitle = @"SubredditShowSubtitle";
 // Whether the Reborn subreddit header shows the community's about text.
 // Defaults to YES alongside the other header bands.
 static NSString *const UDKeySubredditShowDescription = @"SubredditShowDescription";
+// Keep the Subreddit Layout settings preview visible while scrolling. Default YES.
+static NSString *const UDKeySubredditLayoutPreviewPinned = @"SubredditLayoutPreviewPinned";
 // Backing values for the single Community Highlights picker. Keeping the old
 // keys maps existing settings naturally: both YES = Full, master only = Partial,
 // master NO = Off.

@@ -17,6 +17,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+@interface ApolloSubredditLayoutPreviewCard : UIView
+
+- (instancetype)initWithPreview:(ApolloSubredditHeaderPreviewView *)preview;
+@property (nonatomic) BOOL pinned;
+@property (nonatomic, copy, nullable) void (^pinDidChange)(BOOL pinned);
+- (void)apollo_applyCurrentAppearance;
+
+@end
+
 @interface ApolloCommunityHighlightsPreviewView : UIView
 
 - (void)configureWithMode:(ApolloCommunityHighlightsMode)mode;

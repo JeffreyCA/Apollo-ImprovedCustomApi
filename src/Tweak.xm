@@ -3715,6 +3715,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeySubredditShowDisplayName: @YES,
                                     UDKeySubredditShowSubtitle: @YES,
                                     UDKeySubredditShowDescription: @YES,
+                                    UDKeySubredditLayoutPreviewPinned: @YES,
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,

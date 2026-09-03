@@ -12,7 +12,7 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
 @interface ApolloSubredditLayoutViewController ()
 @property (nonatomic, strong) ApolloSubredditHeaderPreviewView *layoutPreviewView;
 @property (nonatomic, strong) UIView *pinnedPreviewHost;
-@property (nonatomic, strong) UIView *pinnedPreviewCard;
+@property (nonatomic, strong) ApolloSubredditLayoutPreviewCard *pinnedPreviewCard;
 @property (nonatomic, strong) UILabel *pinnedPreviewTitleLabel;
 @property (nonatomic, strong) UIView *pinnedPreviewSpacer;
 @property (nonatomic) CGFloat pinnedPreviewHeight;
@@ -103,6 +103,7 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
         ?: ApolloThemePageBackgroundColor()
         ?: UIColor.systemGroupedBackgroundColor;
     self.pinnedPreviewCard.backgroundColor = [self apollo_themeCellBackgroundColor];
+    [self.pinnedPreviewCard apollo_applyCurrentAppearance];
     self.pinnedPreviewTitleLabel.textColor = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel)
         ?: UIColor.secondaryLabelColor;
     [self.layoutPreviewView apollo_applyCurrentAppearance];
@@ -120,12 +121,12 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
 
     self.pinnedPreviewSpacer = [[UIView alloc] initWithFrame:CGRectZero];
     self.pinnedPreviewSpacer.backgroundColor = UIColor.clearColor;
+    self.pinnedPreviewSpacer.userInteractionEnabled = NO;
     self.pinnedPreviewSpacer.accessibilityElementsHidden = YES;
     self.tableView.tableHeaderView = self.pinnedPreviewSpacer;
 
     UIView *host = [[UIView alloc] initWithFrame:CGRectZero];
     host.clipsToBounds = YES;
-    host.layer.zPosition = 1000.0;
     self.pinnedPreviewHost = host;
 
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -137,35 +138,86 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
     self.pinnedPreviewTitleLabel = titleLabel;
     [host addSubview:titleLabel];
 
-    UIView *card = [[UIView alloc] initWithFrame:CGRectZero];
-    card.layer.cornerRadius = 12.0;
-    card.layer.cornerCurve = kCACornerCurveContinuous;
-    card.clipsToBounds = YES;
+    ApolloSubredditLayoutPreviewCard *card =
+        [[ApolloSubredditLayoutPreviewCard alloc] initWithPreview:self.layoutPreviewView];
+    card.pinned = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditLayoutPreviewPinned];
+    __weak typeof(self) weakSelf = self;
+    card.pinDidChange = ^(BOOL pinned) {
+        [[NSUserDefaults standardUserDefaults] setBool:pinned forKey:UDKeySubredditLayoutPreviewPinned];
+        if (UIAccessibilityIsReduceMotionEnabled()) {
+            [weakSelf apollo_updatePinnedPreviewPosition];
+        } else {
+            [UIView animateWithDuration:0.35 delay:0.0 usingSpringWithDamping:0.9 initialSpringVelocity:0.0
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                             animations:^{ [weakSelf apollo_updatePinnedPreviewPosition]; }
+                             completion:nil];
+        }
+    };
     self.pinnedPreviewCard = card;
     [host addSubview:card];
-    [card addSubview:self.layoutPreviewView];
 
     [self.tableView addSubview:host];
     [self apollo_applyTheme];
     [self apollo_updatePinnedPreviewLayoutPreservingScroll:NO];
 }
 
+- (BOOL)apollo_canPinPreview {
+    CGFloat availableHeight = CGRectGetHeight(self.tableView.bounds)
+        - self.tableView.adjustedContentInset.top - self.tableView.adjustedContentInset.bottom;
+    return self.pinnedPreviewCard.pinned &&
+        self.traitCollection.verticalSizeClass != UIUserInterfaceSizeClassCompact &&
+        availableHeight - self.pinnedPreviewHeight >= 200.0;
+}
+
+- (void)apollo_orderPreviewAboveTableContent {
+    // Keep visual and touch order aligned without covering UIKit's scroll
+    // indicators or navigation-edge effects. iOS 26 nests cells in wrappers.
+    NSMutableArray<UIView *> *content = [self.tableView.visibleCells mutableCopy];
+    [content addObject:self.pinnedPreviewSpacer];
+    for (NSInteger section = 0; section < self.tableView.numberOfSections; section++) {
+        UIView *header = [self.tableView headerViewForSection:section];
+        UIView *footer = [self.tableView footerViewForSection:section];
+        if (header) [content addObject:header];
+        if (footer) [content addObject:footer];
+    }
+    NSArray<UIView *> *subviews = self.tableView.subviews;
+    NSUInteger topIndex = 0;
+    UIView *topContent = nil;
+    for (UIView *view in content) {
+        UIView *direct = view;
+        while (direct.superview && direct.superview != self.tableView) direct = direct.superview;
+        if (direct.superview != self.tableView) continue;
+        NSUInteger index = [subviews indexOfObjectIdenticalTo:direct];
+        if (index != NSNotFound && (!topContent || index > topIndex)) {
+            topIndex = index;
+            topContent = direct;
+        }
+    }
+    if (topContent && [subviews indexOfObjectIdenticalTo:self.pinnedPreviewHost] != topIndex + 1) {
+        [self.tableView insertSubview:self.pinnedPreviewHost aboveSubview:topContent];
+    }
+}
+
 - (void)apollo_updatePinnedPreviewPosition {
     if (!self.pinnedPreviewHost) return;
 
-    // Cover the navigation inset so scrolled rows cannot reappear above the
-    // preview. Negative bounds keep its title and card below that inset.
     CGFloat topInset = MAX(0.0, self.tableView.adjustedContentInset.top);
-    CGRect frame = CGRectMake(0.0, self.tableView.contentOffset.y,
+    CGFloat visibleTop = self.tableView.contentOffset.y + topInset;
+    CGFloat contentY = [self apollo_canPinPreview] ? MAX(0.0, visibleTop) : 0.0;
+    // Cover the navigation inset only while stuck. Matching negative bounds
+    // keep the title/card stationary as the mask appears or disappears.
+    CGFloat maskTop = contentY > 0.0 ? topInset : 0.0;
+    CGRect frame = CGRectMake(0.0, contentY - maskTop,
                               CGRectGetWidth(self.tableView.bounds),
-                              self.pinnedPreviewHeight + topInset);
-    CGRect bounds = CGRectMake(0.0, -topInset, frame.size.width, frame.size.height);
+                              self.pinnedPreviewHeight + maskTop);
+    CGRect bounds = CGRectMake(0.0, -maskTop, frame.size.width, frame.size.height);
     if (!CGRectEqualToRect(self.pinnedPreviewHost.frame, frame)) {
         self.pinnedPreviewHost.frame = frame;
     }
     if (!CGRectEqualToRect(self.pinnedPreviewHost.bounds, bounds)) {
         self.pinnedPreviewHost.bounds = bounds;
     }
+    [self apollo_orderPreviewAboveTableContent];
 }
 
 - (void)apollo_updatePinnedPreviewLayoutPreservingScroll:(BOOL)preserveScroll {
@@ -187,12 +239,15 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
 
     CGFloat oldHeight = self.pinnedPreviewHeight;
     CGPoint oldOffset = self.tableView.contentOffset;
-    BOOL scrolled = oldOffset.y + self.tableView.adjustedContentInset.top > 0.5;
+    CGFloat visibleTop = oldOffset.y + self.tableView.adjustedContentInset.top;
+    BOOL preserveRowPosition = visibleTop > 0.5 &&
+        ([self apollo_canPinPreview] || visibleTop >= oldHeight);
 
     self.pinnedPreviewTitleLabel.frame = CGRectMake(cardX + 16.0, titleTop,
                                                      previewWidth, titleHeight);
     self.pinnedPreviewCard.frame = CGRectMake(cardX, cardTop, cardWidth, cardHeight);
-    self.layoutPreviewView.frame = CGRectMake(16.0, 10.0, previewWidth, previewHeight);
+    [self.pinnedPreviewCard setNeedsLayout];
+    [self.pinnedPreviewCard layoutIfNeeded];
 
     CGRect spacerFrame = CGRectMake(0.0, 0.0, tableWidth, totalHeight);
     BOOL spacerChanged = !CGRectEqualToRect(self.pinnedPreviewSpacer.frame, spacerFrame);
@@ -201,8 +256,9 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
     if (spacerChanged || self.tableView.tableHeaderView != self.pinnedPreviewSpacer) {
         self.tableView.tableHeaderView = self.pinnedPreviewSpacer;
     }
-    if (preserveScroll && scrolled && oldHeight > 0.0 && ABS(totalHeight - oldHeight) > 0.5) {
-        oldOffset.y += totalHeight - oldHeight;
+    if (preserveScroll && preserveRowPosition && oldHeight > 0.0 && ABS(totalHeight - oldHeight) > 0.5) {
+        oldOffset.y = MAX(-self.tableView.adjustedContentInset.top,
+                          oldOffset.y + totalHeight - oldHeight);
         self.tableView.contentOffset = oldOffset;
     }
 
