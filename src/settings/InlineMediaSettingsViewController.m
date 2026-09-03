@@ -4,6 +4,7 @@
 #import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
+#import "settings/ApolloSettingsPinnedPreview.h"
 #import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -32,11 +33,11 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
 
 // MARK: - Live preview (fake comment + message thread)
 //
-// A standalone UIView owned by the controller. Unlike ApolloLPPreviewCardsView
-// (Rich Link Preview settings) it is NOT hosted in a table cell: it lives in the
-// pinned preview card (ApolloIMPinnedPreviewHost, a direct subview of the table
-// view), so it survives every reloadData untouched and keeps updating live while
-// the list scrolls beneath it. One apply/refresh entry point the controls call
+// A standalone UIView owned by the controller. It is NOT hosted in a table
+// cell: it lives in the pinned preview card (ApolloPinnedPreviewHost, a direct
+// subview of the table view — see ApolloSettingsPinnedPreview.h), so it
+// survives every reloadData untouched and keeps updating live while the list
+// scrolls beneath it. One apply/refresh entry point the controls call
 // continuously while dragging. Frame-based layout — this is a plain settings
 // view, not a Texture hook, so laying out subviews here is fine.
 //
@@ -278,257 +279,6 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
 }
 
 @end
-
-// MARK: - Pinned preview host (sticks below the nav bar while the list scrolls)
-
-// The preview card. A direct subview of the table view — never a cell — sized
-// to the transparent spacer row that reserves its resting place under the
-// "Preview" header. While that row is on screen the card sits exactly on it and
-// scrolls like any other row; once the header would slide under the nav bar the
-// header AND the card stick just below the bar instead (an opaque backdrop
-// hides the rows passing underneath), so every control further down is adjusted
-// with the preview still in view. Positioning lives in
-// ApolloIMSettingsTableView's layoutSubviews, which UIScrollView runs on every
-// content-offset change.
-//
-// The pinned "Preview" title is a copy of UIKit's own section header label —
-// text, font, colour and position are sampled from the real header view while
-// it is on screen (it always is at rest), so it matches whatever header style
-// this iOS / Liquid Glass combination draws, and only becomes visible once the
-// block is stuck (the native header is under the backdrop by then).
-//
-// Height-constrained layouts (landscape phones, tiny screens) don't stick:
-// pinning a ~400pt card there would leave no usable list, so the card just
-// scrolls with the content as it always did.
-static const CGFloat kApolloIMStuckTopGap = 8.0;       // nav bar bottom → card top
-static const CGFloat kApolloIMStuckBottomPad = 8.0;    // backdrop below the card
-static const CGFloat kApolloIMMinListViewport = 200.0; // list room needed to bother sticking
-
-@interface ApolloIMPinnedPreviewHost : UIView
-@property (nonatomic, strong) UIView *card;
-@property (nonatomic, strong) ApolloInlineMediaPreviewView *preview;
-@property (nonatomic, strong) UILabel *titleLabel;      // pinned copy of the section header
-@property (nonatomic, strong) UIColor *backdropColor;   // table background, shown while stuck
-@property (nonatomic, strong) UIColor *accentColor;     // filled pin glyph
-@property (nonatomic) BOOL stuck;
-// Pin toggle: tapping anywhere on the card flips it. Pinned (default) = the
-// block sticks below the nav bar; unpinned = it scrolls with the list like any
-// row. A small pin glyph in the card's corner shows the state at all times
-// (filled + accent when pinned, outlined + dim when not), and a short caption
-// acknowledges each tap. The controller persists the choice.
-@property (nonatomic) BOOL pinned;
-@property (nonatomic, strong) UIButton *pinButton;
-@property (nonatomic, strong) UIImageView *pinIcon;
-@property (nonatomic, strong) UILabel *pinCaption;
-@property (nonatomic, strong) UISelectionFeedbackGenerator *pinFeedback;
-@property (nonatomic) NSUInteger pinCaptionToken;
-@property (nonatomic, copy) void (^pinDidChange)(BOOL pinned);
-// Sampled from the native header: the label's origin relative to the card's
-// resting origin (y is negative — the title sits above the card) and its size.
-@property (nonatomic) BOOL hasTitleSample;
-@property (nonatomic) CGPoint titleOffset;
-@property (nonatomic) CGSize titleSize;
-- (void)sampleTitleFromHeaderView:(UIView *)headerView inTable:(UITableView *)table cardOrigin:(CGPoint)cardOrigin;
-// Real inset-grouped cell width measured by the layout pass (0 = not yet seen)
-// and the callback the controller uses to re-measure the spacer row when it
-// changes (first layout, rotation).
-@property (nonatomic) CGFloat measuredCardWidth;
-@property (nonatomic, copy) void (^cardWidthDidChange)(CGFloat width);
-@end
-
-@implementation ApolloIMPinnedPreviewHost
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    if ((self = [super initWithFrame:frame])) {
-        self.backgroundColor = [UIColor clearColor];
-        _card = [[UIView alloc] init];
-        _card.clipsToBounds = YES;
-        [self addSubview:_card];
-        _preview = [[ApolloInlineMediaPreviewView alloc] initWithFrame:CGRectZero];
-        [_card addSubview:_preview];
-        _titleLabel = [[UILabel alloc] init];
-        _titleLabel.hidden = YES;
-        [self addSubview:_titleLabel];
-
-        // UIControl target/action does not retain its target, so the host can
-        // be the target without a host → card → button → host cycle.
-        _pinButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        _pinButton.backgroundColor = [UIColor clearColor];
-        [_pinButton addTarget:self action:@selector(apollo_pinTapped) forControlEvents:UIControlEventTouchUpInside];
-        [_card addSubview:_pinButton];
-        _pinIcon = [[UIImageView alloc] init];
-        _pinIcon.contentMode = UIViewContentModeCenter;
-        _pinIcon.userInteractionEnabled = NO;
-        [_card addSubview:_pinIcon];
-        _pinCaption = [[UILabel alloc] init];
-        _pinCaption.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
-        _pinCaption.textColor = [UIColor secondaryLabelColor];
-        _pinCaption.textAlignment = NSTextAlignmentRight;
-        _pinCaption.alpha = 0.0;
-        _pinCaption.userInteractionEnabled = NO;
-        [_card addSubview:_pinCaption];
-        _pinFeedback = [[UISelectionFeedbackGenerator alloc] init];
-        _pinned = YES;
-        [self apollo_updatePinIcon];
-    }
-    return self;
-}
-
-- (void)setPinned:(BOOL)pinned {
-    _pinned = pinned;
-    [self apollo_updatePinIcon];
-}
-
-- (void)setAccentColor:(UIColor *)accentColor {
-    _accentColor = accentColor;
-    [self apollo_updatePinIcon];
-}
-
-- (void)apollo_updatePinIcon {
-    UIImageSymbolConfiguration *config =
-        [UIImageSymbolConfiguration configurationWithPointSize:13.0 weight:UIImageSymbolWeightSemibold];
-    self.pinIcon.image = [UIImage systemImageNamed:self.pinned ? @"pin.fill" : @"pin" withConfiguration:config];
-    self.pinIcon.tintColor = self.pinned
-        ? (self.accentColor ?: [UIColor systemBlueColor])
-        : [UIColor tertiaryLabelColor];
-    self.pinButton.accessibilityLabel = self.pinned ? @"Unpin preview" : @"Pin preview";
-}
-
-- (void)apollo_pinTapped {
-    self.pinned = !self.pinned;
-    [self.pinFeedback selectionChanged];
-
-    // Bounce the glyph so the tap reads as a state change.
-    self.pinIcon.transform = CGAffineTransformMakeScale(1.3, 1.3);
-    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0
-                        options:UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{ self.pinIcon.transform = CGAffineTransformIdentity; }
-                     completion:nil];
-
-    // Brief caption next to the glyph, replaced (not stacked) by a quick re-tap.
-    NSUInteger token = ++self.pinCaptionToken;
-    self.pinCaption.text = self.pinned ? @"Pinned" : @"Unpinned";
-    [self setNeedsLayout];
-    [self layoutIfNeeded];
-    [UIView animateWithDuration:0.15 animations:^{ self.pinCaption.alpha = 1.0; }];
-    __weak __typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        __strong __typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf || strongSelf.pinCaptionToken != token) return;
-        [UIView animateWithDuration:0.3 animations:^{ strongSelf.pinCaption.alpha = 0.0; }];
-    });
-
-    if (self.pinDidChange) self.pinDidChange(self.pinned);
-}
-
-// The header's text label, wherever this iOS version nests it.
-static UILabel *ApolloIMFindHeaderLabel(UIView *view) {
-    if ([view isKindOfClass:[UILabel class]] && ((UILabel *)view).text.length > 0) return (UILabel *)view;
-    for (UIView *sub in view.subviews) {
-        UILabel *label = ApolloIMFindHeaderLabel(sub);
-        if (label) return label;
-    }
-    return nil;
-}
-
-- (void)sampleTitleFromHeaderView:(UIView *)headerView inTable:(UITableView *)table cardOrigin:(CGPoint)cardOrigin {
-    UILabel *label = ApolloIMFindHeaderLabel(headerView);
-    if (!label || !label.superview || CGRectIsEmpty(label.frame)) return;
-    CGRect frame = [label.superview convertRect:label.frame toView:table];
-    CGPoint offset = CGPointMake(CGRectGetMinX(frame) - cardOrigin.x, CGRectGetMinY(frame) - cardOrigin.y);
-    if (offset.y >= 0) return;   // not above the card: not our header's label
-    BOOL sameText = [self.titleLabel.text isEqualToString:label.text];
-    if (self.hasTitleSample && sameText &&
-        fabs(offset.x - self.titleOffset.x) < 0.5 && fabs(offset.y - self.titleOffset.y) < 0.5 &&
-        fabs(frame.size.width - self.titleSize.width) < 0.5 && fabs(frame.size.height - self.titleSize.height) < 0.5) {
-        return;   // unchanged
-    }
-    self.titleLabel.font = label.font;
-    self.titleLabel.textColor = label.textColor;
-    self.titleLabel.textAlignment = label.textAlignment;
-    self.titleLabel.numberOfLines = label.numberOfLines;
-    self.titleLabel.text = label.text;
-    if (label.attributedText) self.titleLabel.attributedText = [label.attributedText copy];
-    self.titleOffset = offset;
-    self.titleSize = frame.size;
-    self.hasTitleSample = YES;
-}
-
-- (void)setStuck:(BOOL)stuck {
-    _stuck = stuck;
-    [self apollo_updateBackdrop];
-}
-
-- (void)setBackdropColor:(UIColor *)backdropColor {
-    _backdropColor = backdropColor;
-    [self apollo_updateBackdrop];
-}
-
-- (void)apollo_updateBackdrop {
-    self.backgroundColor = self.stuck
-        ? (self.backdropColor ?: [UIColor systemGroupedBackgroundColor])
-        : [UIColor clearColor];
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGRect cardBounds = self.card.bounds;
-    self.preview.frame = cardBounds;
-    self.pinButton.frame = cardBounds;
-    CGFloat side = 22.0;
-    self.pinIcon.frame = CGRectMake(CGRectGetWidth(cardBounds) - kApolloIMPreviewInset - side, kApolloIMPreviewPad - 1.0, side, side);
-    [self.pinCaption sizeToFit];
-    CGSize captionSize = self.pinCaption.bounds.size;
-    self.pinCaption.frame = CGRectMake(CGRectGetMinX(self.pinIcon.frame) - 6.0 - captionSize.width,
-                                       CGRectGetMidY(self.pinIcon.frame) - captionSize.height * 0.5,
-                                       captionSize.width, captionSize.height);
-}
-
-@end
-
-// Transparent spacer cell: reserves the preview's resting slot in the flow (so
-// UIKit draws the native "Preview" section header above it) while the pinned
-// card does all the drawing. Kept clear by the theme override in the controller.
-@interface ApolloIMPreviewSpacerCell : UITableViewCell
-@end
-@implementation ApolloIMPreviewSpacerCell
-@end
-
-static void ApolloIMClearSpacerCell(UITableViewCell *cell) {
-    cell.backgroundColor = [UIColor clearColor];
-    cell.contentView.backgroundColor = [UIColor clearColor];
-    if (!cell.backgroundView) cell.backgroundView = [[UIView alloc] init];
-    cell.backgroundView.backgroundColor = [UIColor clearColor];
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-}
-
-// Inset-grouped section geometry the card copies so it matches the real cells.
-// Both are private UITableView getters (iOS 13+), called defensively with
-// public fallbacks: the table's layoutMargins for the inset, and the familiar
-// 10pt (26pt under Liquid Glass) for the corner radius.
-static UIEdgeInsets ApolloIMSectionContentInset(UITableView *table) {
-    SEL sel = NSSelectorFromString(@"_sectionContentInset");
-    if ([table respondsToSelector:sel]) {
-        NSMethodSignature *sig = [table methodSignatureForSelector:sel];
-        if (sig && strcmp(sig.methodReturnType, @encode(UIEdgeInsets)) == 0) {
-            UIEdgeInsets insets = ((UIEdgeInsets (*)(id, SEL))objc_msgSend)(table, sel);
-            if (insets.left >= 0 && insets.right >= 0) return insets;
-        }
-    }
-    return table.layoutMargins;
-}
-
-static CGFloat ApolloIMSectionCornerRadius(UITableView *table) {
-    SEL sel = NSSelectorFromString(@"_sectionCornerRadius");
-    if ([table respondsToSelector:sel]) {
-        NSMethodSignature *sig = [table methodSignatureForSelector:sel];
-        if (sig && strcmp(sig.methodReturnType, @encode(double)) == 0) {
-            double radius = ((double (*)(id, SEL))objc_msgSend)(table, sel);
-            if (radius > 0) return (CGFloat)radius;
-        }
-    }
-    return IsLiquidGlass() ? 26.0 : 10.0;
-}
 
 // MARK: - Detent slider (50 / 75 / 100)
 
@@ -955,13 +705,14 @@ static UIViewController *ApolloIMVCForView(UIView *view) {
 
 // MARK: - Table view (keeps the slider drag from scrolling the screen)
 
-// The settings table is isa-swizzled to this class in viewDidLoad. It overrides
-// two UIScrollView touch-arbitration hooks, scoped to the size slider only, so
-// the screen never scrolls out from under a slider drag — WITHOUT any per-drag
-// state to enable/restore (the earlier scrollEnabled / canCancelContentTouches
-// / pan-disabling approaches either collapsed the layout or left the table
-// stuck when UIControl end-tracking didn't fire).
-@interface ApolloIMSettingsTableView : UITableView
+// The settings table is isa-swizzled to this class in viewDidLoad. On top of
+// the shared pinned-preview layout pass (ApolloPinnedPreviewTableView) it
+// overrides two UIScrollView touch-arbitration hooks, scoped to the size slider
+// only, so the screen never scrolls out from under a slider drag — WITHOUT any
+// per-drag state to enable/restore (the earlier scrollEnabled /
+// canCancelContentTouches / pan-disabling approaches either collapsed the
+// layout or left the table stuck when UIControl end-tracking didn't fire).
+@interface ApolloIMSettingsTableView : ApolloPinnedPreviewTableView
 @end
 @implementation ApolloIMSettingsTableView
 static BOOL ApolloIMViewIsInSlider(UIView *view) {
@@ -985,131 +736,12 @@ static BOOL ApolloIMViewIsInSlider(UIView *view) {
     return [super touchesShouldCancelInContentView:view];
 }
 
-// MARK: Pinned preview layout
-
-// The host is attached by the controller (associated, not an ivar — the subclass
-// must stay ivar-free for object_setClass to be safe).
-static char kApolloIMPinnedHostKey;
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    [self apollo_layoutPinnedPreview];
-}
-
-- (void)apollo_layoutPinnedPreview {
-    ApolloIMPinnedPreviewHost *host = objc_getAssociatedObject(self, &kApolloIMPinnedHostKey);
-    if (!host || host.superview != self) return;
-    if (self.numberOfSections <= ApolloIMSectionPreview ||
-        [self numberOfRowsInSection:ApolloIMSectionPreview] < 1) {
-        host.hidden = YES;
-        return;
-    }
-    NSIndexPath *previewPath = [NSIndexPath indexPathForRow:0 inSection:ApolloIMSectionPreview];
-    CGRect row = [self rectForRowAtIndexPath:previewPath];   // full table width; cells are inset
-    if (CGRectIsEmpty(row)) { host.hidden = YES; return; }
-    host.hidden = NO;
-
-    // Horizontal card geometry = whatever the inset-grouped cells actually use.
-    // Any visible cell will do (they all share it), converted into the table's
-    // coordinate space: on iOS 26 cells are parented to a per-section container,
-    // so their raw frame is relative to that (x = 0), not to the table. Before
-    // the first cell exists, fall back to the row rect — already inset on iOS 26,
-    // full-width on earlier releases, where the table's section inset is applied.
-    UITableViewCell *sample = [self cellForRowAtIndexPath:previewPath] ?: self.visibleCells.firstObject;
-    CGFloat cardX, cardW;
-    if (sample && sample.superview) {
-        CGRect cellRect = [sample.superview convertRect:sample.frame toView:self];
-        cardX = CGRectGetMinX(cellRect);
-        cardW = CGRectGetWidth(cellRect);
-    } else if (CGRectGetWidth(row) < CGRectGetWidth(self.bounds) - 1.0) {
-        cardX = CGRectGetMinX(row);
-        cardW = CGRectGetWidth(row);
-    } else {
-        UIEdgeInsets inset = ApolloIMSectionContentInset(self);
-        cardX = CGRectGetMinX(row) + inset.left;
-        cardW = CGRectGetWidth(row) - inset.left - inset.right;
-    }
-    if (sample && fabs(cardW - host.measuredCardWidth) > 0.5) {
-        host.measuredCardWidth = cardW;
-        if (host.cardWidthDidChange) {
-            // Row-height changes can't happen inside the table's own layout pass;
-            // let the controller re-measure the spacer row on the next turn.
-            void (^cb)(CGFloat) = host.cardWidthDidChange;
-            dispatch_async(dispatch_get_main_queue(), ^{ cb(cardW); });
-        }
-    }
-
-    // The section header ("Preview") is pinned with the card. Sample its label
-    // while UIKit has it on screen; the copy is only shown once stuck.
-    UIView *headerView = [self headerViewForSection:ApolloIMSectionPreview];
-    if (headerView) {
-        [host sampleTitleFromHeaderView:headerView inTable:self cardOrigin:CGPointMake(cardX, CGRectGetMinY(row))];
-    }
-    CGFloat titleAbove = host.hasTitleSample ? -host.titleOffset.y : 0.0;   // title top → card top
-
-    // Stick only when there's real list room left under the block.
-    CGFloat visibleTop = self.contentOffset.y + self.adjustedContentInset.top;
-    CGFloat visibleBottom = self.contentOffset.y + CGRectGetHeight(self.bounds) - self.adjustedContentInset.bottom;
-    CGFloat listRoom = (visibleBottom - visibleTop) - titleAbove - CGRectGetHeight(row) - kApolloIMStuckTopGap - kApolloIMStuckBottomPad;
-    BOOL compactHeight = self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact;
-    BOOL canStick = host.pinned && !compactHeight && listRoom >= kApolloIMMinListViewport;
-
-    CGFloat cardY = CGRectGetMinY(row);
-    if (canStick) cardY = MAX(cardY, visibleTop + kApolloIMStuckTopGap + titleAbove);
-    BOOL stuck = cardY > CGRectGetMinY(row) + 0.5;
-
-    CGFloat hostTop = stuck ? visibleTop : CGRectGetMinY(row);
-    CGFloat hostBottom = cardY + CGRectGetHeight(row) + (stuck ? kApolloIMStuckBottomPad : 0.0);
-    host.frame = CGRectMake(0, hostTop, CGRectGetWidth(self.bounds), hostBottom - hostTop);
-    host.card.frame = CGRectMake(cardX, cardY - hostTop, cardW, CGRectGetHeight(row));
-    // Alpha rather than hidden so a pin/unpin toggle (run inside an animation
-    // block by the controller) fades the title along with the sliding card.
-    host.titleLabel.hidden = !host.hasTitleSample;
-    host.titleLabel.alpha = (stuck && host.hasTitleSample) ? 1.0 : 0.0;
-    if (host.hasTitleSample) {
-        host.titleLabel.frame = CGRectMake(cardX + host.titleOffset.x, cardY - hostTop + host.titleOffset.y,
-                                           host.titleSize.width, host.titleSize.height);
-    }
-    if (host.stuck != stuck) host.stuck = stuck;
-
-    // Keep the host above every cell and section header/footer (UITableView
-    // appends those as they scroll in, which would otherwise put them over the
-    // stuck card and let taps reach rows hidden underneath) — but no higher, so
-    // UIKit's own overlays (scroll indicator, iOS 26 scroll-edge effect) stay on
-    // top. Cells/headers may be nested in per-section containers (iOS 26), so
-    // what matters is each one's ancestor that is a DIRECT subview of the table.
-    NSArray<UIView *> *subviews = self.subviews;
-    NSUInteger hostIndex = [subviews indexOfObjectIdenticalTo:host];
-    NSMutableArray<UIView *> *content = [NSMutableArray arrayWithArray:self.visibleCells];
-    NSInteger sections = self.numberOfSections;
-    for (NSInteger section = 0; section < sections; section++) {
-        UIView *header = [self headerViewForSection:section];
-        UIView *footer = [self footerViewForSection:section];
-        if (header) [content addObject:header];
-        if (footer) [content addObject:footer];
-    }
-    UIView *topContent = nil;
-    NSUInteger topContentIndex = 0;
-    for (UIView *view in content) {
-        UIView *direct = view;
-        while (direct.superview && direct.superview != self) direct = direct.superview;
-        if (direct.superview != self || direct == host) continue;
-        NSUInteger index = [subviews indexOfObjectIdenticalTo:direct];
-        if (index != NSNotFound && (!topContent || index > topContentIndex)) {
-            topContent = direct;
-            topContentIndex = index;
-        }
-    }
-    if (topContent && topContentIndex > hostIndex) {
-        [self insertSubview:host aboveSubview:topContent];
-    }
-}
 @end
 
 // MARK: - Controller
 
 @interface InlineMediaSettingsViewController ()
-@property (nonatomic, strong) ApolloIMPinnedPreviewHost *previewHost;
+@property (nonatomic, strong) ApolloPinnedPreviewHost *previewHost;
 @property (nonatomic, strong) UILabel *mediaSizeValueLabel;
 // Card width the spacer row was last measured for (0 = only the table's own
 // section inset was available). Updated from the real cell frame by the pinned
@@ -1135,7 +767,11 @@ static char kApolloIMPinnedHostKey;
 
     // The pinned preview card: a subview of the table (positioned by the
     // subclass's layout pass), not a cell, so it never gets rebuilt by reloads.
-    ApolloIMPinnedPreviewHost *host = [[ApolloIMPinnedPreviewHost alloc] initWithFrame:CGRectZero];
+    ApolloPinnedPreviewHost *host = [[ApolloPinnedPreviewHost alloc] initWithFrame:CGRectZero];
+    host.contentView = [[ApolloInlineMediaPreviewView alloc] initWithFrame:CGRectZero];
+    host.spacerIndexPath = ^NSIndexPath * {
+        return [NSIndexPath indexPathForRow:0 inSection:ApolloIMSectionPreview];
+    };
     __weak __typeof(self) weakSelf = self;
     host.cardWidthDidChange = ^(CGFloat width) {
         [weakSelf previewCardWidthDidChange:width];
@@ -1153,8 +789,7 @@ static char kApolloIMPinnedHostKey;
                          completion:nil];
     };
     self.previewHost = host;
-    [self.tableView addSubview:host];
-    objc_setAssociatedObject(self.tableView, &kApolloIMPinnedHostKey, host, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloPinnedPreviewAttachHost(self.tableView, host);
     [self applyThemeToPreviewHost];
     [self syncPreviewState];
 }
@@ -1168,7 +803,7 @@ static char kApolloIMPinnedHostKey;
 // MARK: Preview plumbing
 
 - (ApolloInlineMediaPreviewView *)previewView {
-    return self.previewHost.preview;
+    return (ApolloInlineMediaPreviewView *)self.previewHost.contentView;
 }
 
 // Push every setting this screen owns into the mock. Called from each control's
@@ -1189,10 +824,10 @@ static char kApolloIMPinnedHostKey;
 // section corner radius, table background for the stuck backdrop, accent for
 // the plain-link stand-ins).
 - (void)applyThemeToPreviewHost {
-    ApolloIMPinnedPreviewHost *host = self.previewHost;
+    ApolloPinnedPreviewHost *host = self.previewHost;
     if (!host) return;
     host.card.backgroundColor = [self apollo_themeCellBackgroundColor];
-    host.card.layer.cornerRadius = ApolloIMSectionCornerRadius(self.tableView);
+    host.card.layer.cornerRadius = ApolloPinnedPreviewSectionCornerRadius(self.tableView);
     UIColor *tableBackground = self.tableView.backgroundColor;
     UIColor *resolved = [tableBackground resolvedColorWithTraitCollection:self.tableView.traitCollection];
     if (!resolved || CGColorGetAlpha(resolved.CGColor) < 0.99) {
@@ -1200,8 +835,8 @@ static char kApolloIMPinnedHostKey;
     }
     host.backdropColor = tableBackground;
     host.accentColor = [self apollo_themeAccentColor];
-    host.preview.accentColor = host.accentColor;
-    [host.preview refresh];
+    self.previewView.accentColor = host.accentColor;
+    [self.previewView refresh];
 }
 
 - (void)apollo_applyTheme {
@@ -1211,8 +846,8 @@ static char kApolloIMPinnedHostKey;
 
 // The spacer row must stay invisible whatever the theme pass does to cells.
 - (void)apollo_applyThemeToCell:(UITableViewCell *)cell {
-    if ([cell isKindOfClass:[ApolloIMPreviewSpacerCell class]]) {
-        ApolloIMClearSpacerCell(cell);
+    if ([cell isKindOfClass:[ApolloPinnedPreviewSpacerCell class]]) {
+        ApolloPinnedPreviewClearSpacerCell(cell);
         return;
     }
     [super apollo_applyThemeToCell:cell];
@@ -1222,7 +857,7 @@ static char kApolloIMPinnedHostKey;
 // the layout pass has seen a real cell, else the table's reported section inset.
 - (CGFloat)previewCardWidthForTable:(UITableView *)tableView {
     if (self.previewCardWidth > 0) return self.previewCardWidth;
-    UIEdgeInsets inset = ApolloIMSectionContentInset(tableView);
+    UIEdgeInsets inset = ApolloPinnedPreviewSectionContentInset(tableView);
     return CGRectGetWidth(tableView.bounds) - inset.left - inset.right;
 }
 
@@ -1433,8 +1068,8 @@ static NSString *ApolloIMMessageMediaFooter(void) {
         case ApolloIMSectionPreview: {
             // Transparent placeholder — the pinned host draws the card on top of
             // (or, once scrolled, instead of) this slot.
-            ApolloIMPreviewSpacerCell *cell = [[ApolloIMPreviewSpacerCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-            ApolloIMClearSpacerCell(cell);
+            ApolloPinnedPreviewSpacerCell *cell = [[ApolloPinnedPreviewSpacerCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+            ApolloPinnedPreviewClearSpacerCell(cell);
             cell.isAccessibilityElement = NO;
             return cell;
         }
