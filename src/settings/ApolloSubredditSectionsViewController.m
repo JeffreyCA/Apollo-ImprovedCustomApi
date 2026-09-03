@@ -758,10 +758,12 @@ static BOOL ApolloSubredditSectionsPreviewPinnedPreference(void) {
 
     self.previewPinPreference = ApolloSubredditSectionsPreviewPinnedPreference();
     self.previewPinned = self.previewPinPreference; // room is checked at first layout
-    self.formTopPinnedConstraint.active = self.previewPinned;
-    self.formTopUnpinnedConstraint.active = !self.previewPinned;
+    // Mount first: the pinned form-top constraint anchors to the host, which
+    // has no common ancestor with the form until it is in the hierarchy.
     if (self.previewPinned) [self apollo_mountHostInContainer];
     else [self apollo_mountHostAsHeader];
+    self.formTopPinnedConstraint.active = self.previewPinned;
+    self.formTopUnpinnedConstraint.active = !self.previewPinned;
     [self apollo_updatePinIcon];
 
     [self apollo_applyPreviewTheme];
@@ -1001,12 +1003,14 @@ static UIView *ApolloSubredditSectionsSpacerHeader(CGFloat width, CGFloat height
     [self apollo_updatePinIcon];
     BOOL animate = animated && !UIAccessibilityIsReduceMotionEnabled();
 
-    // The host animates as the container's subview in both directions:
-    // unpinning slides it from the pinned spot up to its place in the
-    // content (a spacer header holds that place meanwhile) and then hands
-    // it to the table; pinning takes it from the table at its current spot
-    // and slides it down into place. A reference row is put back exactly
-    // where it was after each swap, so the list never moves.
+    // The host animates as the container's subview in both directions.
+    // Pinning takes it from the table at its current spot and slides it
+    // down into place over the rows. Unpinning keeps it exactly where it is
+    // — it is the thing that was just tapped — and brings the list down to
+    // meet it (a spacer header holds its place in the content meanwhile),
+    // then hands it to the table once its content spot lines up. A
+    // reference row is put back exactly where it was after each swap, so
+    // the list never jumps.
     [self.view layoutIfNeeded];
     CGFloat width = CGRectGetWidth(tableView.bounds);
     CGFloat hostHeight = CGRectGetHeight(host.bounds);
@@ -1038,13 +1042,9 @@ static UIView *ApolloSubredditSectionsSpacerHeader(CGFloat width, CGFloat height
     }
     host.transform = start;
 
-    CGAffineTransform target = CGAffineTransformIdentity;
-    if (!pinned) {
-        CGRect spacerInContainer = [tableView convertRect:tableView.tableHeaderView.frame toView:self.view];
-        target = CGAffineTransformMakeTranslation(0.0, CGRectGetMinY(spacerInContainer) - pinnedY);
-    }
     CGFloat restingOffset = -tableView.adjustedContentInset.top;
-    CGFloat boundaryAlpha = pinned && tableView.contentOffset.y > restingOffset + 0.5 ? 1.0 : 0.0;
+    BOOL scrolled = tableView.contentOffset.y > restingOffset + 0.5;
+    CGFloat boundaryAlpha = pinned && scrolled ? 1.0 : 0.0;
     __weak typeof(self) weakSelf = self;
     void (^finish)(void) = ^{
         typeof(self) strongSelf = weakSelf;
@@ -1054,7 +1054,8 @@ static UIView *ApolloSubredditSectionsSpacerHeader(CGFloat width, CGFloat height
         [strongSelf apollo_formDidScroll:tableView];
     };
     if (!animate) {
-        host.transform = target;
+        host.transform = CGAffineTransformIdentity;
+        if (!pinned && scrolled) tableView.contentOffset = CGPointMake(0.0, restingOffset);
         self.scrollBoundaryView.alpha = boundaryAlpha;
         finish();
         return;
@@ -1065,7 +1066,11 @@ static UIView *ApolloSubredditSectionsSpacerHeader(CGFloat width, CGFloat height
           initialSpringVelocity:0.0
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                      animations:^{
-        host.transform = target;
+        if (pinned) {
+            host.transform = CGAffineTransformIdentity;
+        } else if (scrolled) {
+            tableView.contentOffset = CGPointMake(0.0, restingOffset);
+        }
         weakSelf.scrollBoundaryView.alpha = boundaryAlpha;
     } completion:^(__unused BOOL finished) {
         finish();
