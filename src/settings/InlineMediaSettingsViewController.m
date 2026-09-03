@@ -73,28 +73,30 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
 
 // Card edge → mock content. The content column is capped so an iPad-width card
 // shows a phone-width comment centered in it instead of a banner-sized block.
-static const CGFloat kApolloIMPreviewInset = 12.0;
+// The card is pinned while the list scrolls, so every point of height here is a
+// point the list can't use — the layout is deliberately compact: the media block
+// keeps a CONSTANT height and only its width follows the slider (width and
+// alignment are what the settings control; a 16:9 block at 100% cost ~190pt and
+// left a hole at 50%), and the message bubble holds a small inline image.
+static const CGFloat kApolloIMPreviewInset = 12.0;      // horizontal
+static const CGFloat kApolloIMPreviewPad = 8.0;         // vertical
 static const CGFloat kApolloIMPreviewMaxContent = 440.0;
+static const CGFloat kApolloIMMediaHeight = 110.0;      // comment media block
 static const CGFloat kApolloIMLinkHeight = 18.0;
-static const CGFloat kApolloIMBubbleImageWidth = 120.0;
+static const CGSize  kApolloIMBubbleImageSize = {88.0, 44.0};
 
 static CGFloat ApolloIMContentWidth(CGFloat cardWidth) {
     return MAX(60.0, MIN(cardWidth - kApolloIMPreviewInset * 2.0, kApolloIMPreviewMaxContent));
-}
-
-static CGFloat ApolloIMMediaHeight(CGFloat rowWidth, CGFloat fraction) {
-    return MAX(60.0, rowWidth * fraction) * 9.0 / 16.0;   // 16:9, like the real GIF block
 }
 
 static CGFloat ApolloIMBubbleWidth(CGFloat rowWidth) {
     return MAX(120.0, rowWidth * 0.72);
 }
 
-// Bubble = 10 pad + 10 text bar + 8 gap + (image | link line) + 10 pad.
-static CGFloat ApolloIMBubbleHeight(CGFloat rowWidth, BOOL mediaOn) {
-    CGFloat inner = ApolloIMBubbleWidth(rowWidth) - 20.0;
-    CGFloat body = mediaOn ? MIN(inner, kApolloIMBubbleImageWidth) * 9.0 / 16.0 : kApolloIMLinkHeight;
-    return 10.0 + 10.0 + 8.0 + body + 10.0;
+// Bubble = 8 pad + 8 text bar + 6 gap + (image | link line) + 8 pad.
+static CGFloat ApolloIMBubbleHeight(BOOL mediaOn) {
+    CGFloat body = mediaOn ? kApolloIMBubbleImageSize.height : kApolloIMLinkHeight;
+    return 8.0 + 8.0 + 6.0 + body + 8.0;
 }
 
 @implementation ApolloInlineMediaPreviewView
@@ -121,7 +123,7 @@ static UIView *ApolloIMBar(UIView *parent, CGFloat alpha) {
 static UIView *ApolloIMAvatar(UIView *parent) {
     UIView *avatar = [[UIView alloc] init];
     avatar.backgroundColor = [UIColor systemFillColor];
-    avatar.layer.cornerRadius = 12.0;
+    avatar.layer.cornerRadius = 11.0;
     [parent addSubview:avatar];
     return avatar;
 }
@@ -193,14 +195,14 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
     self.bubbleLink = ApolloIMLink(self.bubble, @"i.redd.it/vacation.jpg");
 }
 
-// Natural card height for a card width, laid out for the TALLEST state (both
-// switches on, media at 100%). The row height therefore never changes while the
-// controls are adjusted — smaller fractions and switched-off media simply leave
-// breathing room — so live slider drags never force table reloads.
+// Natural card height, laid out for the TALLEST state (both switches on). The
+// row height therefore never changes while the controls are adjusted — the
+// media block's height is constant and switched-off media simply leaves a
+// little room — so live slider drags never force table reloads.
 + (CGFloat)heightForCardWidth:(CGFloat)cardWidth {
-    CGFloat rowWidth = ApolloIMContentWidth(cardWidth);
-    return 10.0 + 32.0 + 20.0 + ApolloIMMediaHeight(rowWidth, 1.0) + 18.0
-         + 18.0 + ApolloIMBubbleHeight(rowWidth, YES) + 14.0;
+    (void)cardWidth;   // width no longer affects the height; kept for the call sites
+    return kApolloIMPreviewPad + 22.0 + 6.0 + 8.0 + 8.0 + kApolloIMMediaHeight + 12.0
+         + 14.0 + 4.0 + ApolloIMBubbleHeight(YES) + kApolloIMPreviewPad;
 }
 
 - (void)layoutSubviews {
@@ -209,17 +211,17 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
     if (W <= 0) return;
     CGFloat rowWidth = ApolloIMContentWidth(W);
     CGFloat margin = (W - rowWidth) * 0.5;
-    CGFloat y = 10.0;
+    CGFloat y = kApolloIMPreviewPad;
 
     // Comment header + a line of text.
-    self.avatarOne.frame = CGRectMake(margin, y, 24, 24);
-    self.nameOne.frame = CGRectMake(margin + 32, y + 4, rowWidth - 32, 16);
-    y += 32;
-    self.textBarOne.frame = CGRectMake(margin, y, rowWidth * 0.86, 10);
-    y += 20;
+    self.avatarOne.frame = CGRectMake(margin, y, 22, 22);
+    self.nameOne.frame = CGRectMake(margin + 30, y + 3, rowWidth - 30, 16);
+    y += 22 + 6;
+    self.textBarOne.frame = CGRectMake(margin, y, rowWidth * 0.86, 8);
+    y += 8 + 8;
 
-    // Media block — width follows the media slider, aspect fixed at 16:9,
-    // horizontal position follows the alignment setting (same slack rule as
+    // Media block — width follows the media slider, height constant, horizontal
+    // position follows the alignment setting (same slack rule as
     // ApolloWrapImageNodeForLayout). With Inline Media Previews off the row
     // shows the link as plain text instead.
     BOOL commentMedia = self.commentMediaEnabled;
@@ -227,7 +229,7 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
     self.commentLink.hidden = commentMedia;
     if (commentMedia) {
         CGFloat mediaWidth = MAX(60.0, rowWidth * self.mediaFraction);
-        CGFloat mediaHeight = ApolloIMMediaHeight(rowWidth, self.mediaFraction);
+        CGFloat mediaHeight = kApolloIMMediaHeight;
         CGFloat slack = rowWidth - mediaWidth;
         CGFloat mediaX = margin + (self.alignment == ApolloInlineImageAlignmentLeft ? 0.0 :
                          self.alignment == ApolloInlineImageAlignmentRight ? slack : slack * 0.5);
@@ -242,30 +244,28 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
         self.commentLink.frame = CGRectMake(margin, y, rowWidth, kApolloIMLinkHeight);
         y += kApolloIMLinkHeight;
     }
-    y += 18;
+    y += 12;
 
     // Message thread: sender name, then a received bubble with a line of text
     // and either a small inline image or the same plain-link stand-in.
     self.nameTwo.frame = CGRectMake(margin, y, rowWidth, 14);
-    y += 18;
+    y += 14 + 4;
     BOOL messageMedia = self.messageMediaEnabled;
     CGFloat bubbleWidth = ApolloIMBubbleWidth(rowWidth);
     CGFloat inner = bubbleWidth - 20.0;
-    CGFloat by = 10.0;
-    self.bubbleText.frame = CGRectMake(10, by, inner * 0.8, 10);
-    by += 18;
+    CGFloat by = 8.0;
+    self.bubbleText.frame = CGRectMake(10, by, inner * 0.8, 8);
+    by += 8 + 6;
     self.bubbleImage.hidden = !messageMedia;
     self.bubbleLink.hidden = messageMedia;
     if (messageMedia) {
-        CGFloat imageWidth = MIN(inner, kApolloIMBubbleImageWidth);
-        CGFloat imageHeight = imageWidth * 9.0 / 16.0;
-        self.bubbleImage.frame = CGRectMake(10, by, imageWidth, imageHeight);
-        by += imageHeight;
+        self.bubbleImage.frame = CGRectMake(10, by, MIN(inner, kApolloIMBubbleImageSize.width), kApolloIMBubbleImageSize.height);
+        by += kApolloIMBubbleImageSize.height;
     } else {
         self.bubbleLink.frame = CGRectMake(10, by, inner, kApolloIMLinkHeight);
         by += kApolloIMLinkHeight;
     }
-    by += 10;
+    by += 8;
     self.bubble.frame = CGRectMake(margin, y, bubbleWidth, by);
 }
 
@@ -284,11 +284,18 @@ static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
 // The preview card. A direct subview of the table view — never a cell — sized
 // to the transparent spacer row that reserves its resting place under the
 // "Preview" header. While that row is on screen the card sits exactly on it and
-// scrolls like any other row; once the row would slide under the nav bar the
-// card sticks just below the bar instead (an opaque backdrop hides the rows
-// passing underneath), so every control further down is adjusted with the
-// preview still in view. Positioning lives in ApolloIMSettingsTableView's
-// layoutSubviews, which UIScrollView runs on every content-offset change.
+// scrolls like any other row; once the header would slide under the nav bar the
+// header AND the card stick just below the bar instead (an opaque backdrop
+// hides the rows passing underneath), so every control further down is adjusted
+// with the preview still in view. Positioning lives in
+// ApolloIMSettingsTableView's layoutSubviews, which UIScrollView runs on every
+// content-offset change.
+//
+// The pinned "Preview" title is a copy of UIKit's own section header label —
+// text, font, colour and position are sampled from the real header view while
+// it is on screen (it always is at rest), so it matches whatever header style
+// this iOS / Liquid Glass combination draws, and only becomes visible once the
+// block is stuck (the native header is under the backdrop by then).
 //
 // Height-constrained layouts (landscape phones, tiny screens) don't stick:
 // pinning a ~400pt card there would leave no usable list, so the card just
@@ -300,8 +307,15 @@ static const CGFloat kApolloIMMinListViewport = 200.0; // list room needed to bo
 @interface ApolloIMPinnedPreviewHost : UIView
 @property (nonatomic, strong) UIView *card;
 @property (nonatomic, strong) ApolloInlineMediaPreviewView *preview;
+@property (nonatomic, strong) UILabel *titleLabel;      // pinned copy of the section header
 @property (nonatomic, strong) UIColor *backdropColor;   // table background, shown while stuck
 @property (nonatomic) BOOL stuck;
+// Sampled from the native header: the label's origin relative to the card's
+// resting origin (y is negative — the title sits above the card) and its size.
+@property (nonatomic) BOOL hasTitleSample;
+@property (nonatomic) CGPoint titleOffset;
+@property (nonatomic) CGSize titleSize;
+- (void)sampleTitleFromHeaderView:(UIView *)headerView inTable:(UITableView *)table cardOrigin:(CGPoint)cardOrigin;
 // Real inset-grouped cell width measured by the layout pass (0 = not yet seen)
 // and the callback the controller uses to re-measure the spacer row when it
 // changes (first layout, rotation).
@@ -319,8 +333,44 @@ static const CGFloat kApolloIMMinListViewport = 200.0; // list room needed to bo
         [self addSubview:_card];
         _preview = [[ApolloInlineMediaPreviewView alloc] initWithFrame:CGRectZero];
         [_card addSubview:_preview];
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.hidden = YES;
+        [self addSubview:_titleLabel];
     }
     return self;
+}
+
+// The header's text label, wherever this iOS version nests it.
+static UILabel *ApolloIMFindHeaderLabel(UIView *view) {
+    if ([view isKindOfClass:[UILabel class]] && ((UILabel *)view).text.length > 0) return (UILabel *)view;
+    for (UIView *sub in view.subviews) {
+        UILabel *label = ApolloIMFindHeaderLabel(sub);
+        if (label) return label;
+    }
+    return nil;
+}
+
+- (void)sampleTitleFromHeaderView:(UIView *)headerView inTable:(UITableView *)table cardOrigin:(CGPoint)cardOrigin {
+    UILabel *label = ApolloIMFindHeaderLabel(headerView);
+    if (!label || !label.superview || CGRectIsEmpty(label.frame)) return;
+    CGRect frame = [label.superview convertRect:label.frame toView:table];
+    CGPoint offset = CGPointMake(CGRectGetMinX(frame) - cardOrigin.x, CGRectGetMinY(frame) - cardOrigin.y);
+    if (offset.y >= 0) return;   // not above the card: not our header's label
+    BOOL sameText = [self.titleLabel.text isEqualToString:label.text];
+    if (self.hasTitleSample && sameText &&
+        fabs(offset.x - self.titleOffset.x) < 0.5 && fabs(offset.y - self.titleOffset.y) < 0.5 &&
+        fabs(frame.size.width - self.titleSize.width) < 0.5 && fabs(frame.size.height - self.titleSize.height) < 0.5) {
+        return;   // unchanged
+    }
+    self.titleLabel.font = label.font;
+    self.titleLabel.textColor = label.textColor;
+    self.titleLabel.textAlignment = label.textAlignment;
+    self.titleLabel.numberOfLines = label.numberOfLines;
+    self.titleLabel.text = label.text;
+    if (label.attributedText) self.titleLabel.attributedText = [label.attributedText copy];
+    self.titleOffset = offset;
+    self.titleSize = frame.size;
+    self.hasTitleSample = YES;
 }
 
 - (void)setStuck:(BOOL)stuck {
@@ -899,21 +949,34 @@ static char kApolloIMPinnedHostKey;
         }
     }
 
-    // Stick only when there's real list room left under the card.
+    // The section header ("Preview") is pinned with the card. Sample its label
+    // while UIKit has it on screen; the copy is only shown once stuck.
+    UIView *headerView = [self headerViewForSection:ApolloIMSectionPreview];
+    if (headerView) {
+        [host sampleTitleFromHeaderView:headerView inTable:self cardOrigin:CGPointMake(cardX, CGRectGetMinY(row))];
+    }
+    CGFloat titleAbove = host.hasTitleSample ? -host.titleOffset.y : 0.0;   // title top → card top
+
+    // Stick only when there's real list room left under the block.
     CGFloat visibleTop = self.contentOffset.y + self.adjustedContentInset.top;
     CGFloat visibleBottom = self.contentOffset.y + CGRectGetHeight(self.bounds) - self.adjustedContentInset.bottom;
-    CGFloat listRoom = (visibleBottom - visibleTop) - CGRectGetHeight(row) - kApolloIMStuckTopGap - kApolloIMStuckBottomPad;
+    CGFloat listRoom = (visibleBottom - visibleTop) - titleAbove - CGRectGetHeight(row) - kApolloIMStuckTopGap - kApolloIMStuckBottomPad;
     BOOL compactHeight = self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact;
     BOOL canStick = !compactHeight && listRoom >= kApolloIMMinListViewport;
 
     CGFloat cardY = CGRectGetMinY(row);
-    if (canStick) cardY = MAX(cardY, visibleTop + kApolloIMStuckTopGap);
+    if (canStick) cardY = MAX(cardY, visibleTop + kApolloIMStuckTopGap + titleAbove);
     BOOL stuck = cardY > CGRectGetMinY(row) + 0.5;
 
     CGFloat hostTop = stuck ? visibleTop : CGRectGetMinY(row);
     CGFloat hostBottom = cardY + CGRectGetHeight(row) + (stuck ? kApolloIMStuckBottomPad : 0.0);
     host.frame = CGRectMake(0, hostTop, CGRectGetWidth(self.bounds), hostBottom - hostTop);
     host.card.frame = CGRectMake(cardX, cardY - hostTop, cardW, CGRectGetHeight(row));
+    host.titleLabel.hidden = !(stuck && host.hasTitleSample);
+    if (host.hasTitleSample) {
+        host.titleLabel.frame = CGRectMake(cardX + host.titleOffset.x, cardY - hostTop + host.titleOffset.y,
+                                           host.titleSize.width, host.titleSize.height);
+    }
     if (host.stuck != stuck) host.stuck = stuck;
 
     // Keep the host above every cell and section header/footer (UITableView
