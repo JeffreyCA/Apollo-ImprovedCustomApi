@@ -14,6 +14,14 @@
 // scroll beneath it, and every change animates the preview's bands and
 // sample rows into their new places — nothing reloads.
 //
+// The pin is optional: a pin glyph at the trailing end of the "Preview" line
+// shows the state, and tapping it (or the card) toggles it. Unpinned, the
+// card becomes real scroll content: the form's table extends up under it
+// and the card's host view becomes the table's header view, so it scrolls
+// away like a normal header with the bars' scroll-edge treatment, touches on
+// it scroll the list, and the offset bookkeeping is UIKit's. Pinned is the
+// default; the choice is persisted (UDKeySubredditSectionsPreviewPinned).
+//
 // The preview is a miniature, non-interactive rendering of the Subreddits
 // list: one band + sample row per special section in the configured order,
 // then a letter band showing where the alphabetical list continues. Each
@@ -300,20 +308,65 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
 
 @end
 
+#pragma mark - Preview host
+
+// The pinned-area view. Touches pass through it to whatever is beneath —
+// the container (whose tap recognizer toggles the pin) or, unpinned, the
+// table it is mounted in (so drags on the card scroll the list) — except
+// for the pin button, which handles its own taps.
+@interface ApolloSubredditSectionsPreviewHostView : UIView
+@property (nonatomic, weak) UIView *touchableView;
+@end
+
+@implementation ApolloSubredditSectionsPreviewHostView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit && self.touchableView && [hit isDescendantOfView:self.touchableView]) return hit;
+    return nil;
+}
+@end
+
 #pragma mark - The form (child)
 
 @interface ApolloSubredditSectionsFormViewController : ApolloSettingsFormViewController <UITableViewDragDelegate, UITableViewDropDelegate>
 @property (nonatomic, weak) ApolloSubredditSectionsViewController *previewContainer;
 @end
 
-@interface ApolloSubredditSectionsViewController ()
+@interface ApolloSubredditSectionsViewController () <UIGestureRecognizerDelegate>
 @property (nonatomic) UITableViewStyle tableStyle;
 @property (nonatomic, strong) ApolloSubredditSectionsFormViewController *formViewController;
 @property (nonatomic, strong) UIView *previewHost;
 @property (nonatomic, strong) UILabel *previewTitleLabel;
+// The pin control, styled and behaving like the Inline Media preview's:
+// a 13pt pin.fill / pin glyph (accent when pinned, tertiary when not) with
+// a transparent button over it, a selection haptic, a spring bounce, and a
+// brief "Pinned" / "Unpinned" caption that fades in beside it.
+@property (nonatomic, strong) UIButton *pinButton;
+@property (nonatomic, strong) UIImageView *pinIcon;
+@property (nonatomic, strong) UILabel *pinCaption;
+@property (nonatomic, strong) UISelectionFeedbackGenerator *pinFeedback;
+@property (nonatomic) NSUInteger pinCaptionToken;
 @property (nonatomic, strong) UIView *previewCardView;
 @property (nonatomic, strong) UIView *scrollBoundaryView;
 @property (nonatomic, strong) NSLayoutConstraint *previewContentHeightConstraint;
+// The form sits below the pinned host, or fills the container (with the
+// host as its table's header view) when the preview scrolls with it;
+// exactly one is active.
+@property (nonatomic, strong) NSLayoutConstraint *formTopPinnedConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *formTopUnpinnedConstraint;
+// The host's constraints for wherever it is mounted right now (rebuilt on
+// every remount — moving a view drops its cross-hierarchy constraints).
+@property (nonatomic, copy) NSArray<NSLayoutConstraint *> *hostMountConstraints;
+// The saved choice (what the glyph shows) vs. where the host actually is:
+// the preview only sticks when the preference says so AND there is room
+// for it — never in compact height, never when it would leave less than
+// kApolloSubredditSectionsMinListViewport of list beneath it.
+@property (nonatomic) BOOL previewPinPreference;
+@property (nonatomic) BOOL previewPinned;
+@property (nonatomic) CGSize previewEvaluatedSize;
+// Set while a pin/unpin animation is driving the host's transform.
+@property (nonatomic) BOOL previewModeTransitioning;
+@property (nonatomic) BOOL previewInsetSettled;
 @property (nonatomic, strong) ApolloSubredditSectionsPreviewView *currentPreviewView;
 @property (nonatomic, strong) UIViewPropertyAnimator *previewAnimator;
 @property (nonatomic) NSUInteger previewTransitionGeneration;
@@ -321,6 +374,13 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
 - (void)apollo_refreshPreviewAnimated:(BOOL)animated;
 - (void)apollo_formDidScroll:(UIScrollView *)scrollView;
 @end
+
+static const CGFloat kApolloSubredditSectionsMinListViewport = 200.0;
+
+static BOOL ApolloSubredditSectionsPreviewPinnedPreference(void) {
+    id stored = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeySubredditSectionsPreviewPinned];
+    return stored ? [stored boolValue] : YES;
+}
 
 @implementation ApolloSubredditSectionsFormViewController
 
@@ -570,11 +630,10 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
     self.title = @"Subreddit Sections";
     BOOL liquidGlass = IsLiquidGlass();
 
-    UIView *previewHost = [UIView new];
+    ApolloSubredditSectionsPreviewHostView *previewHost = [ApolloSubredditSectionsPreviewHostView new];
     previewHost.translatesAutoresizingMaskIntoConstraints = NO;
     previewHost.layoutMargins = UIEdgeInsetsMake(0.0, 20.0, 0.0, 20.0);
     self.previewHost = previewHost;
-    [self.view addSubview:previewHost];
 
     UILabel *titleLabel = [UILabel new];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -593,6 +652,36 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
     self.previewTitleLabel = titleLabel;
     [previewHost addSubview:titleLabel];
 
+    // The pin: state glyph at the trailing end of the title line (the card's
+    // own corner is busy with the first band's rule), a transparent button
+    // over it, and the caption that flashes beside it. The card is a tap
+    // target too, via the container's recognizer.
+    UIImageView *pinIcon = [[UIImageView alloc] init];
+    pinIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    pinIcon.contentMode = UIViewContentModeCenter;
+    pinIcon.userInteractionEnabled = NO;
+    self.pinIcon = pinIcon;
+    [previewHost addSubview:pinIcon];
+
+    UILabel *pinCaption = [[UILabel alloc] init];
+    pinCaption.translatesAutoresizingMaskIntoConstraints = NO;
+    pinCaption.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+    pinCaption.textColor = UIColor.secondaryLabelColor;
+    pinCaption.textAlignment = NSTextAlignmentRight;
+    pinCaption.alpha = 0.0;
+    pinCaption.userInteractionEnabled = NO;
+    self.pinCaption = pinCaption;
+    [previewHost addSubview:pinCaption];
+
+    UIButton *pinButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    pinButton.translatesAutoresizingMaskIntoConstraints = NO;
+    pinButton.backgroundColor = UIColor.clearColor;
+    [pinButton addTarget:self action:@selector(apollo_togglePreviewPinned) forControlEvents:UIControlEventTouchUpInside];
+    self.pinButton = pinButton;
+    previewHost.touchableView = pinButton;
+    [previewHost addSubview:pinButton];
+    self.pinFeedback = [[UISelectionFeedbackGenerator alloc] init];
+
     UIView *previewCard = [UIView new];
     previewCard.translatesAutoresizingMaskIntoConstraints = NO;
     previewCard.userInteractionEnabled = NO;
@@ -602,13 +691,15 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
     self.previewCardView = previewCard;
     [previewHost addSubview:previewCard];
 
-    // Hairline under the pinned area that fades in once the form has scrolled
-    // beneath it, so the card reads as a fixed shelf rather than a row.
+    // Hairline along the host's bottom edge that fades in once the form has
+    // scrolled beneath the pinned card, so it reads as a fixed shelf rather
+    // than a row. Lives inside the host so it travels with it.
     UIView *scrollBoundary = [UIView new];
     scrollBoundary.translatesAutoresizingMaskIntoConstraints = NO;
     scrollBoundary.userInteractionEnabled = NO;
     scrollBoundary.alpha = 0.0;
     self.scrollBoundaryView = scrollBoundary;
+    [previewHost addSubview:scrollBoundary];
 
     ApolloSubredditSectionsFormViewController *form =
         [[ApolloSubredditSectionsFormViewController alloc] initWithStyle:self.tableStyle];
@@ -618,20 +709,25 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
     form.view.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:form.view];
     [form didMoveToParentViewController:self];
-    [self.view bringSubviewToFront:previewHost];
-    [self.view addSubview:scrollBoundary];
 
     NSLayoutConstraint *contentHeight =
         [previewCard.heightAnchor constraintEqualToConstant:1.0];
     self.previewContentHeightConstraint = contentHeight;
     [NSLayoutConstraint activateConstraints:@[
-        [previewHost.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-        [previewHost.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [previewHost.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-
         [titleLabel.topAnchor constraintEqualToAnchor:previewHost.topAnchor constant:15.0],
         [titleLabel.leadingAnchor constraintEqualToAnchor:previewHost.layoutMarginsGuide.leadingAnchor constant:16.0],
-        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:previewHost.layoutMarginsGuide.trailingAnchor constant:-16.0],
+        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:pinCaption.leadingAnchor constant:-8.0],
+
+        [pinIcon.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+        [pinIcon.trailingAnchor constraintEqualToAnchor:previewHost.layoutMarginsGuide.trailingAnchor constant:-12.0],
+        [pinIcon.widthAnchor constraintEqualToConstant:22.0],
+        [pinIcon.heightAnchor constraintEqualToConstant:22.0],
+        [pinCaption.trailingAnchor constraintEqualToAnchor:pinIcon.leadingAnchor constant:-6.0],
+        [pinCaption.centerYAnchor constraintEqualToAnchor:pinIcon.centerYAnchor],
+        [pinButton.centerXAnchor constraintEqualToAnchor:pinIcon.centerXAnchor],
+        [pinButton.centerYAnchor constraintEqualToAnchor:pinIcon.centerYAnchor],
+        [pinButton.widthAnchor constraintEqualToConstant:44.0],
+        [pinButton.heightAnchor constraintEqualToConstant:44.0],
 
         [previewCard.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:7.0],
         [previewCard.leadingAnchor constraintEqualToAnchor:previewHost.leadingAnchor constant:20.0],
@@ -639,16 +735,34 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
         [previewCard.bottomAnchor constraintEqualToAnchor:previewHost.bottomAnchor constant:-2.0],
         contentHeight,
 
-        [scrollBoundary.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [scrollBoundary.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [scrollBoundary.topAnchor constraintEqualToAnchor:previewHost.bottomAnchor],
+        [scrollBoundary.leadingAnchor constraintEqualToAnchor:previewHost.leadingAnchor],
+        [scrollBoundary.trailingAnchor constraintEqualToAnchor:previewHost.trailingAnchor],
+        [scrollBoundary.bottomAnchor constraintEqualToAnchor:previewHost.bottomAnchor],
         [scrollBoundary.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale],
 
-        [form.view.topAnchor constraintEqualToAnchor:previewHost.bottomAnchor],
         [form.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [form.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [form.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
     ]];
+    self.formTopPinnedConstraint = [form.view.topAnchor constraintEqualToAnchor:previewHost.bottomAnchor];
+    self.formTopUnpinnedConstraint = [form.view.topAnchor constraintEqualToAnchor:self.view.topAnchor];
+
+    // Tapping the card toggles the pin. The recognizer lives on the container
+    // so it sees the tap in both modes (pinned: the touch lands on the host;
+    // unpinned: the host is touch-transparent and the touch lands on the
+    // table beneath) — the delegate limits it to the card's bounds.
+    UITapGestureRecognizer *cardTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_previewCardTapped:)];
+    cardTap.cancelsTouchesInView = NO;
+    cardTap.delegate = self;
+    [self.view addGestureRecognizer:cardTap];
+
+    self.previewPinPreference = ApolloSubredditSectionsPreviewPinnedPreference();
+    self.previewPinned = self.previewPinPreference; // room is checked at first layout
+    self.formTopPinnedConstraint.active = self.previewPinned;
+    self.formTopUnpinnedConstraint.active = !self.previewPinned;
+    if (self.previewPinned) [self apollo_mountHostInContainer];
+    else [self apollo_mountHostAsHeader];
+    [self apollo_updatePinIcon];
 
     [self apollo_applyPreviewTheme];
 }
@@ -701,10 +815,270 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
         ?: self.formViewController.tableView.separatorColor
         ?: UIColor.separatorColor;
     self.view.tintColor = ApolloThemeAccentColor() ?: self.view.tintColor;
+    [self apollo_updatePinIcon];
+}
+
+#pragma mark Pinning
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    CGPoint point = [touch locationInView:self.previewCardView];
+    return [self.previewCardView pointInside:point withEvent:nil];
+}
+
+- (void)apollo_previewCardTapped:(UITapGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateEnded) return;
+    [self apollo_togglePreviewPinned];
+}
+
+- (void)apollo_togglePreviewPinned {
+    if (self.previewModeTransitioning) return;
+    BOOL pinned = !self.previewPinPreference;
+    self.previewPinPreference = pinned;
+    [[NSUserDefaults standardUserDefaults] setBool:pinned forKey:UDKeySubredditSectionsPreviewPinned];
+    ApolloLog(@"[SubredditSections] preview %@", pinned ? @"pinned" : @"unpinned");
+    [self.pinFeedback selectionChanged];
+    BOOL desired = pinned && [self apollo_previewCanStick];
+    if (desired != self.previewPinned) {
+        [self apollo_setPreviewPinned:desired animated:YES];
+    } else {
+        [self apollo_updatePinIcon];
+    }
+
+    // Bounce the glyph so the tap reads as a state change.
+    self.pinIcon.transform = CGAffineTransformMakeScale(1.3, 1.3);
+    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ self.pinIcon.transform = CGAffineTransformIdentity; }
+                     completion:nil];
+
+    // Brief caption next to the glyph, replaced (not stacked) by a quick re-tap.
+    NSUInteger token = ++self.pinCaptionToken;
+    self.pinCaption.text = pinned ? @"Pinned" : @"Unpinned";
+    [self.previewHost layoutIfNeeded];
+    [UIView animateWithDuration:0.15 animations:^{ self.pinCaption.alpha = 1.0; }];
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.pinCaptionToken != token) return;
+        [UIView animateWithDuration:0.3 animations:^{ strongSelf.pinCaption.alpha = 0.0; }];
+    });
+}
+
+- (BOOL)apollo_previewCanStick {
+    if (self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact) return NO;
+    CGFloat hostHeight = [self apollo_hostFittingHeightForWidth:CGRectGetWidth(self.view.bounds)];
+    CGFloat listRoom = CGRectGetHeight(self.view.bounds) - self.view.safeAreaInsets.top
+        - self.view.safeAreaInsets.bottom - hostHeight;
+    return listRoom >= kApolloSubredditSectionsMinListViewport;
+}
+
+// Re-check whether the saved choice can be honoured at the current size
+// (rotation, first layout) and move the host without ceremony if not.
+- (void)apollo_reevaluatePinMountAnimated:(BOOL)animated {
+    if (self.previewModeTransitioning) return;
+    BOOL desired = self.previewPinPreference && [self apollo_previewCanStick];
+    if (desired != self.previewPinned) [self apollo_setPreviewPinned:desired animated:animated];
+}
+
+- (void)apollo_updatePinIcon {
+    BOOL pinned = self.previewPinPreference;
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:13.0 weight:UIImageSymbolWeightSemibold];
+    self.pinIcon.image = [UIImage systemImageNamed:(pinned ? @"pin.fill" : @"pin") withConfiguration:config];
+    self.pinIcon.tintColor = pinned
+        ? (ApolloThemeAccentColor() ?: self.view.tintColor ?: UIColor.systemBlueColor)
+        : UIColor.tertiaryLabelColor;
+    self.pinButton.accessibilityLabel = pinned ? @"Unpin preview" : @"Pin preview";
+}
+
+// Unpinned only: the host is the table's header view, so its height is the
+// table's business. Re-measure after the card changes and hand the new frame
+// back to the table. Rows below the card follow it while it is on screen
+// (that is what content does); once it has scrolled away they stay put
+// instead — a growing card nobody can see must not shove the toggles around
+// under a finger.
+- (void)apollo_syncUnpinnedHeader {
+    if (self.previewPinned) return;
+    UITableView *tableView = self.formViewController.tableView;
+    UIView *host = self.previewHost;
+    if (tableView.tableHeaderView != host) return;
+    CGFloat width = CGRectGetWidth(tableView.bounds);
+    if (width <= 0.0) return;
+    CGFloat height = [self apollo_hostFittingHeightForWidth:width];
+    CGFloat oldHeight = CGRectGetHeight(host.frame);
+    if (fabs(height - oldHeight) < 0.5 && fabs(width - CGRectGetWidth(host.frame)) < 0.5) return;
+    CGFloat delta = height - oldHeight;
+    CGPoint offset = tableView.contentOffset;
+    BOOL hostOnScreen = offset.y < oldHeight;
+    host.frame = CGRectMake(0.0, 0.0, width, height);
+    tableView.tableHeaderView = host;
+    if (!hostOnScreen) {
+        offset.y += delta;
+        tableView.contentOffset = offset;
+    }
+}
+
+// The host's own height: title line + card + paddings, from its constraints.
+- (CGFloat)apollo_hostFittingHeightForWidth:(CGFloat)width {
+    CGSize size = [self.previewHost systemLayoutSizeFittingSize:CGSizeMake(width, UILayoutFittingCompressedSize.height)
+                                  withHorizontalFittingPriority:UILayoutPriorityRequired
+                                        verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
+    return ceil(size.height);
+}
+
+// The first header is installed from viewWillAppear, before the safe area
+// has resolved. Land the table at the true resting offset once the first
+// layout has settled.
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    UITableView *tableView = self.formViewController.tableView;
+    if (CGRectIsEmpty(tableView.bounds) || self.view.safeAreaInsets.top <= 0.0) return;
+    CGSize size = self.view.bounds.size;
+    if (!CGSizeEqualToSize(size, self.previewEvaluatedSize)) {
+        self.previewEvaluatedSize = size;
+        [self apollo_reevaluatePinMountAnimated:NO];
+    }
+    if (self.previewInsetSettled) return;
+    self.previewInsetSettled = YES;
+    if (self.previewPinned) return;
+    [self apollo_syncUnpinnedHeader];
+    tableView.contentOffset = CGPointMake(0.0, -tableView.adjustedContentInset.top);
+}
+
+// A stand-in header of the host's size, so the rows keep their place while
+// the host itself is off animating as the container's subview.
+static UIView *ApolloSubredditSectionsSpacerHeader(CGFloat width, CGFloat height) {
+    UIView *spacer = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, width, height)];
+    spacer.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    spacer.userInteractionEnabled = NO;
+    return spacer;
+}
+
+// Pinned: the host is the container's own subview, above the form, at the
+// safe-area top.
+- (void)apollo_mountHostInContainer {
+    UIView *host = self.previewHost;
+    UITableView *tableView = self.formViewController.tableView;
+    [NSLayoutConstraint deactivateConstraints:self.hostMountConstraints ?: @[]];
+    if (tableView.tableHeaderView == host) tableView.tableHeaderView = nil;
+    [host removeFromSuperview];
+    host.transform = CGAffineTransformIdentity;
+    host.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:host];
+    self.hostMountConstraints = @[
+        [host.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [host.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [host.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    ];
+    [NSLayoutConstraint activateConstraints:self.hostMountConstraints];
+}
+
+// Unpinned: the host is the table's header view — real content, so it
+// scrolls as content, the bars' scroll-edge treatment applies to it, and
+// touches on it scroll the list. (A subview parked in the top inset does not
+// count as content for that treatment; a Liquid Glass bar leaves it crisp.)
+- (void)apollo_mountHostAsHeader {
+    UIView *host = self.previewHost;
+    UITableView *tableView = self.formViewController.tableView;
+    [NSLayoutConstraint deactivateConstraints:self.hostMountConstraints ?: @[]];
+    self.hostMountConstraints = @[];
+    [host removeFromSuperview];
+    host.transform = CGAffineTransformIdentity;
+    host.translatesAutoresizingMaskIntoConstraints = YES;
+    host.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    CGFloat width = CGRectGetWidth(tableView.bounds);
+    if (width <= 0.0) width = CGRectGetWidth(self.view.bounds);
+    host.frame = CGRectMake(0.0, 0.0, width, [self apollo_hostFittingHeightForWidth:width]);
+    tableView.tableHeaderView = host;
+}
+
+- (void)apollo_setPreviewPinned:(BOOL)pinned animated:(BOOL)animated {
+    [self apollo_finishPreviewTransition];
+    UITableView *tableView = self.formViewController.tableView;
+    UIView *host = self.previewHost;
+    self.previewPinned = pinned;
+    self.previewModeTransitioning = YES;
+    [self apollo_updatePinIcon];
+    BOOL animate = animated && !UIAccessibilityIsReduceMotionEnabled();
+
+    // The host animates as the container's subview in both directions:
+    // unpinning slides it from the pinned spot up to its place in the
+    // content (a spacer header holds that place meanwhile) and then hands
+    // it to the table; pinning takes it from the table at its current spot
+    // and slides it down into place. A reference row is put back exactly
+    // where it was after each swap, so the list never moves.
+    [self.view layoutIfNeeded];
+    CGFloat width = CGRectGetWidth(tableView.bounds);
+    CGFloat hostHeight = CGRectGetHeight(host.bounds);
+    CGFloat pinnedY = self.view.safeAreaInsets.top;
+    NSIndexPath *anchorPath = tableView.indexPathsForVisibleRows.firstObject;
+    CGFloat anchorY = anchorPath
+        ? CGRectGetMinY([tableView convertRect:[tableView rectForRowAtIndexPath:anchorPath] toView:self.view])
+        : 0.0;
+
+    CGAffineTransform start = CGAffineTransformIdentity;
+    if (pinned) {
+        CGRect hostInContainer = [host.superview convertRect:host.frame toView:self.view];
+        start = CGAffineTransformMakeTranslation(0.0, CGRectGetMinY(hostInContainer) - pinnedY);
+        [self apollo_mountHostInContainer];
+    } else {
+        tableView.tableHeaderView = ApolloSubredditSectionsSpacerHeader(width, hostHeight);
+    }
+    self.formTopPinnedConstraint.active = NO;
+    self.formTopUnpinnedConstraint.active = NO;
+    self.formTopPinnedConstraint.active = pinned;
+    self.formTopUnpinnedConstraint.active = !pinned;
+    [self.view layoutIfNeeded];
+    if (anchorPath) {
+        CGFloat newY = CGRectGetMinY([tableView convertRect:[tableView rectForRowAtIndexPath:anchorPath] toView:self.view]);
+        CGPoint offset = tableView.contentOffset;
+        offset.y += newY - anchorY;
+        offset.y = MAX(offset.y, -tableView.adjustedContentInset.top);
+        tableView.contentOffset = offset;
+    }
+    host.transform = start;
+
+    CGAffineTransform target = CGAffineTransformIdentity;
+    if (!pinned) {
+        CGRect spacerInContainer = [tableView convertRect:tableView.tableHeaderView.frame toView:self.view];
+        target = CGAffineTransformMakeTranslation(0.0, CGRectGetMinY(spacerInContainer) - pinnedY);
+    }
+    CGFloat restingOffset = -tableView.adjustedContentInset.top;
+    CGFloat boundaryAlpha = pinned && tableView.contentOffset.y > restingOffset + 0.5 ? 1.0 : 0.0;
+    __weak typeof(self) weakSelf = self;
+    void (^finish)(void) = ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (!strongSelf.previewPinned) [strongSelf apollo_mountHostAsHeader];
+        strongSelf.previewModeTransitioning = NO;
+        [strongSelf apollo_formDidScroll:tableView];
+    };
+    if (!animate) {
+        host.transform = target;
+        self.scrollBoundaryView.alpha = boundaryAlpha;
+        finish();
+        return;
+    }
+    [UIView animateWithDuration:0.35
+                          delay:0.0
+         usingSpringWithDamping:0.9
+          initialSpringVelocity:0.0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        host.transform = target;
+        weakSelf.scrollBoundaryView.alpha = boundaryAlpha;
+    } completion:^(__unused BOOL finished) {
+        finish();
+    }];
 }
 
 - (void)apollo_formDidScroll:(UIScrollView *)scrollView {
     if (scrollView != self.formViewController.tableView) return;
+    if (self.previewModeTransitioning) return;
+    if (!self.previewPinned) {
+        if (self.scrollBoundaryView.alpha != 0.0) self.scrollBoundaryView.alpha = 0.0;
+        return;
+    }
     CGFloat restingOffset = -scrollView.adjustedContentInset.top;
     CGFloat targetAlpha = scrollView.contentOffset.y > restingOffset + 0.5 ? 1.0 : 0.0;
     if (fabs(self.scrollBoundaryView.alpha - targetAlpha) < 0.01) return;
@@ -752,6 +1126,7 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
     self.previewContentHeightConstraint.constant = state.previewHeight;
     [UIView performWithoutAnimation:^{
         [self.view layoutIfNeeded];
+        [self apollo_syncUnpinnedHeader];
     }];
 }
 
@@ -829,6 +1204,7 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
         }
         for (UIView *item in restyledItems) item.alpha = 0.0;
         [weakSelf.view layoutIfNeeded];
+        [weakSelf apollo_syncUnpinnedHeader];
     }];
     [animator addCompletion:^(__unused UIViewAnimatingPosition finalPosition) {
         [outgoing removeFromSuperview];
