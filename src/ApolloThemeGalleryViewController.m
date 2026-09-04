@@ -316,26 +316,32 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
 // Mirrors ApolloThemeManagerViewController's applyThemeTint/applyThemeToCell:
 // so the gallery browser reads as part of the same app the active theme is
 // painting, rather than a plain system-styled list dropped on top of it.
-// When no Apollo-Reborn custom theme is running, inherit the ambient Apollo
-// theme (stock themes like Solarized/Outrun included) by sampling the
-// presenting settings table — the same approach as the base
-// ApolloSettingsTableViewController / the Apollo Reborn settings screen —
-// instead of dropping to plain grey/black system colours.
+// When no Apollo-Reborn custom theme is running, use the canonical stock-theme
+// helpers first. Source-table inheritance alone is insufficient in the iPad
+// pane layout because a routed destination can be the root of a detail stack
+// and therefore have no themed table behind it.
 - (UIColor *)galleryThemeColorForToken:(ApolloThemeToken)token fallback:(UIColor *)fallback {
     UIColor *runtimeColor = ApolloThemeRuntimeColor(token);
     if (runtimeColor) return runtimeColor;
 
     switch (token) {
         case ApolloThemeTokenBackground: {
+            UIColor *effective = ApolloThemePageBackgroundColor();
+            if (effective) return effective;
             UITableView *source = ApolloInheritedSettingsThemeSourceTableView(self);
             return source.backgroundColor ?: fallback;
         }
         case ApolloThemeTokenSecondaryBackground:
         case ApolloThemeTokenTertiaryBackground:
-        case ApolloThemeTokenElevatedBackground:
+        case ApolloThemeTokenElevatedBackground: {
+            UIColor *effective = ApolloThemeCardBackgroundColor();
+            if (effective) return effective;
             return [self apollo_themeCellBackgroundColor];
+        }
         case ApolloThemeTokenSeparator:
         case ApolloThemeTokenOpaqueSeparator: {
+            UIColor *effective = ApolloThemeSeparatorColor();
+            if (effective) return effective;
             UITableView *source = ApolloInheritedSettingsThemeSourceTableView(self);
             return source.separatorColor ?: fallback;
         }
