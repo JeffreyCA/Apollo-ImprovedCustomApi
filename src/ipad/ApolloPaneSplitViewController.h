@@ -95,6 +95,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)apollo_performCrossColumnNavigationTransaction:(dispatch_block_t)navigation;
 - (void)apollo_navigationTransitionDidSettle;
 - (void)apollo_resolvedDisplayStateMayHaveChanged;
+- (void)apollo_prepareDetailControllerForDisplay:(UIViewController *)viewController;
 - (void)apollo_revealDetailAfterPrimarySelectionIfNeeded;
 
 // A selected row is part of the semantic primary -> detail branch on iPad.

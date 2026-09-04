@@ -337,6 +337,7 @@ static BOOL ApolloPaneGestureIsTransitioning(UIGestureRecognizer *gesture) {
 - (instancetype)initWithNavigationController:(UINavigationController *)navigationController;
 @property (nonatomic, strong, readonly) UINavigationController *hostedNavigationController;
 - (void)apollo_scheduleListColumnGeometryRefresh;
+- (void)apollo_prepareReadableWidthForTopController;
 #if APOLLO_SIM_BUILD
 - (NSString *)apollo_simLayoutPassStateReset:(BOOL)reset;
 #endif
@@ -658,6 +659,14 @@ static BOOL ApolloPaneGestureIsTransitioning(UIGestureRecognizer *gesture) {
     }
 
     CGFloat width = CGRectGetWidth(top.view.bounds);
+    // A controller installed into a visible navigation stack has not always
+    // received its first bounds assignment yet. The navigation controller is
+    // already constrained to the real detail column, so its width is the exact
+    // pre-display fallback we need. Waiting for top.view.bounds to become
+    // nonzero would allow one unconstrained frame to reach the screen.
+    if (width <= 0.0 && self.hostedNavigationController.isViewLoaded) {
+        width = CGRectGetWidth(self.hostedNavigationController.view.bounds);
+    }
     if (width <= 0.0) return;
 
     // 680pt is close to UIKit's familiar readable measure while still leaving
@@ -684,6 +693,28 @@ static BOOL ApolloPaneGestureIsTransitioning(UIGestureRecognizer *gesture) {
     ApolloLog(@"[PaneReadable] %@ width=%.0f max=%.0f inset=%.0f accessibility=%d",
               NSStringFromClass(top.class), naturalWidth, maximumWidth, inset,
               UIContentSizeCategoryIsAccessibilityCategory(category));
+}
+
+- (void)apollo_prepareReadableWidthForTopController {
+    UIViewController *top = self.hostedNavigationController.topViewController;
+    if (!top) {
+        [self apollo_restoreReadableWidthInsets];
+        return;
+    }
+
+    // This destination is about to become visible, so loading it here does not
+    // defeat the pane's lazy offscreen-tab policy. It does let us classify its
+    // table surface and install additionalSafeAreaInsets before Core Animation
+    // commits the navigation transaction's first frame.
+    [top loadViewIfNeeded];
+#if APOLLO_SIM_BUILD
+    ApolloLog(@"[PaneReadablePrepare] %@ topWidth=%.0f navWidth=%.0f table=%d window=%d",
+              NSStringFromClass(top.class), CGRectGetWidth(top.view.bounds),
+              CGRectGetWidth(self.hostedNavigationController.viewIfLoaded.bounds),
+              [self apollo_tableInView:top.view depth:0] != nil,
+              top.view.window != nil);
+#endif
+    [self apollo_applyReadableWidthIfNeeded];
 }
 
 #if APOLLO_SIM_BUILD
@@ -2417,6 +2448,25 @@ static NSArray<UIBarButtonItem *> *ApolloPaneBarItemsByRemovingIdentity(
         [self apollo_refreshMasterSelection];
     });
     [self apollo_scheduleResolvedGeometryRefresh];
+}
+
+- (void)apollo_prepareDetailControllerForDisplay:(UIViewController *)viewController {
+    if (!viewController || self.isCollapsed ||
+        self.apollo_detailNav.topViewController != viewController) return;
+
+    // goToSettingsTab updates selectedViewController synchronously, but UIKit
+    // may defer attaching and sizing that pane until the next run-loop turn.
+    // Finish only that already-requested layout now; otherwise a cold settings
+    // route sees the navigation controller's stale full-window width and the
+    // readable inset cannot be computed until after a visible frame.
+    UITabBarController *tabs = self.tabBarController;
+    if (tabs.selectedViewController == self) {
+        [tabs.view layoutIfNeeded];
+        [self.view layoutIfNeeded];
+        [self.apollo_detailHost.view layoutIfNeeded];
+    }
+    [(ApolloPaneColumnHostViewController *)self.apollo_detailHost
+        apollo_prepareReadableWidthForTopController];
 }
 
 - (void)apollo_showPrimaryItemActivated:(UIBarButtonItem *)sender {

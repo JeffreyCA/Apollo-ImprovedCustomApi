@@ -1001,3 +1001,26 @@ entry if a later regression requires reopening and re-verifying a task.
   external display, full accessibility/pointer coverage, and the performance
   soak remain explicit experimental-release follow-ups rather than claims made
   by this simulator pass.
+
+### Theme/detail first-frame fixes — 2026-09-04 — baseline `b819421` + task working tree
+
+- Theme surfaces: Theme Manager and Theme Gallery now resolve page, card, and
+  separator colors from the canonical stock/custom theme helpers before trying
+  navigation-context inheritance. This removes the pure-black page fallback
+  when either controller is the root of the iPad detail navigation stack.
+- Readable-width timing: settings forms now receive their final centered safe-
+  area insets synchronously during detail stack replacement, push, pop, and
+  stack replacement. The deferred geometry pass remains as reconciliation for
+  resizing, but no longer owns the destination's first visible width.
+- Focused simulator coverage: a cold Accounts & API Keys route, an attached
+  settings route, the exact Apollo Reborn → Accounts & API Keys nested push,
+  and its reverse pop all logged the 896pt → 680pt readable inset before the
+  navigation operation completed. A screenshot captured during the nested push
+  already had the incoming table at its final width; its settled screenshot did
+  not move. Replacing it with the non-table Link Companion restored the intended
+  full-width detail surface.
+- Visual evidence: `.sim/pr886-theme-manager-background-fixed.png`,
+  `.sim/pr886-theme-gallery-background-fixed.png`,
+  `.sim/pr886-readable-nested-first.png`,
+  `.sim/pr886-readable-nested-settled.png`, and
+  `.sim/pr886-non-readable-full-width.png`.

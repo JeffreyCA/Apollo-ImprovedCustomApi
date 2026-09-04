@@ -297,6 +297,11 @@ static BOOL ApolloPaneReplaceDetailRoot(ApolloPaneSplitViewController *pane,
     }];
     if (!replacementSucceeded) return NO;
 
+    // Readable-width settings/forms must have their final safe-area insets
+    // before the first detail frame is committed. The ordinary pane geometry
+    // refresh is intentionally deferred and otherwise produces a visible
+    // full-width -> centered-width snap.
+    [pane apollo_prepareDetailControllerForDisplay:viewController];
     ApolloPaneClearForwardHistory(destination);
     [pane apollo_recordDetailBranchFromPrimarySource:sourceViewController];
     [pane apollo_commitMasterSelectionIntent:masterSelectionIntent
@@ -725,6 +730,10 @@ static ApolloPaneSplitViewController *ApolloPaneForPrimaryNavigationItem(UINavig
         }
         if (pushSucceeded) {
             ApolloPaneApplyPostPushNavigationPolicy(navigationController, viewController, column);
+            if (navigationController ==
+                [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary]) {
+                [pane apollo_prepareDetailControllerForDisplay:viewController];
+            }
         }
         ApolloLog(@"[PaneRouter] compact push %@ logicalColumn=%ld sourceDetail=%d succeeded=%d tab=%ld",
                   NSStringFromClass(viewController.class), (long)column, sourceBelongsToDetail,
@@ -761,6 +770,10 @@ static ApolloPaneSplitViewController *ApolloPaneForPrimaryNavigationItem(UINavig
         // Unknown composers, login screens, settings descendants and modal-like
         // screens keep their exact native leading-item policy.
         ApolloPaneApplyPostPushNavigationPolicy(navigationController, viewController, column);
+        if (navigationController ==
+            [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary]) {
+            [pane apollo_prepareDetailControllerForDisplay:viewController];
+        }
         return;
     }
 
@@ -771,6 +784,10 @@ static ApolloPaneSplitViewController *ApolloPaneForPrimaryNavigationItem(UINavig
     if (!destination || destination == navigationController) {
         UIViewController *beforeTop = navigationController.topViewController;
         %orig;
+        if (column == ApolloPaneColumnSecondary &&
+            navigationController.topViewController == viewController) {
+            [pane apollo_prepareDetailControllerForDisplay:viewController];
+        }
         // Apollo rejects duplicate pushes. Reconcile after the call so a no-op
         // intent cannot erase detail whose primary context never changed.
         if (column != ApolloPaneColumnSecondary &&
@@ -869,6 +886,10 @@ static ApolloPaneSplitViewController *ApolloPaneForPrimaryNavigationItem(UINavig
                                        beforeStack:beforeStack
                                           cancelled:YES];
     }
+    if (popped && navigationController ==
+        [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary]) {
+        [pane apollo_prepareDetailControllerForDisplay:navigationController.topViewController];
+    }
     return popped;
 }
 
@@ -905,6 +926,10 @@ static ApolloPaneSplitViewController *ApolloPaneForPrimaryNavigationItem(UINavig
                                        beforeStack:beforeStack
                                           cancelled:YES];
     }
+    if (popped.count > 0 && navigationController ==
+        [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary]) {
+        [pane apollo_prepareDetailControllerForDisplay:navigationController.topViewController];
+    }
     return popped;
 }
 
@@ -940,6 +965,10 @@ static ApolloPaneSplitViewController *ApolloPaneForPrimaryNavigationItem(UINavig
                                        beforeStack:beforeStack
                                           cancelled:YES];
     }
+    if (popped.count > 0 && navigationController ==
+        [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary]) {
+        [pane apollo_prepareDetailControllerForDisplay:navigationController.topViewController];
+    }
     return popped;
 }
 
@@ -954,6 +983,9 @@ static ApolloPaneSplitViewController *ApolloPaneForPrimaryNavigationItem(UINavig
         [pane apollo_primaryNavigationStackWasReplacedExternally:
             navigationController.viewControllers];
         [pane apollo_scheduleDetailReconciliationAfterPrimaryMutation:@"primary stack replacement"];
+    } else if (navigationController ==
+               [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary]) {
+        [pane apollo_prepareDetailControllerForDisplay:navigationController.topViewController];
     }
 }
 
@@ -968,6 +1000,9 @@ static ApolloPaneSplitViewController *ApolloPaneForPrimaryNavigationItem(UINavig
         [pane apollo_primaryNavigationStackWasReplacedExternally:
             navigationController.viewControllers];
         [pane apollo_scheduleDetailReconciliationAfterPrimaryMutation:@"primary stack replacement"];
+    } else if (navigationController ==
+               [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary]) {
+        [pane apollo_prepareDetailControllerForDisplay:navigationController.topViewController];
     }
 }
 
