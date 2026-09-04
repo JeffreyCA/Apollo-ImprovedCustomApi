@@ -26,31 +26,6 @@
   ],
   "groups" : [
     {
-      "layers" : [
-        {
-          "hidden" : true,
-          "image-name" : "Icon.png",
-          "name" : "Icon",
-          "opacity" : 0.47
-        }
-      ],
-      "position" : {
-        "scale" : 6,
-        "translation-in-points" : [
-          0,
-          0
-        ]
-      },
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.76
-      }
-    },
-    {
       "blur-material-specializations" : [
         {
           "value" : 0.24
@@ -176,71 +151,6 @@
             "translation-in-points" : [
               0,
               -135
-            ]
-          }
-        },
-        {
-          "glass-specializations" : [
-            {
-              "appearance" : "tinted",
-              "value" : true
-            }
-          ],
-          "hidden" : true,
-          "image-name" : "apollo_ring_small.svg",
-          "name" : "apollo_ring_small",
-          "opacity-specializations" : [
-            {
-              "value" : 1
-            },
-            {
-              "appearance" : "dark",
-              "value" : 0.33
-            }
-          ],
-          "position" : {
-            "scale" : 1.48,
-            "translation-in-points" : [
-              -0.00951036040987674,
-              -394
-            ]
-          }
-        },
-        {
-          "blend-mode-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : "normal"
-            }
-          ],
-          "fill-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : "none"
-            }
-          ],
-          "hidden-specializations" : [
-            {
-              "value" : true
-            },
-            {
-              "idiom" : "square",
-              "value" : true
-            }
-          ],
-          "image-name" : "apollo_ring_large.svg",
-          "name" : "apollo_ring_large",
-          "opacity-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : 0.29
-            }
-          ],
-          "position" : {
-            "scale" : 1.46,
-            "translation-in-points" : [
-              0,
-              -394
             ]
           }
         }

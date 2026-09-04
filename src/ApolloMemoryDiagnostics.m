@@ -3,6 +3,7 @@
 
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
+#import <stdatomic.h>
 
 // MARK: - Footprint query
 
@@ -42,8 +43,12 @@ void ApolloMemoryLogFootprint(NSString *context) {
 
 // MARK: - Warning + lifecycle observers, periodic sampler
 
-static double sPeakFootprintMB;
+static _Atomic(double) sPeakFootprintMB;
 static double sLastLoggedFootprintMB;
+
+static double ApolloMemoryPeakFootprintMB(void) {
+    return atomic_load_explicit(&sPeakFootprintMB, memory_order_relaxed);
+}
 
 static void ApolloMemoryRunPurgeHandlers(void) {
     NSArray<NSDictionary *> *handlers;
@@ -71,7 +76,7 @@ static void ApolloMemoryDiagnosticsInstall(void) {
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(__unused NSNotification *note) {
         ApolloLog(@"[MemoryDiag] MEMORY WARNING | footprint=%.0fMB peak=%.0fMB",
-                  ApolloMemoryFootprintMB(), sPeakFootprintMB);
+                  ApolloMemoryFootprintMB(), ApolloMemoryPeakFootprintMB());
         ApolloMemoryRunPurgeHandlers();
     }];
 
@@ -83,7 +88,7 @@ static void ApolloMemoryDiagnosticsInstall(void) {
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(__unused NSNotification *note) {
         ApolloLog(@"[MemoryDiag] didEnterBackground | footprint=%.0fMB peak=%.0fMB",
-                  ApolloMemoryFootprintMB(), sPeakFootprintMB);
+                  ApolloMemoryFootprintMB(), ApolloMemoryPeakFootprintMB());
         ApolloMemoryRunPurgeHandlers();
     }];
 
@@ -97,10 +102,12 @@ static void ApolloMemoryDiagnosticsInstall(void) {
     dispatch_source_set_event_handler(timer, ^{
         double mb = ApolloMemoryFootprintMB();
         if (mb < 0) return;
-        if (mb > sPeakFootprintMB) sPeakFootprintMB = mb;
+        double peak = ApolloMemoryPeakFootprintMB();
+        while (mb > peak && !atomic_compare_exchange_weak_explicit(
+            &sPeakFootprintMB, &peak, mb, memory_order_relaxed, memory_order_relaxed)) {}
         if (fabs(mb - sLastLoggedFootprintMB) >= 50.0) {
             sLastLoggedFootprintMB = mb;
-            ApolloLog(@"[MemoryDiag] footprint=%.0fMB peak=%.0fMB", mb, sPeakFootprintMB);
+            ApolloLog(@"[MemoryDiag] footprint=%.0fMB peak=%.0fMB", mb, ApolloMemoryPeakFootprintMB());
         }
     });
     dispatch_resume(timer);

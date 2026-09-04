@@ -1,5 +1,7 @@
 #import "settings/CustomAPIViewController.h"
 #import "ApolloCommon.h"
+#import "ApolloFeedShortcutsAppearance.h"
+#import "ApolloThemeRuntime.h"
 #import "ApolloNotificationBackend.h"
 #import "ApolloBarkNotifications.h"
 #import "ApolloPushNotifications.h"
@@ -10,10 +12,13 @@
 #import "InfoRowSettingsViewController.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloDirectChatWeb.h"
+#import "ApolloDevvitPosts.h"        // ApolloDevvitFeedOwnershipChangedNotification
+#import "ApolloFloatingTabs.h"       // close-all / fan-out entry points for the toggles
 #import "settings/ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
+#import "ApolloTagFilters.h"
 #import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
@@ -45,6 +50,8 @@
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/ApolloSubredditLayoutViewController.h"
+#import "settings/ApolloSubredditSectionsViewController.h"
+#import "ApolloFollowingSection.h"
 #import "settings/TranslationSettingsViewController.h"
 #import "PictureInPictureViewController.h"
 #import "TagFiltersViewController.h"
@@ -83,9 +90,279 @@ static NSString *ApolloIPadPaneLayoutSettingDetail(void) {
             ? @"Will turn on after Apollo quits and reopens. The current single-column layout remains active until then."
             : @"Will turn off after Apollo quits and reopens. The current multi-column layout remains active until then.";
     }
-    return @"Experimental. Puts your tabs in a sidebar and opens comments beside the post list instead of on top of it. Apollo restarts to apply changes.";
+    return @"Experimental on iPadOS 18 or newer. Puts your tabs in a sidebar and opens comments beside the post list instead of on top of it. Apollo restarts to apply changes.";
 }
 
+@interface ApolloFeedShortcutsPreviewState : NSObject
+@property (nonatomic, copy) NSArray<NSNumber *> *visibleIndexes;
+@property (nonatomic) ApolloSubredditFeedIconStyle iconStyle;
+@property (nonatomic) ApolloSubredditFeedLayout layout;
+@property (nonatomic) BOOL hideDescriptions;
+@property (nonatomic) CGFloat previewHeight;
+@property (nonatomic) BOOL usesCompactFourUp;
+@property (nonatomic, strong) UITraitCollection *traitCollection;
+@end
+
+@implementation ApolloFeedShortcutsPreviewState
+@end
+
+static ApolloFeedShortcutsPreviewState *ApolloFeedShortcutsCurrentPreviewState(
+    UITraitCollection *traitCollection,
+    CGFloat availableWidth) {
+    ApolloFeedShortcutsPreviewState *state = [ApolloFeedShortcutsPreviewState new];
+    state.visibleIndexes = ApolloFeedShortcutVisibleIndexes();
+    state.iconStyle = (ApolloSubredditFeedIconStyle)sSubredditFeedIconStyle;
+    state.traitCollection = traitCollection;
+    state.layout = ApolloFeedShortcutEffectiveLayout(sSubredditFeedLayout,
+                                                       state.visibleIndexes.count,
+                                                       traitCollection);
+    BOOL supportsCompactFourUp = state.layout == ApolloSubredditFeedLayoutSideBySide ||
+        state.layout == ApolloSubredditFeedLayoutGrid;
+    state.usesCompactFourUp = supportsCompactFourUp &&
+        state.visibleIndexes.count == 4 &&
+        availableWidth <= 336.0;
+    state.hideDescriptions = sHideSubredditListDescriptions;
+    if (state.layout == ApolloSubredditFeedLayoutRows) {
+        NSUInteger count = state.visibleIndexes.count;
+        CGFloat rowsHeight = (CGFloat)count * ApolloFeedShortcutPreviewRowItemHeight(traitCollection);
+        CGFloat spacingHeight = count > 1 ? (CGFloat)(count - 1) * 8.0 : 0.0;
+        state.previewHeight = rowsHeight + spacingHeight + 16.0;
+    } else {
+        state.previewHeight = ApolloFeedShortcutLayoutHeight(state.layout, traitCollection);
+    }
+    return state;
+}
+
+static UIFont *ApolloFeedShortcutsPreviewTitleFont(ApolloFeedShortcutsPreviewState *state) {
+    if (!state.usesCompactFourUp) {
+        return [UIFont preferredFontForTextStyle:UIFontTextStyleBody
+                          compatibleWithTraitCollection:state.traitCollection];
+    }
+    CGFloat pointSize = state.layout == ApolloSubredditFeedLayoutGrid ? 15.0 : 16.0;
+    UIFont *baseFont = [UIFont systemFontOfSize:pointSize];
+    return [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody]
+        scaledFontForFont:baseFont
+        compatibleWithTraitCollection:state.traitCollection];
+}
+
+static CGFloat ApolloFeedShortcutsPreviewSideBySideCenterOffset(ApolloFeedShortcutsPreviewState *state) {
+    NSUInteger itemCount = state.visibleIndexes.count;
+    if (state.layout != ApolloSubredditFeedLayoutSideBySide || itemCount < 3) return 0.0;
+
+    NSInteger firstIndex = state.visibleIndexes.firstObject.integerValue;
+    NSInteger lastIndex = state.visibleIndexes.lastObject.integerValue;
+    UIFont *font = ApolloFeedShortcutsPreviewTitleFont(state);
+    CGFloat firstTitleWidth = ceil([ApolloFeedShortcutShortTitle(firstIndex)
+        sizeWithAttributes:@{ NSFontAttributeName: font }].width);
+    CGFloat lastTitleWidth = ceil([ApolloFeedShortcutShortTitle(lastIndex)
+        sizeWithAttributes:@{ NSFontAttributeName: font }].width);
+    ApolloFeedShortcutItemGeometry firstGeometry =
+        ApolloFeedShortcutItemGeometryForLayout(state.layout, itemCount, firstIndex);
+    ApolloFeedShortcutItemGeometry lastGeometry =
+        ApolloFeedShortcutItemGeometryForLayout(state.layout, itemCount, lastIndex);
+    CGFloat visualCenterOffset = (firstGeometry.centerXOffset + lastGeometry.centerXOffset) / 2.0 +
+        (lastTitleWidth - firstTitleWidth) / 4.0;
+    CGFloat scale = UIScreen.mainScreen.scale;
+    return round(-visualCenterOffset * scale) / scale;
+}
+
+@interface ApolloFeedShortcutsPreviewView : UIView
+@property (nonatomic, weak) UITableView *hostTableView;
+@property (nonatomic, strong) ApolloFeedShortcutsPreviewState *previewState;
+@property (nonatomic, strong) NSDictionary<NSNumber *, UIView *> *shortcutItemViewsByIndex;
+@property (nonatomic, strong) NSArray<UIView *> *shortcutSeparators;
+- (void)apollo_configurePreview;
+@end
+
+@implementation ApolloFeedShortcutsPreviewView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.backgroundColor = UIColor.clearColor;
+    self.opaque = NO;
+    return self;
+}
+
+- (UIStackView *)apollo_textStackWithTitle:(NSString *)title detail:(NSString *)detail {
+    UILabel *titleLabel = [UILabel new];
+    titleLabel.text = title;
+    titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    titleLabel.textColor = UIColor.labelColor;
+    titleLabel.adjustsFontForContentSizeCategory = YES;
+
+    NSMutableArray<UIView *> *labels = [NSMutableArray arrayWithObject:titleLabel];
+    if (detail.length > 0) {
+        UILabel *detailLabel = [UILabel new];
+        detailLabel.text = detail;
+        detailLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        detailLabel.textColor = UIColor.secondaryLabelColor;
+        detailLabel.adjustsFontForContentSizeCategory = YES;
+        [labels addObject:detailLabel];
+    }
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:labels];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentLeading;
+    stack.spacing = 1.0;
+    return stack;
+}
+
+- (UIView *)apollo_previewItemAtIndex:(NSInteger)index
+                            itemCount:(NSUInteger)itemCount
+                               layout:(ApolloSubredditFeedLayout)layout
+                          contentView:(UIView **)contentView
+             contentCenterXConstraint:(NSLayoutConstraint **)contentCenterXConstraint {
+    UIImageView *iconView = [[UIImageView alloc] initWithImage:ApolloFeedShortcutIconImage(index,
+                                                                                           self.previewState.iconStyle,
+                                                                                           layout,
+                                                                                           itemCount)];
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+
+    if (layout == ApolloSubredditFeedLayoutRows) {
+        CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(self.previewState.iconStyle, layout, itemCount);
+        [NSLayoutConstraint activateConstraints:@[
+            [iconView.widthAnchor constraintEqualToConstant:iconSize],
+            [iconView.heightAnchor constraintEqualToConstant:iconSize]
+        ]];
+        NSString *detail = self.previewState.hideDescriptions ? nil : ApolloFeedShortcutDetail(index);
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[
+            iconView,
+            [self apollo_textStackWithTitle:ApolloFeedShortcutRowTitle(index) detail:detail]
+        ]];
+        row.axis = UILayoutConstraintAxisHorizontal;
+        row.alignment = UIStackViewAlignmentCenter;
+        row.spacing = 12.0;
+        [row.heightAnchor constraintEqualToConstant:ApolloFeedShortcutPreviewRowItemHeight(
+            self.previewState.traitCollection)].active = YES;
+        return row;
+    }
+
+    BOOL sideBySide = layout == ApolloSubredditFeedLayoutSideBySide;
+    BOOL iconDock = layout == ApolloSubredditFeedLayoutIconDock;
+    ApolloFeedShortcutItemGeometry geometry =
+        ApolloFeedShortcutItemGeometryForLayout(layout, itemCount, index);
+    BOOL compactSideBySide = self.previewState.usesCompactFourUp && sideBySide;
+    BOOL compactGrid = self.previewState.usesCompactFourUp &&
+        layout == ApolloSubredditFeedLayoutGrid;
+    CGFloat iconSize = ApolloFeedShortcutDisplayIconSize(self.previewState.iconStyle, layout, itemCount);
+    if (compactSideBySide) iconSize = MIN(iconSize, 28.0);
+    [NSLayoutConstraint activateConstraints:@[
+        [iconView.widthAnchor constraintEqualToConstant:iconSize],
+        [iconView.heightAnchor constraintEqualToConstant:iconSize]
+    ]];
+    UILabel *label = nil;
+    if (!iconDock) {
+        label = [UILabel new];
+        label.text = ApolloFeedShortcutShortTitle(index);
+        label.font = ApolloFeedShortcutsPreviewTitleFont(self.previewState);
+        label.textColor = UIColor.labelColor;
+        label.adjustsFontForContentSizeCategory = YES;
+        label.adjustsFontSizeToFitWidth = YES;
+        label.minimumScaleFactor = 0.5;
+        label.lineBreakMode = NSLineBreakByClipping;
+        label.textAlignment = NSTextAlignmentCenter;
+        [label setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                              forAxis:UILayoutConstraintAxisHorizontal];
+    }
+
+    NSArray<UIView *> *arrangedSubviews = iconDock ? @[ iconView ] : @[ iconView, label ];
+    UIStackView *content = [[UIStackView alloc] initWithArrangedSubviews:arrangedSubviews];
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    content.axis = sideBySide
+        ? UILayoutConstraintAxisHorizontal
+        : UILayoutConstraintAxisVertical;
+    content.alignment = UIStackViewAlignmentCenter;
+    content.spacing = compactSideBySide ? 2.5 : ApolloFeedShortcutContentSpacing(layout, itemCount);
+
+    UIView *item = [UIView new];
+    [item addSubview:content];
+    NSLayoutConstraint *centerConstraint = [content.centerXAnchor constraintEqualToAnchor:item.centerXAnchor];
+    centerConstraint.constant = geometry.centerXOffset + (compactGrid && index == 3 ? 2.0 : 0.0);
+    [NSLayoutConstraint activateConstraints:@[
+        centerConstraint,
+        [content.centerYAnchor constraintEqualToAnchor:item.centerYAnchor]
+    ]];
+    if (!geometry.usesFlexibleSideBySideLayout) {
+        CGFloat horizontalMargin = compactGrid ? 0.0 : geometry.horizontalMargin;
+        [NSLayoutConstraint activateConstraints:@[
+            [content.leadingAnchor constraintGreaterThanOrEqualToAnchor:item.leadingAnchor constant:horizontalMargin],
+            [content.trailingAnchor constraintLessThanOrEqualToAnchor:item.trailingAnchor constant:-horizontalMargin]
+        ]];
+    }
+    if (contentView) *contentView = content;
+    if (contentCenterXConstraint) *contentCenterXConstraint = centerConstraint;
+    return item;
+}
+
+- (void)apollo_configurePreview {
+    ApolloFeedShortcutsPreviewState *state = self.previewState;
+    if (!state) return;
+    NSArray<NSNumber *> *visibleIndexes = state.visibleIndexes;
+    ApolloSubredditFeedLayout layout = state.layout;
+    BOOL usesShortcutLayout = layout != ApolloSubredditFeedLayoutRows;
+    NSMutableArray<UIView *> *shortcutItems = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
+    NSMutableDictionary<NSNumber *, UIView *> *itemViewsByIndex =
+        [NSMutableDictionary dictionaryWithCapacity:visibleIndexes.count];
+    NSMutableArray<UIView *> *contentViews = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
+    NSMutableArray<NSLayoutConstraint *> *centerConstraints = [NSMutableArray arrayWithCapacity:visibleIndexes.count];
+    for (NSNumber *index in visibleIndexes) {
+        UIView *contentView = nil;
+        NSLayoutConstraint *centerConstraint = nil;
+        UIView *item = [self apollo_previewItemAtIndex:index.integerValue
+                                             itemCount:visibleIndexes.count
+                                                layout:layout
+                                           contentView:&contentView
+                              contentCenterXConstraint:&centerConstraint];
+        [shortcutItems addObject:item];
+        itemViewsByIndex[index] = item;
+        if (contentView) [contentViews addObject:contentView];
+        if (centerConstraint) [centerConstraints addObject:centerConstraint];
+    }
+    self.shortcutItemViewsByIndex = [itemViewsByIndex copy];
+
+    if (usesShortcutLayout) {
+        UIColor *separatorColor = ApolloThemeSeparatorColor()
+            ?: self.hostTableView.separatorColor
+            ?: UIColor.separatorColor;
+        self.shortcutSeparators = ApolloFeedShortcutInstallLayout(self,
+                                                                   shortcutItems,
+                                                                   contentViews,
+                                                                   centerConstraints,
+                                                                   layout,
+                                                                   separatorColor,
+                                                                   ApolloFeedShortcutsPreviewSideBySideCenterOffset(state));
+        if (layout == ApolloSubredditFeedLayoutSideBySide && contentViews.count >= 3) {
+            [NSLayoutConstraint activateConstraints:@[
+                [contentViews.firstObject.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.leadingAnchor],
+                [contentViews.lastObject.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor]
+            ]];
+        }
+        return;
+    }
+    self.shortcutSeparators = @[];
+
+    UIStackView *previewStack = [[UIStackView alloc] initWithArrangedSubviews:shortcutItems];
+    previewStack.axis = UILayoutConstraintAxisVertical;
+    previewStack.alignment = UIStackViewAlignmentFill;
+    previewStack.distribution = UIStackViewDistributionFillEqually;
+    previewStack.spacing = 8.0;
+    previewStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:previewStack];
+    [NSLayoutConstraint activateConstraints:@[
+        [previewStack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16.0],
+        [previewStack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16.0],
+        [previewStack.topAnchor constraintEqualToAnchor:self.topAnchor constant:8.0],
+        [previewStack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-8.0]
+    ]];
+}
+
+@end
+
+@interface CustomAPIViewController (ApolloFeedShortcutsPreview)
+- (void)apollo_refreshFeedShortcutsPreviewAnimated:(BOOL)animated;
+@end
 @implementation CustomAPIViewController
 
 typedef NS_ENUM(NSInteger, Tag) {
@@ -303,6 +580,71 @@ typedef NS_ENUM(NSInteger, Tag) {
     });
 }
 
+- (NSString *)shareLinkHostText {
+    return ApolloShareLinkHostDisplayName((ShareLinkHost)sShareLinkHost);
+}
+
+- (void)setShareLinkHost:(NSInteger)host {
+    sShareLinkHost = host;
+    [[NSUserDefaults standardUserDefaults] setInteger:sShareLinkHost
+                                                forKey:UDKeyShareLinkHost];
+    [self reloadRowWithID:@"media.shareLinkHost"];
+}
+
+- (void)presentShareLinkHostSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(
+        self,
+        sourceView,
+        @"Share Link Host",
+        @[
+            ApolloShareLinkHostDisplayName(ShareLinkHostDefault),
+            ApolloShareLinkHostDisplayName(ShareLinkHostOldReddit),
+            ApolloShareLinkHostDisplayName(ShareLinkHostVXReddit),
+            ApolloShareLinkHostDisplayName(ShareLinkHostFXReddit)
+        ],
+        sShareLinkHost,
+        ^(NSInteger pickedIndex) {
+            [weakSelf setShareLinkHost:pickedIndex];
+        });
+}
+
+- (NSString *)unmuteFeedVideosModeText {
+    switch (sUnmuteFeedVideos) {
+        case 1:  return @"Remember";
+        case 2:  return @"Always";
+        default: return @"Never";
+    }
+}
+
+- (void)setUnmuteFeedVideosMode:(NSInteger)mode {
+    sUnmuteFeedVideos = mode;
+    [[NSUserDefaults standardUserDefaults] setInteger:sUnmuteFeedVideos forKey:UDKeyUnmuteFeedVideos];
+    [self reloadRowWithID:@"media.unmuteFeed"];
+}
+
+// Title + options + "(Current)" only — shared picker (option index == stored mode).
+- (void)presentUnmuteFeedVideosModeSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Unmute Videos in Feed",
+                                @[@"Never", @"Remember", @"Always"],
+                                sUnmuteFeedVideos,
+                                ^(NSInteger pickedIndex) {
+        [weakSelf setUnmuteFeedVideosMode:pickedIndex];
+    });
+}
+
+- (void)feedVideoScrubberSwitchToggled:(UISwitch *)sender {
+    sFeedVideoScrubber = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFeedVideoScrubber forKey:UDKeyFeedVideoScrubber];
+}
+
+- (void)forwardSwipeForgetSwitchToggled:(UISwitch *)sender {
+    sForwardSwipeForgetAfterScrolling = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sForwardSwipeForgetAfterScrolling
+                                            forKey:UDKeyForwardSwipeForgetAfterScrolling];
+}
+
 - (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
         case ImageUploadProviderReddit:   return @"Reddit";
@@ -370,11 +712,18 @@ typedef NS_ENUM(NSInteger, Tag) {
     // un-blocks while a link host is set) — let it re-apply immediately.
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloCommentLinkHostChangedNotification object:nil];
     [self reloadRowWithID:@"media.commentLinkHost"];
+    // The Prefer Native Images row is only shown while a link host is set.
+    [self visibilityDidChange];
+}
+
+- (void)commentLinkPreferNativeSwitchToggled:(UISwitch *)sender {
+    sCommentLinkPreferNative = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyCommentLinkPreferNative];
 }
 
 - (void)presentCommentLinkHostSheetFromSourceView:(UIView *)sourceView {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Comment Link Host"
-                                                                   message:@"Images added to a comment or reply upload to this host and are inserted as a plain link instead of a native Reddit image — so they still work in subreddits that don't allow images or GIFs in comments. Apollo shows the linked image inline; other apps and the website show a tappable link. Posts keep using the Media Upload Host."
+                                                                   message:@"Images added to a comment or reply upload to this host and are inserted as a plain link instead of a native Reddit image — so they still work in subreddits that don't allow images or GIFs in comments. Apollo shows the linked image inline; other apps and the website show a tappable link. Posts keep using the Media Upload Host.\n\nTo use this host only where it's needed, turn on Prefer Native Images: comment images then upload to Reddit and display inline wherever the subreddit allows them."
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
     NSString *offTitle = (sCommentLinkHost == CommentLinkHostOff) ? @"Off (Current)" : @"Off";
@@ -506,6 +855,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
     [self reloadRowWithID:@"polls.settings"];
+    [self reloadRowWithID:@"sub.feedShortcuts"];
     // Refresh the Profile Layout summary after returning from that screen
     // (Density/Avatar/band switches may have just changed).
     [self reloadRowWithID:@"media.profileLayout"];
@@ -1326,19 +1676,79 @@ typedef NS_ENUM(NSInteger, Tag) {
             return [[InfoRowSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
+    ApolloSettingsRow *feedScrubber =
+        [ApolloSettingsRow switchRowWithID:@"media.feedScrubber"
+                                     title:@"Feed Video Scrubber"
+                                      isOn:^BOOL { return sFeedVideoScrubber; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedVideoScrubberSwitchToggled:sender]; }];
+
+    ApolloSettingsRow *forwardSwipeForget =
+        [ApolloSettingsRow switchRowWithID:@"gen.forwardSwipeForget"
+                                     title:@"Forget Forward Swipe After Scrolling"
+                                      isOn:^BOOL { return sForwardSwipeForgetAfterScrolling; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf forwardSwipeForgetSwitchToggled:sender]; }];
+
     ApolloSettingsRow *blockAnnouncements =
         [ApolloSettingsRow switchRowWithID:@"gen.blockAnnouncements"
                                      title:@"Block Announcements"
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf blockAnnouncementsSwitchToggled:sender]; }];
 
+    // Named for the whole class of Reddit Developer Platform posts, not the
+    // sports ones it was first built against: the same widget mechanism carries
+    // r/wallstreetbets' live market dashboard, brackets, polls and community
+    // games. Settings search indexes row TITLES only, so the footer below spells
+    // the range out for anyone who lands on this screen.
+    ApolloSettingsRow *devvitPosts =
+        [ApolloSettingsRow switchRowWithID:@"gen.devvitPosts"
+                                     title:@"Live Interactive Posts"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf devvitPostsSwitchToggled:sender]; }];
+
+    // Feed cards are the surface where the widget's cost multiplies — its own
+    // escape hatch, without losing the widget in comments. Sits directly
+    // under the master row, so the short title reads in context.
+    ApolloSettingsRow *devvitFeedPosts =
+        [ApolloSettingsRow switchRowWithID:@"gen.devvitFeedPosts"
+                                     title:@"Show in Feed"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitFeedWidgets]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf devvitFeedPostsSwitchToggled:sender]; }];
+    devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
+
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list."
-                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements ]];
+                                            footer:@"Feed Video Scrubber: drag the bar under a feed video to scrub it.\n\nForget Forward Swipe After Scrolling: once you've scrolled a few posts on, a forward swipe won't reopen the post you came back from.\n\nLive Interactive Posts: shows live scores, polls, brackets and other interactive posts instead of placeholder text. Show in Feed adds them to the feed as well as comments."
+                                              rows:@[ textPostThumbnails, infoRow, feedScrubber, forwardSwipeForget, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
-// Interface group screen (ApolloInterfaceSettingsViewController) — the
-// Liquid Glass chrome behaviors.
+- (ApolloSettingsSection *)buildPostsFloatingTabsSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *floatingTabs =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabs"
+                                     title:@"Floating Post Tabs"
+                                      isOn:^BOOL { return sFloatingPostTabs; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsSwitchToggled:sender]; }];
+
+    ApolloSettingsRow *magnet =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabsMagnet"
+                                     title:@"Magnetic Stacking"
+                                      isOn:^BOOL { return sFloatingPostTabsMagnet; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsMagnetSwitchToggled:sender]; }];
+    magnet.visible = ^BOOL { return sFloatingPostTabs; };
+
+    ApolloSettingsRow *preview =
+        [ApolloSettingsRow switchRowWithID:@"gen.floatingPostTabsPreview"
+                                     title:@"Hold to Preview"
+                                      isOn:^BOOL { return sFloatingPostTabsPreview; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf floatingPostTabsPreviewSwitchToggled:sender]; }];
+    preview.visible = ^BOOL { return sFloatingPostTabs; };
+
+    return [ApolloSettingsSection sectionWithTitle:@"Floating Tabs"
+                                            footer:@"Keep up to 5 posts open as floating bubbles. In a post, choose Keep in Floating Tab from the ••• menu. Tap a bubble to jump back to the post, or drag it onto the ✕ to close it. Magnetic Stacking piles bubbles together when you drop one on another. Hold to Preview shows the post while you hold a bubble down, and opens it when you let go."
+                                              rows:@[ floatingTabs, magnet, preview ]];
+}
+
+// Interface group screen (ApolloInterfaceSettingsViewController).
 - (ApolloSettingsSection *)buildInterfaceSection {
     __weak typeof(self) weakSelf = self;
 
@@ -1364,20 +1774,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     // "Color Flairs" now rides Appearance → Flair (native injection) —
     // -flairColorsSwitchToggled: below stays as the shared toggle handler.
-    ApolloSettingsRow *keepSearchInPlace =
-        [ApolloSettingsRow customRowWithID:@"gen.keepSearchInPlace"
-                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
-            BOOL lgSupported = IsLiquidGlass();
-            UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_KeepSearchInPlace"
-                                                                 label:@"Keep Search Bar Visible"
-                                                                detail:@"Requires Liquid Glass."
-                                                                    on:lgSupported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace]
-                                                               enabled:lgSupported
-                                                                action:@selector(keepSearchBarInPlaceSwitchToggled:)];
-            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        }
-                                  onSelect:nil];
-
     ApolloSettingsRow *titleGapCentering =
         [ApolloSettingsRow customRowWithID:@"gen.titleGapCentering"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -1422,7 +1818,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         [ApolloSettingsRow customRowWithID:@"gen.iPadPaneLayout"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_IPadPaneLayout"
-                                                                 label:@"Multi-Column Layout"
+                                                                 label:@"Multi-Column Layout (Experimental)"
                                                                 detail:ApolloIPadPaneLayoutSettingDetail()
                                                                     on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadPaneLayout]
                                                                enabled:YES
@@ -1431,7 +1827,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
     iPadPaneLayout.visible = ^BOOL {
-        return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+        return ApolloPaneLayoutSupported();
     };
 
     // Overrides the top scroll-edge glass under the nav bar (iOS 26+). Liquid
@@ -1449,7 +1845,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Customize tab-bar labels and Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ iconOnlyTabBar, tabBarIdle, keepSearchInPlace, titleGapCentering, iPadPaneLayout, iPadTabBarBottom, scrollEdgeEffect ]];
+                                              rows:@[ iconOnlyTabBar, tabBarIdle, titleGapCentering, iPadPaneLayout, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -1673,6 +2069,13 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                       isOn:^BOOL { return sFeedGalleryCarousel; }
                                   onToggle:^(UISwitch *sender) { [weakSelf feedGalleryCarouselSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *edgeSwipeNav =
+        [ApolloSettingsRow switchRowWithID:@"media.feedGalleryEdgeSwipeNav"
+                                     title:@"Swipe Past Gallery to Navigate"
+                                      isOn:^BOOL { return sFeedGalleryEdgeSwipeNav; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedGalleryEdgeSwipeNavSwitchToggled:sender]; }];
+    edgeSwipeNav.visible = ^BOOL { return sFeedGalleryCarousel; };
+
     ApolloSettingsRow *swipeComments =
         [ApolloSettingsRow switchRowWithID:@"media.swipeUpComments"
                                      title:@"Swipe Up for Comments"
@@ -1680,8 +2083,39 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                   onToggle:^(UISwitch *sender) { [weakSelf swipeUpCommentsSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Browsing"
-                                            footer:@"Swipe through Reddit image galleries without leaving the feed. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
-                                              rows:@[ feedGalleries, swipeComments ]];
+                                            footer:@"Swipe Through Feed Galleries: page through a gallery post's images without leaving the feed.\n\nSwipe Past Gallery to Navigate: keep swiping at the first or last image to go back or forward a page instead of bouncing. Off by default.\n\nSwipe Up for Comments: in the fullscreen media viewer, swipe up or tap the comments button to open comments over the media."
+                                              rows:@[ feedGalleries, edgeSwipeNav, swipeComments ]];
+}
+
+// NSFW Media. Lives here rather than in Apollo's native Filters & Blocks screen:
+// these are tweak settings, and tweak settings belong on the tweak's own screens
+// (Apollo's tables are only ever modified through the ApolloSettingsGeneralTable
+// registry).
+- (ApolloSettingsSection *)buildMediaNSFWSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *blur =
+        [ApolloSettingsRow valueRowWithID:@"media.nsfwBlurOverride"
+                                    title:@"Blur NSFW Media"
+                                   detail:^NSString * { return ApolloNSFWBlurOverrideTitle(sNSFWBlurOverride); }
+                                 onSelect:^{ [weakSelf nsfwBlurOverrideRowSelected]; }];
+
+    return [ApolloSettingsSection sectionWithTitle:@"NSFW Media"
+                                            footer:@"\"Reddit Setting\" follows your account's \"Blur mature (18+) images and media\" preference; Always and Never override it on this device only."
+                                              rows:@[ blur ]];
+}
+
+- (void)nsfwBlurOverrideRowSelected {
+    ApolloSettingsPresentPicker(self, nil, @"Blur NSFW Media",
+                                @[ ApolloNSFWBlurOverrideTitle(0),
+                                   ApolloNSFWBlurOverrideTitle(1),
+                                   ApolloNSFWBlurOverrideTitle(2) ],
+                                sNSFWBlurOverride,
+                                ^(NSInteger picked) {
+        sNSFWBlurOverride = picked;
+        [[NSUserDefaults standardUserDefaults] setInteger:picked forKey:UDKeyNSFWBlurOverride];
+        ApolloTagFiltersNSFWBlurOverrideChanged();
+    });
 }
 
 - (ApolloSettingsSection *)buildMediaPlaybackSection {
@@ -1701,6 +2135,15 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             [weakSelf presentPreferredGIFFallbackFormatSheetFromSourceView:[weakSelf cellForRowID:@"media.gifFallback"]];
         }];
     gifFallback.configure = disclosure;
+
+    ApolloSettingsRow *unmuteFeed =
+        [ApolloSettingsRow valueRowWithID:@"media.unmuteFeed"
+                                    title:@"Unmute Videos in Feed"
+                                   detail:^NSString * { return [weakSelf unmuteFeedVideosModeText]; }
+                                 onSelect:^{
+            [weakSelf presentUnmuteFeedVideosModeSheetFromSourceView:[weakSelf cellForRowID:@"media.unmuteFeed"]];
+        }];
+    unmuteFeed.configure = disclosure;
 
     ApolloSettingsRow *unmuteComments =
         [ApolloSettingsRow valueRowWithID:@"media.unmuteComments"
@@ -1732,14 +2175,37 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     holdSpeedValue.visible = ^BOOL { return sVideoHoldSpeedEnabled; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Playback"
-                                            footer:@"Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
-                                              rows:@[ gifFallback, unmuteComments, holdSpeed, holdSpeedValue ]];
+                                            footer:@"Unmute Videos in Feed: Never keeps feed videos silent, Always plays every one with sound, and Remember follows the last video you muted or unmuted yourself. Only one feed video plays sound at a time. Hold for Video Speed: press and hold the right side of a fullscreen video to play it at the chosen speed."
+                                              rows:@[ gifFallback, unmuteFeed, unmuteComments, holdSpeed, holdSpeedValue ]];
 }
 
 - (ApolloSettingsSection *)buildMediaInlineSection {
     return [ApolloSettingsSection sectionWithTitle:@"Inline Media"
                                             footer:@"Show images and play GIFs inline in the feed."
                                               rows:@[ [self buildInlineMediaRow] ]];
+}
+
+- (ApolloSettingsSection *)buildMediaSharingSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *shareLinkHost =
+        [ApolloSettingsRow valueRowWithID:@"media.shareLinkHost"
+                                    title:@"Share Link Host"
+                                   detail:^NSString * {
+            return [weakSelf shareLinkHostText];
+        }
+                                 onSelect:^{
+            [weakSelf presentShareLinkHostSheetFromSourceView:
+                [weakSelf cellForRowID:@"media.shareLinkHost"]];
+        }];
+
+    shareLinkHost.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    return [ApolloSettingsSection sectionWithTitle:@"Sharing"
+                                            footer:@"Choose which Reddit host Apollo uses for shared post and comment links, including Copy Link and links included with shared media. fxReddit uses fxddit.com."
+                                              rows:@[ shareLinkHost ]];
 }
 
 - (ApolloSettingsSection *)buildMediaUploadsSection {
@@ -1767,9 +2233,20 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }];
     commentLinkHost.configure = disclosure;
 
+    ApolloSettingsRow *commentLinkAuto =
+        [ApolloSettingsRow switchRowWithID:@"media.commentLinkAuto"
+                                     title:@"Prefer Native Images"
+                                      isOn:^BOOL { return sCommentLinkPreferNative; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf commentLinkPreferNativeSwitchToggled:sender]; }];
+    // Auto mode only means something while a link host is set (see -setCommentLinkHost:).
+    commentLinkAuto.visible = ^BOOL { return sCommentLinkHost != CommentLinkHostOff; };
+
+    // NOTE: the rendered footer for this section is the attributed one in
+    // -footerAttributedTextForSection: (matched by the "Uploads" title) — keep
+    // the two in sync when editing either.
     return [ApolloSettingsSection sectionWithTitle:@"Uploads"
-                                            footer:@"Media Upload Host sets where images attached to posts and comments are uploaded. Comment Link Host uploads images in comments to Imgur or Image Chest and inserts a plain link, so they work even where images aren't allowed."
-                                              rows:@[ uploadHost, commentLinkHost ]];
+                                            footer:@"Media Upload Host chooses where images you attach to posts and comments are uploaded.\n\nComment Link Host uploads comment images to Imgur or Image Chest and inserts a plain link, so they work in subreddits that don't allow image comments. Prefer Native Images uses Reddit's own image upload wherever the subreddit allows it, and the link host only where it doesn't.\n\nManage past uploads under Settings → General → Media → Manage Uploads."
+                                              rows:@[ uploadHost, commentLinkHost, commentLinkAuto ]];
 }
 
 - (ApolloSettingsSection *)buildMediaNetworkSection {
@@ -1789,7 +2266,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     albumFallback.visible = ^BOOL { return sProxyImgurDDG; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Network"
-                                            footer:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still appear where Imgur is blocked (e.g. the UK).\n\nDuckDuckGo can only carry images. Multi-image albums also need a small text file listing the album's contents, which DuckDuckGo refuses to fetch. With Album Fallback Proxies on, Apollo gets that file through public text proxies (r.jina.ai, allorigins.win, codetabs.com) whenever Imgur can't be reached directly. Only the album's Imgur address is sent to them — nothing about you or your Reddit account. Turn it off to use DuckDuckGo strictly; albums will then fail while Imgur is blocked.\n\nVideos and uploads can't be proxied at all."
+                                            footer:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still show where Imgur is blocked (like the UK).\n\nDuckDuckGo can't fetch an album's list of images, so Album Fallback Proxies gets it through public text proxies (r.jina.ai, allorigins.win, codetabs.com) instead. Only the album's Imgur address is sent to them. Turn it off and albums won't load while Imgur is blocked.\n\nVideos and uploads can't be proxied."
                                               rows:@[ proxyImgur, albumFallback ]];
 }
 
@@ -1869,38 +2346,17 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (ApolloSettingsSection *)buildSubredditsMainSection {
     __weak typeof(self) weakSelf = self;
 
-    ApolloSettingsRow *enhancements =
-        [ApolloSettingsRow switchRowWithID:@"sub.enhancements"
-                                     title:@"Subreddit List Enhancements"
-                                      isOn:^BOOL { return sSubredditListEnhancements; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf subredditListEnhancementsSwitchToggled:sender]; }];
-
-    ApolloSettingsRow *modernDividers =
-        [ApolloSettingsRow switchRowWithID:@"sub.modernDividers"
-                                     title:@"Modern Subreddit Dividers"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf modernSubredditDividersSwitchToggled:sender]; }];
-    // Sub-option: only exists while Subreddit List Enhancements is on.
-    modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
-
-    // Deliberately NOT gated on the enhancements master: hides the description
-    // subtitles under Home/Popular/All/Moderator in both classic and modern lists.
-    // A subreddit-LIST feature, so it stays here beside the list toggles rather
-    // than moving into the Subreddit Layout (header) screen below.
-    ApolloSettingsRow *hideDescriptions =
-        [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
-                                     title:@"Hide Feed Descriptions"
-                                      isOn:^BOOL { return sHideSubredditListDescriptions; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
-
-    // Sibling of Hide Feed Descriptions for the MULTIREDDITS section's rows
-    // (which otherwise show a custom description, or the joined subreddit
-    // list). Also independent of the enhancements master.
-    ApolloSettingsRow *hideMultiredditDescriptions =
-        [ApolloSettingsRow switchRowWithID:@"sub.hideMultiredditDescriptions"
-                                     title:@"Hide Multireddit Descriptions"
-                                      isOn:^BOOL { return sHideMultiredditDescriptions; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
+    ApolloSettingsRow *feedShortcuts =
+        [self hubDisclosureRowWithID:@"sub.feedShortcuts"
+                               title:@"Feed Shortcuts"
+                            subtitle:^NSString * {
+            return [NSString stringWithFormat:@"%@ · %@",
+                    [weakSelf subredditFeedIconStyleText],
+                    [weakSelf subredditFeedLayoutText]];
+        }
+                                push:^UIViewController * {
+            return ApolloSettingsRouteInstantiate(@"feed-shortcuts");
+        }];
 
     // Pushes the dedicated Subreddit Layout screen — the single customize
     // screen for everything subreddit-page-related: Density (New, Classic, or
@@ -1915,9 +2371,179 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return [[ApolloSubredditLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
+    // Pushes the dedicated Subreddit Sections screen: the FOLLOWING section
+    // for followed users, drag-to-reorder for the special sections, and a
+    // live preview of the list layout (see ApolloSubredditSectionsViewController).
+    ApolloSettingsRow *subredditSections =
+        [self hubDisclosureRowWithID:@"sub.sections"
+                                title:@"Subreddit Sections"
+                             subtitle:^NSString * { return [weakSelf subredditSectionsSummaryText]; }
+                                 push:^UIViewController * {
+            return [[ApolloSubredditSectionsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts. Multireddits show the subreddits they contain, or a custom description — tap a multireddit while editing the list to rename it or change its description. Hide Multireddit Descriptions blanks that line entirely."
-                                              rows:@[ enhancements, modernDividers, hideDescriptions, hideMultiredditDescriptions, subredditLayout ]];
+                                            footer:@"Feed Shortcuts customizes the Home, Popular, All and Moderator Posts rows — their icons, layout, visibility and descriptions. Subreddit Sections arranges the subreddit list (its style toggles live there); Subreddit Layout customizes subreddit pages."
+                                              rows:@[ feedShortcuts, subredditSections, subredditLayout ]];
+}
+
+- (ApolloSettingsSection *)buildFeedShortcutsVisibilitySection {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *showPopular =
+        [ApolloSettingsRow switchRowWithID:@"sub.showPopularShortcut"
+                                     title:@"Show Popular"
+                                      isOn:^BOOL {
+            return ![NSUserDefaults.standardUserDefaults boolForKey:UDKeyHideRPopularRedditList];
+        }
+                                  onToggle:^(UISwitch *sender) {
+            [weakSelf setFeedShortcutVisible:sender.isOn defaultsKey:UDKeyHideRPopularRedditList];
+        }];
+    ApolloSettingsRow *showAll =
+        [ApolloSettingsRow switchRowWithID:@"sub.showAllShortcut"
+                                     title:@"Show All Posts"
+                                      isOn:^BOOL {
+            return ![NSUserDefaults.standardUserDefaults boolForKey:UDKeyHideRAllRedditList];
+        }
+                                  onToggle:^(UISwitch *sender) {
+            [weakSelf setFeedShortcutVisible:sender.isOn defaultsKey:UDKeyHideRAllRedditList];
+        }];
+    ApolloSettingsRow *showModerator =
+        [ApolloSettingsRow switchRowWithID:@"sub.showModeratorShortcut"
+                                     title:@"Show Moderator Posts"
+                                      isOn:^BOOL {
+            return ![NSUserDefaults.standardUserDefaults boolForKey:UDKeyHideModeratorRedditList];
+        }
+                                  onToggle:^(UISwitch *sender) {
+            [weakSelf setFeedShortcutVisible:sender.isOn defaultsKey:UDKeyHideModeratorRedditList];
+        }];
+    return [ApolloSettingsSection sectionWithTitle:@"Visible Shortcuts"
+                                            footer:@"Home is always shown. Choose which other shortcuts appear."
+                                              rows:@[ showPopular, showAll, showModerator ]];
+}
+
+- (ApolloSettingsSection *)buildFeedShortcutsControlsSection {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *feedIconStyle =
+        [ApolloSettingsRow valueRowWithID:@"sub.feedIconStyle"
+                                    title:@"Icon Style"
+                                   detail:^NSString * { return [weakSelf subredditFeedIconStyleText]; }
+                                 onSelect:^{
+            [weakSelf presentSubredditFeedIconStylePickerFromSourceView:[weakSelf cellForRowID:@"sub.feedIconStyle"]];
+        }];
+    feedIconStyle.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    ApolloSettingsRow *feedLayout =
+        [ApolloSettingsRow valueRowWithID:@"sub.feedLayout"
+                                    title:@"Feed Layout"
+                                   detail:^NSString * { return [weakSelf subredditFeedLayoutText]; }
+                                 onSelect:^{
+            [weakSelf presentSubredditFeedLayoutPickerFromSourceView:[weakSelf cellForRowID:@"sub.feedLayout"]];
+        }];
+    feedLayout.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    return [ApolloSettingsSection sectionWithTitle:@"Appearance"
+                                            footer:nil
+                                              rows:@[ feedIconStyle, feedLayout ]];
+}
+
+- (ApolloSettingsSection *)buildFeedShortcutsDescriptionsSection {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *hideFeedDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
+                                     title:@"Hide Feed Descriptions"
+                                      isOn:^BOOL { return sHideSubredditListDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
+    hideFeedDescriptions.visible = ^BOOL {
+        return sSubredditFeedLayout == ApolloSubredditFeedLayoutRows;
+    };
+
+    ApolloSettingsRow *hideMultiredditDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideMultiredditDescriptions"
+                                     title:@"Hide Multireddit Descriptions"
+                                      isOn:^BOOL { return sHideMultiredditDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Descriptions"
+                                            footer:@"Multireddit rows show either a custom description or their included subreddits."
+                                              rows:@[ hideFeedDescriptions, hideMultiredditDescriptions ]];
+}
+
+- (NSString *)subredditFeedIconStyleText {
+    switch (sSubredditFeedIconStyle) {
+        case ApolloSubredditFeedIconStyleCircle: return @"Circle";
+        case ApolloSubredditFeedIconStyleTinted: return @"Tinted";
+        case ApolloSubredditFeedIconStyleSoftTile: return @"Soft Tile";
+        case ApolloSubredditFeedIconStyleSolidTile: return @"Solid Tile";
+        default: return @"Classic";
+    }
+}
+
+- (NSString *)subredditFeedLayoutText {
+    switch (sSubredditFeedLayout) {
+        case ApolloSubredditFeedLayoutSideBySide: return @"Side-by-Side";
+        case ApolloSubredditFeedLayoutGrid: return @"Grid";
+        case ApolloSubredditFeedLayoutIconDock: return @"Icon Dock";
+        default: return @"Rows";
+    }
+}
+
+- (void)setSubredditFeedIconStyle:(NSInteger)iconStyle {
+    if (iconStyle < ApolloSubredditFeedIconStyleClassic ||
+        iconStyle > ApolloSubredditFeedIconStyleSolidTile) {
+        iconStyle = ApolloSubredditFeedIconStyleClassic;
+    }
+    sSubredditFeedIconStyle = iconStyle;
+    [[NSUserDefaults standardUserDefaults] setInteger:iconStyle forKey:UDKeySubredditFeedIconStyle];
+    [self reloadRowWithID:@"sub.feedIconStyle"];
+    [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedShortcutsChangedNotification object:nil];
+}
+
+- (void)setSubredditFeedLayout:(NSInteger)layout {
+    if (layout < ApolloSubredditFeedLayoutRows ||
+        layout > ApolloSubredditFeedLayoutIconDock) {
+        layout = ApolloSubredditFeedLayoutRows;
+    }
+    sSubredditFeedLayout = layout;
+    [[NSUserDefaults standardUserDefaults] setInteger:layout forKey:UDKeySubredditFeedLayout];
+    [self reloadRowWithID:@"sub.feedLayout"];
+    [self visibilityDidChange];
+    [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedShortcutsChangedNotification object:nil];
+}
+
+- (void)presentSubredditFeedIconStylePickerFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Icon Style",
+                                @[@"Classic", @"Circle", @"Tinted", @"Soft Tile", @"Solid Tile"],
+                                sSubredditFeedIconStyle,
+                                ^(NSInteger pickedIndex) {
+        [weakSelf setSubredditFeedIconStyle:pickedIndex];
+    });
+}
+
+- (void)presentSubredditFeedLayoutPickerFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Feed Layout",
+                                @[@"Rows", @"Grid", @"Side-by-Side", @"Icon Dock"],
+                                sSubredditFeedLayout,
+                                ^(NSInteger pickedIndex) {
+        [weakSelf setSubredditFeedLayout:pickedIndex];
+    });
+}
+
+- (NSString *)subredditSectionsSummaryText {
+    BOOL separate = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySeparateFollowedUsers];
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *token in ApolloSubredditSectionsResolvedOrder()) {
+        if (!separate && [token isEqualToString:ApolloSubredditSectionTokenFollowing]) continue;
+        [parts addObject:ApolloSubredditSectionDisplayName(token)];
+    }
+    return [parts componentsJoinedByString:@" · "];
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -2651,11 +3277,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             attributes:plainAttrs]];
     } else if ([sectionTitle isEqualToString:@"Uploads"]) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Image Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nManage past uploads from Settings → General → Media → Manage Uploads."
+            initWithString:@"Media Upload Host chooses where images you attach to posts and comments are uploaded.\n\nComment Link Host uploads comment images to Imgur or Image Chest and inserts a plain link, so they work in subreddits that don't allow image comments. Prefer Native Images uses Reddit's own image upload wherever the subreddit allows it, and the link host only where it doesn't.\n\nManage past uploads under Settings → General → Media → Manage Uploads."
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Network"]) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still appear where Imgur is blocked (e.g. the UK).\n\nDuckDuckGo can only carry images. Multi-image albums also need a small text file listing the album's contents, which DuckDuckGo refuses to fetch. With Album Fallback Proxies on, Apollo gets that file through public text proxies (r.jina.ai, allorigins.win, codetabs.com) whenever Imgur can't be reached directly. Only the album's Imgur address is sent to them — nothing about you or your Reddit account. Turn it off to use DuckDuckGo strictly; albums will then fail while Imgur is blocked.\n\nVideos and uploads can't be proxied at all."
+            initWithString:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still show where Imgur is blocked (like the UK).\n\nDuckDuckGo can't fetch an album's list of images, so Album Fallback Proxies gets it through public text proxies (r.jina.ai, allorigins.win, codetabs.com) instead. Only the album's Imgur address is sent to them. Turn it off and albums won't load while Imgur is blocked.\n\nVideos and uploads can't be proxied."
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Notification Backend"]) {
         text = [[NSMutableAttributedString alloc]
@@ -3370,28 +3996,25 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [self reloadRowWithID:@"api.redirectURI"];
 }
 
-- (void)subredditListEnhancementsSwitchToggled:(UISwitch *)sender {
-    BOOL wasOn = sSubredditListEnhancements;
-    sSubredditListEnhancements = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sSubredditListEnhancements forKey:UDKeySubredditListEnhancements];
-    if (sSubredditListEnhancements == wasOn) return;
-
-    // The Modern Dividers row only exists while the master toggle is on.
-    [self visibilityDidChange];
-
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
-}
-
-- (void)modernSubredditDividersSwitchToggled:(UISwitch *)sender {
-    sModernSubredditDividers = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sModernSubredditDividers forKey:UDKeyModernSubredditDividers];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
-}
+// Subreddit List Enhancements and Modern Subreddit Dividers live on the
+// Subreddit Sections screen now (ApolloSubredditSectionsViewController),
+// beside the live preview that shows what they change.
 
 - (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
     sHideSubredditListDescriptions = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
+    [self apollo_refreshFeedShortcutsPreviewAnimated:NO];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
+}
+
+- (void)setFeedShortcutVisible:(BOOL)visible defaultsKey:(NSString *)defaultsKey {
+    [NSUserDefaults.standardUserDefaults setBool:!visible forKey:defaultsKey];
+    [self apollo_refreshFeedShortcutsPreviewAnimated:YES];
+    [NSNotificationCenter.defaultCenter postNotificationName:ApolloFeedShortcutsChangedNotification object:nil];
+}
+
+- (void)apollo_refreshFeedShortcutsPreviewAnimated:(BOOL)animated {
+    (void)animated;
 }
 
 - (void)hideMultiredditDescriptionsSwitchToggled:(UISwitch *)sender {
@@ -3484,6 +4107,13 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sFeedGalleryCarousel = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sFeedGalleryCarousel forKey:UDKeyFeedGalleryCarousel];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedGalleryCarouselChangedNotification object:nil];
+    // The edge-swipe navigation row is only shown while the carousel is on.
+    [self visibilityDidChange];
+}
+
+- (void)feedGalleryEdgeSwipeNavSwitchToggled:(UISwitch *)sender {
+    sFeedGalleryEdgeSwipeNav = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFeedGalleryEdgeSwipeNav forKey:UDKeyFeedGalleryEdgeSwipeNav];
 }
 
 - (void)swipeUpCommentsSwitchToggled:(UISwitch *)sender {
@@ -3491,9 +4121,40 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     [[NSUserDefaults standardUserDefaults] setBool:sSwipeUpForComments forKey:UDKeySwipeUpForComments];
 }
 
-- (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
-    sKeepSearchBarInPlace = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
+- (void)floatingPostTabsSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabs = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabs forKey:UDKeyFloatingPostTabs];
+    [self visibilityDidChange];  // drives the "Magnetic Stacking" sub-row
+    // Bubbles must not survive the feature being disabled.
+    if (!sFloatingPostTabs) ApolloFloatingTabsCloseAll();
+}
+
+- (void)floatingPostTabsMagnetSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabsMagnet = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabsMagnet forKey:UDKeyFloatingPostTabsMagnet];
+    // Turning the magnet off fans existing piles apart.
+    ApolloFloatingTabsMagnetSettingChanged();
+}
+
+- (void)floatingPostTabsPreviewSwitchToggled:(UISwitch *)sender {
+    sFloatingPostTabsPreview = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFloatingPostTabsPreview forKey:UDKeyFloatingPostTabsPreview];
+    // Read live at gesture time — nothing to tear down.
+}
+
+- (void)devvitPostsSwitchToggled:(UISwitch *)sender {
+    sDevvitInteractivePosts = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sDevvitInteractivePosts forKey:UDKeyDevvitInteractivePosts];
+    [self visibilityDidChange];  // drives the "Interactive Posts in Feed" sub-row
+    // Community Highlights hands a PINNED interactive post back to the feed while
+    // its widget renders there, so both toggles change what belongs in a carousel.
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDevvitFeedOwnershipChangedNotification object:nil];
+}
+
+- (void)devvitFeedPostsSwitchToggled:(UISwitch *)sender {
+    sDevvitFeedWidgets = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sDevvitFeedWidgets forKey:UDKeyDevvitFeedWidgets];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDevvitFeedOwnershipChangedNotification object:nil];
 }
 
 - (void)lgTitleGapCenteringSwitchToggled:(UISwitch *)sender {
@@ -3747,7 +4408,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSString *)apollo_screenTitle { return @"Posts & Feeds"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildPostsRecentlyReadSection],
-              [self buildPostsFeedSection] ];
+              [self buildPostsFeedSection],
+              [self buildPostsFloatingTabsSection] ];
 }
 @end
 
@@ -3762,8 +4424,10 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSString *)apollo_screenTitle { return @"Media"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildMediaBrowsingSection],
+              [self buildMediaNSFWSection],
               [self buildMediaPlaybackSection],
               [self buildMediaInlineSection],
+              [self buildMediaSharingSection],
               [self buildMediaUploadsSection],
               [self buildMediaNetworkSection] ];
 }
@@ -3775,6 +4439,371 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     return @[ [self buildSubredditsMainSection],
               [self buildSubredditsSourcesSection] ];
 }
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // Refresh the Subreddit Sections summary after returning from that screen
+    // (the order / Following toggle may have just changed).
+    [self reloadRowWithID:@"sub.sections"];
+}
+@end
+
+@interface ApolloFeedShortcutsFormViewController : CustomAPIViewController
+@property (nonatomic, weak) ApolloFeedShortcutsSettingsViewController *previewContainer;
+@end
+
+@interface ApolloFeedShortcutsSettingsViewController ()
+@property (nonatomic) UITableViewStyle tableStyle;
+@property (nonatomic, strong) ApolloFeedShortcutsFormViewController *formViewController;
+@property (nonatomic, strong) UIView *previewHost;
+@property (nonatomic, strong) UILabel *previewTitleLabel;
+@property (nonatomic, strong) UIView *previewCardView;
+@property (nonatomic, strong) UIView *scrollBoundaryView;
+@property (nonatomic, strong) NSLayoutConstraint *previewContentHeightConstraint;
+@property (nonatomic, strong) ApolloFeedShortcutsPreviewView *currentPreviewView;
+@property (nonatomic, strong) UIViewPropertyAnimator *previewAnimator;
+@property (nonatomic) NSUInteger previewTransitionGeneration;
+@property (nonatomic) BOOL previewRefreshPending;
+- (void)apollo_refreshPreviewAnimated:(BOOL)animated;
+- (void)apollo_formDidScroll:(UIScrollView *)scrollView;
+@end
+
+@implementation ApolloFeedShortcutsFormViewController
+- (NSString *)apollo_screenTitle { return @"Feed Shortcuts"; }
+- (NSArray<ApolloSettingsSection *> *)buildForm {
+    return @[ [self buildFeedShortcutsVisibilitySection],
+              [self buildFeedShortcutsControlsSection],
+              [self buildFeedShortcutsDescriptionsSection] ];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reloadRowWithID:@"sub.showPopularShortcut"];
+    [self reloadRowWithID:@"sub.showAllShortcut"];
+    [self reloadRowWithID:@"sub.showModeratorShortcut"];
+}
+
+- (void)apollo_refreshFeedShortcutsPreviewAnimated:(BOOL)animated {
+    [self.previewContainer apollo_refreshPreviewAnimated:animated];
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    [self.previewContainer apollo_formDidScroll:scrollView];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    if (section != 0) return UITableViewAutomaticDimension;
+    UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote
+                           compatibleWithTraitCollection:self.traitCollection];
+    return ceil(font.lineHeight) + 20.0;
+}
+@end
+
+@implementation ApolloFeedShortcutsSettingsViewController
+
+- (instancetype)init {
+    return [self initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (instancetype)initWithStyle:(UITableViewStyle)style {
+    self = [super initWithNibName:nil bundle:nil];
+    if (!self) return nil;
+    _tableStyle = style;
+    return self;
+}
+
+- (void)loadView {
+    self.view = [UIView new];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Feed Shortcuts";
+    BOOL liquidGlass = IsLiquidGlass();
+
+    UIView *previewHost = [UIView new];
+    previewHost.translatesAutoresizingMaskIntoConstraints = NO;
+    previewHost.layoutMargins = UIEdgeInsetsMake(0.0, 20.0, 0.0, 20.0);
+    self.previewHost = previewHost;
+    [self.view addSubview:previewHost];
+
+    UILabel *titleLabel = [UILabel new];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    if (liquidGlass) {
+        titleLabel.text = @"Preview";
+        UIFont *titleFont = [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold];
+        titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody]
+            scaledFontForFont:titleFont];
+    } else {
+        titleLabel.text = @"PREVIEW";
+        titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    }
+    titleLabel.adjustsFontForContentSizeCategory = YES;
+    titleLabel.isAccessibilityElement = YES;
+    titleLabel.accessibilityTraits = UIAccessibilityTraitHeader;
+    self.previewTitleLabel = titleLabel;
+    [previewHost addSubview:titleLabel];
+
+    UIView *previewCard = [UIView new];
+    previewCard.translatesAutoresizingMaskIntoConstraints = NO;
+    previewCard.userInteractionEnabled = NO;
+    previewCard.clipsToBounds = YES;
+    previewCard.layer.cornerRadius = liquidGlass ? 20.0 : 10.0;
+    previewCard.layer.cornerCurve = kCACornerCurveContinuous;
+    self.previewCardView = previewCard;
+    [previewHost addSubview:previewCard];
+
+    UIView *scrollBoundary = [UIView new];
+    scrollBoundary.translatesAutoresizingMaskIntoConstraints = NO;
+    scrollBoundary.userInteractionEnabled = NO;
+    scrollBoundary.alpha = 0.0;
+    self.scrollBoundaryView = scrollBoundary;
+
+    ApolloFeedShortcutsFormViewController *form =
+        [[ApolloFeedShortcutsFormViewController alloc] initWithStyle:self.tableStyle];
+    form.previewContainer = self;
+    self.formViewController = form;
+    [self addChildViewController:form];
+    form.view.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:form.view];
+    [form didMoveToParentViewController:self];
+    [self.view bringSubviewToFront:previewHost];
+    [self.view addSubview:scrollBoundary];
+
+    NSLayoutConstraint *contentHeight =
+        [previewCard.heightAnchor constraintEqualToConstant:1.0];
+    self.previewContentHeightConstraint = contentHeight;
+    [NSLayoutConstraint activateConstraints:@[
+        [previewHost.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [previewHost.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [previewHost.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+
+        [titleLabel.topAnchor constraintEqualToAnchor:previewHost.topAnchor constant:15.0],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:previewHost.layoutMarginsGuide.leadingAnchor constant:16.0],
+        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:previewHost.layoutMarginsGuide.trailingAnchor constant:-16.0],
+
+        [previewCard.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:7.0],
+        [previewCard.leadingAnchor constraintEqualToAnchor:previewHost.leadingAnchor constant:20.0],
+        [previewCard.trailingAnchor constraintEqualToAnchor:previewHost.trailingAnchor constant:-20.0],
+        [previewCard.bottomAnchor constraintEqualToAnchor:previewHost.bottomAnchor constant:-2.0],
+        contentHeight,
+
+        [scrollBoundary.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [scrollBoundary.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [scrollBoundary.topAnchor constraintEqualToAnchor:previewHost.bottomAnchor],
+        [scrollBoundary.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale],
+
+        [form.view.topAnchor constraintEqualToAnchor:previewHost.bottomAnchor],
+        [form.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [form.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [form.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
+    ]];
+
+    [self apollo_applyPreviewTheme];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self apollo_applyPreviewTheme];
+    [self apollo_refreshPreviewAnimated:NO];
+    [self apollo_formDidScroll:self.formViewController.tableView];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [self apollo_finishPreviewTransition];
+    [super viewWillDisappear:animated];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    BOOL appearanceChanged = !previousTraitCollection ||
+        [self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection];
+    BOOL contentSizeChanged = !previousTraitCollection ||
+        ![self.traitCollection.preferredContentSizeCategory
+            isEqualToString:previousTraitCollection.preferredContentSizeCategory];
+    if (!appearanceChanged && !contentSizeChanged) return;
+
+    [self apollo_applyPreviewTheme];
+    [self apollo_refreshPreviewAnimated:NO];
+}
+
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    __weak typeof(self) weakSelf = self;
+    [coordinator animateAlongsideTransition:nil completion:^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+        [weakSelf apollo_refreshPreviewAnimated:NO];
+    }];
+}
+
+- (void)apollo_applyPreviewTheme {
+    UIColor *backgroundColor = ApolloThemePageBackgroundColor()
+        ?: UIColor.systemGroupedBackgroundColor;
+    self.view.backgroundColor = backgroundColor;
+    self.previewHost.backgroundColor = backgroundColor;
+    self.previewCardView.backgroundColor = ApolloThemeCardBackgroundColor()
+        ?: UIColor.secondarySystemGroupedBackgroundColor;
+    self.previewTitleLabel.textColor =
+        ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel)
+        ?: UIColor.secondaryLabelColor;
+    self.scrollBoundaryView.backgroundColor = ApolloThemeSeparatorColor()
+        ?: self.formViewController.tableView.separatorColor
+        ?: UIColor.separatorColor;
+    self.view.tintColor = ApolloThemeAccentColor() ?: self.view.tintColor;
+}
+
+- (void)apollo_formDidScroll:(UIScrollView *)scrollView {
+    if (scrollView != self.formViewController.tableView) return;
+    CGFloat restingOffset = -scrollView.adjustedContentInset.top;
+    CGFloat targetAlpha = scrollView.contentOffset.y > restingOffset + 0.5 ? 1.0 : 0.0;
+    if (fabs(self.scrollBoundaryView.alpha - targetAlpha) < 0.01) return;
+    [UIView animateWithDuration:0.15
+                          delay:0.0
+                        options:UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        self.scrollBoundaryView.alpha = targetAlpha;
+    } completion:nil];
+}
+
+- (ApolloFeedShortcutsPreviewView *)apollo_previewViewForState:(ApolloFeedShortcutsPreviewState *)state {
+    ApolloFeedShortcutsPreviewView *preview = [[ApolloFeedShortcutsPreviewView alloc] initWithFrame:CGRectZero];
+    preview.translatesAutoresizingMaskIntoConstraints = NO;
+    preview.hostTableView = self.formViewController.tableView;
+    preview.previewState = state;
+    [preview apollo_configurePreview];
+    return preview;
+}
+
+- (void)apollo_addPreviewView:(ApolloFeedShortcutsPreviewView *)preview
+                       height:(CGFloat)height {
+    [self.previewCardView addSubview:preview];
+    [NSLayoutConstraint activateConstraints:@[
+        [preview.topAnchor constraintEqualToAnchor:self.previewCardView.topAnchor],
+        [preview.leadingAnchor constraintEqualToAnchor:self.previewCardView.leadingAnchor],
+        [preview.trailingAnchor constraintEqualToAnchor:self.previewCardView.trailingAnchor],
+        [preview.heightAnchor constraintEqualToConstant:height]
+    ]];
+}
+
+- (void)apollo_finishPreviewTransition {
+    UIViewPropertyAnimator *animator = self.previewAnimator;
+    if (!animator) return;
+    [animator stopAnimation:NO];
+    [animator finishAnimationAtPosition:UIViewAnimatingPositionEnd];
+}
+
+- (void)apollo_replacePreviewImmediately:(ApolloFeedShortcutsPreviewView *)preview
+                                   state:(ApolloFeedShortcutsPreviewState *)state {
+    [self apollo_finishPreviewTransition];
+    for (UIView *subview in self.previewCardView.subviews) [subview removeFromSuperview];
+    [self apollo_addPreviewView:preview height:state.previewHeight];
+    preview.alpha = 1.0;
+    self.currentPreviewView = preview;
+    self.previewContentHeightConstraint.constant = state.previewHeight;
+    [UIView performWithoutAnimation:^{
+        [self.view layoutIfNeeded];
+    }];
+}
+
+- (void)apollo_refreshPreviewAnimated:(BOOL)animated {
+    if (animated && self.previewAnimator.state == UIViewAnimatingStateActive) {
+        self.previewRefreshPending = YES;
+        return;
+    }
+    [self apollo_finishPreviewTransition];
+
+    CGFloat availableWidth = CGRectGetWidth(self.previewCardView.bounds);
+    if (availableWidth <= 0.0) {
+        CGFloat containerWidth = CGRectGetWidth(self.view.bounds);
+        if (containerWidth <= 0.0) containerWidth = CGRectGetWidth(UIScreen.mainScreen.bounds);
+        availableWidth = MAX(0.0, containerWidth - 40.0);
+    }
+    ApolloFeedShortcutsPreviewState *state =
+        ApolloFeedShortcutsCurrentPreviewState(self.traitCollection, availableWidth);
+    ApolloFeedShortcutsPreviewView *incoming = [self apollo_previewViewForState:state];
+    ApolloFeedShortcutsPreviewView *outgoing = self.currentPreviewView;
+    if (!animated || UIAccessibilityIsReduceMotionEnabled() || !outgoing) {
+        [self apollo_replacePreviewImmediately:incoming state:state];
+        return;
+    }
+
+    [self.view layoutIfNeeded];
+    [self apollo_addPreviewView:incoming height:state.previewHeight];
+    [self.previewCardView layoutIfNeeded];
+    [incoming layoutIfNeeded];
+    self.previewContentHeightConstraint.constant = state.previewHeight;
+    self.currentPreviewView = incoming;
+
+    BOOL animatesItems = outgoing.previewState.layout == state.layout &&
+        outgoing.previewState.iconStyle == state.iconStyle;
+    NSMutableArray<UIView *> *departingItems = [NSMutableArray array];
+    if (animatesItems) {
+        NSDictionary<NSNumber *, UIView *> *oldItems = outgoing.shortcutItemViewsByIndex;
+        NSDictionary<NSNumber *, UIView *> *newItems = incoming.shortcutItemViewsByIndex;
+        for (NSNumber *index in newItems) {
+            UIView *newItem = newItems[index];
+            UIView *oldItem = oldItems[index];
+            if (oldItem) {
+                CGRect oldFrame = [oldItem convertRect:oldItem.bounds toView:self.previewCardView];
+                CGRect newFrame = [newItem convertRect:newItem.bounds toView:self.previewCardView];
+                newItem.transform = CGAffineTransformMakeTranslation(CGRectGetMidX(oldFrame) - CGRectGetMidX(newFrame),
+                                                                      CGRectGetMidY(oldFrame) - CGRectGetMidY(newFrame));
+                oldItem.alpha = 0.0;
+            } else {
+                newItem.alpha = 0.0;
+                newItem.transform = CGAffineTransformMakeScale(0.88, 0.88);
+            }
+        }
+        for (NSNumber *index in oldItems) {
+            if (!newItems[index]) [departingItems addObject:oldItems[index]];
+        }
+        for (UIView *separator in incoming.shortcutSeparators) separator.alpha = 0.0;
+    } else {
+        incoming.alpha = 0.0;
+    }
+
+    NSUInteger generation = ++self.previewTransitionGeneration;
+    UISpringTimingParameters *timing = [[UISpringTimingParameters alloc] initWithDampingRatio:0.88];
+    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:0.34
+                                                                      timingParameters:timing];
+    __weak typeof(self) weakSelf = self;
+    __weak UIViewPropertyAnimator *weakAnimator = animator;
+    [animator addAnimations:^{
+        if (animatesItems) {
+            for (UIView *item in incoming.shortcutItemViewsByIndex.allValues) {
+                item.alpha = 1.0;
+                item.transform = CGAffineTransformIdentity;
+            }
+            for (UIView *item in departingItems) {
+                item.alpha = 0.0;
+                item.transform = CGAffineTransformMakeScale(0.88, 0.88);
+            }
+            for (UIView *separator in incoming.shortcutSeparators) separator.alpha = 1.0;
+            for (UIView *separator in outgoing.shortcutSeparators) separator.alpha = 0.0;
+        } else {
+            incoming.alpha = 1.0;
+            outgoing.alpha = 0.0;
+        }
+        [weakSelf.view layoutIfNeeded];
+    }];
+    [animator addCompletion:^(__unused UIViewAnimatingPosition finalPosition) {
+        [outgoing removeFromSuperview];
+        incoming.alpha = 1.0;
+        if (weakSelf.previewTransitionGeneration == generation &&
+            weakSelf.previewAnimator == weakAnimator) {
+            weakSelf.previewAnimator = nil;
+        }
+        if (weakSelf.previewRefreshPending) {
+            weakSelf.previewRefreshPending = NO;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf apollo_refreshPreviewAnimated:YES];
+            });
+        }
+    }];
+    self.previewAnimator = animator;
+    [animator startAnimation];
+}
+
 @end
 
 @implementation ApolloProfilesSettingsViewController

@@ -583,6 +583,32 @@ BOOL IsLiquidGlass(void) {
     return available;
 }
 
+// --- Liquid Glass trailing-cluster reservation (see ApolloCommon.h) ---
+// Plain associated storage on the navigation item; the recenter in
+// ApolloLiquidGlass.xm is the only reader and sole inset writer.
+static char kApolloNavItemTrailingHoldKey;
+static char kApolloNavItemTrailingInsetKey;
+
+void ApolloNavItemSetTrailingReservationHold(UINavigationItem *item, BOOL hold) {
+    if (!item) return;
+    objc_setAssociatedObject(item, &kApolloNavItemTrailingHoldKey,
+                             hold ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+BOOL ApolloNavItemTrailingReservationHold(UINavigationItem *item) {
+    return [objc_getAssociatedObject(item, &kApolloNavItemTrailingHoldKey) boolValue];
+}
+
+void ApolloNavItemNoteTrailingContentInset(UINavigationItem *item, CGFloat inset) {
+    if (!item || inset <= 0) return;
+    objc_setAssociatedObject(item, &kApolloNavItemTrailingInsetKey,
+                             @(inset), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+CGFloat ApolloNavItemTrailingContentInset(UINavigationItem *item) {
+    return [objc_getAssociatedObject(item, &kApolloNavItemTrailingInsetKey) doubleValue];
+}
+
 // Route a URL through Apollo's own URL handler, bypassing iOS URL dispatch.
 //
 // On iOS 13+ with scenes, the SceneDelegate owns the tabBarController while
@@ -714,7 +740,12 @@ UITableView *ApolloInheritedSettingsThemeSourceTableView(UITableViewController *
     if (!controller) return nil;
 
     NSArray<UIViewController *> *stack = controller.navigationController.viewControllers;
-    NSUInteger index = [stack indexOfObject:controller];
+    UIViewController *stackController = controller;
+    NSUInteger index = [stack indexOfObject:stackController];
+    while (index == NSNotFound && stackController.parentViewController) {
+        stackController = stackController.parentViewController;
+        index = [stack indexOfObject:stackController];
+    }
     if (index == NSNotFound || index == 0) return nil;
 
     UIViewController *source = stack[index - 1];
@@ -755,8 +786,8 @@ void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller) {
         ?: ApolloThemePageBackgroundColor() ?: controller.tableView.backgroundColor;
     controller.view.backgroundColor = backgroundColor;
     controller.tableView.backgroundColor = backgroundColor;
-    controller.tableView.separatorColor = (stale ? nil : source.separatorColor)
-        ?: ApolloThemeSeparatorColor() ?: [UIColor separatorColor];
+    controller.tableView.separatorColor = ApolloThemeSeparatorColor()
+        ?: [UIColor opaqueSeparatorColor];
 }
 
 #pragma mark - LinkButtonNode URL extraction
@@ -1050,6 +1081,71 @@ static UIImage *ApolloCachedBundledPNGNamed(NSString *resourceName) {
     return image;
 }
 
+UIImage *ApolloBundledPDFTemplateImage(NSString *baseName, CGSize maxSize) {
+    if (baseName.length == 0) return nil;
+
+    static NSMutableDictionary<NSString *, UIImage *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSMutableDictionary dictionary];
+    });
+
+    NSString *key = [NSString stringWithFormat:@"%@|%.2fx%.2f", baseName, maxSize.width, maxSize.height];
+    @synchronized (cache) {
+        UIImage *cached = cache[key];
+        if (cached) return cached;
+    }
+
+    NSString *path = ApolloBundledResourcePath(baseName, @"pdf");
+    if (path.length == 0) return nil;
+
+    CGPDFDocumentRef document = CGPDFDocumentCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path]);
+    if (!document) {
+        ApolloLog(@"[Common] Bundled PDF %@ failed to open at %@", baseName, path);
+        return nil;
+    }
+
+    // Page 1 only: these are single-artboard icon exports, not documents.
+    CGPDFPageRef page = CGPDFDocumentGetPage(document, 1);
+    CGRect box = page ? CGPDFPageGetBoxRect(page, kCGPDFCropBox) : CGRectZero;
+    if (!page || box.size.width <= 0.0 || box.size.height <= 0.0) {
+        CGPDFDocumentRelease(document);
+        ApolloLog(@"[Common] Bundled PDF %@ has no usable first page", baseName);
+        return nil;
+    }
+
+    CGSize size = box.size;
+    if (maxSize.width > 0.0 && maxSize.height > 0.0) {
+        CGFloat fit = MIN(maxSize.width / size.width, maxSize.height / size.height);
+        // Only ever scale down — upscaling a small icon to fill the box would
+        // make it heavier than the ones it sits next to.
+        if (fit < 1.0) size = CGSizeMake(round(size.width * fit), round(size.height * fit));
+    }
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *rendererContext) {
+        CGContextRef context = rendererContext.CGContext;
+        // PDF space is y-up with the crop box's own origin; UIKit's context is
+        // y-down from (0,0), so flip and shift the page into it.
+        CGContextTranslateCTM(context, 0.0, size.height);
+        CGContextScaleCTM(context, size.width / box.size.width, -size.height / box.size.height);
+        CGContextTranslateCTM(context, -box.origin.x, -box.origin.y);
+        CGContextDrawPDFPage(context, page);
+    }];
+    CGPDFDocumentRelease(document);
+    if (!image) return nil;
+
+    // Contributed icons are drawn in Apollo blue; template mode keeps only the
+    // alpha so the row tints with the active theme accent like every other icon.
+    image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    @synchronized (cache) {
+        cache[key] = image;
+    }
+    return image;
+}
+
 static UIImage *ApolloRoundedPNGSettingsIcon(UIImage *source, CGFloat size) {
     if (!source) return nil;
     if (size <= 0.0) size = 29.0;
@@ -1212,23 +1308,72 @@ static UIViewController *ApolloTabBarControllerIvarOn(id object) {
     }
 }
 
-UIViewController *ApolloMainTabBarController(void) {
-    UIApplication *application = UIApplication.sharedApplication;
+static UIViewController *ApolloTabBarControllerForWindowScene(UIWindowScene *scene) {
+    if (![scene isKindOfClass:UIWindowScene.class]) return nil;
 
-    for (UIScene *scene in application.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+    UIViewController *fromDelegate = ApolloTabBarControllerIvarOn(scene.delegate);
+    if (fromDelegate) return fromDelegate;
 
-        UIViewController *fromDelegate = ApolloTabBarControllerIvarOn([(UIWindowScene *)scene delegate]);
-        if (fromDelegate) return fromDelegate;
-
-        for (UIWindow *window in [(UIWindowScene *)scene windows]) {
-            UIViewController *root = window.rootViewController;
-            if ([root isKindOfClass:UITabBarController.class]) return root;
-            if ([root.presentedViewController isKindOfClass:UITabBarController.class]) return root.presentedViewController;
+    // Prefer the key window, then visible normal-level windows. A scene may
+    // also own transient keyboard/alert windows whose roots are unrelated to
+    // Apollo's tab hierarchy.
+    NSMutableArray<UIWindow *> *ordered = [NSMutableArray array];
+    for (UIWindow *window in scene.windows) if (window.isKeyWindow) [ordered addObject:window];
+    for (UIWindow *window in scene.windows) {
+        if (![ordered containsObject:window] && !window.hidden &&
+            window.windowLevel == UIWindowLevelNormal) [ordered addObject:window];
+    }
+    for (UIWindow *window in scene.windows) {
+        if (![ordered containsObject:window]) [ordered addObject:window];
+    }
+    for (UIWindow *window in ordered) {
+        UIViewController *root = window.rootViewController;
+        if ([root isKindOfClass:UITabBarController.class]) return root;
+        if ([root.presentedViewController isKindOfClass:UITabBarController.class]) {
+            return root.presentedViewController;
         }
     }
+    return nil;
+}
 
+UIViewController *ApolloMainTabBarControllerForScene(UIWindowScene *originatingScene) {
+    UIViewController *originating = ApolloTabBarControllerForWindowScene(originatingScene);
+    if (originating) return originating;
+
+    UIApplication *application = UIApplication.sharedApplication;
+    NSArray<UIScene *> *scenes = application.connectedScenes.allObjects;
+
+    // Prefer a foreground-active scene with a key window. Enumerating the
+    // connectedScenes set directly is unordered and can send an action into a
+    // background or external-display window when more than one scene exists.
+    for (UIScene *candidate in scenes) {
+        if (![candidate isKindOfClass:UIWindowScene.class] ||
+            candidate.activationState != UISceneActivationStateForegroundActive) continue;
+        UIWindowScene *windowScene = (UIWindowScene *)candidate;
+        BOOL hasKeyWindow = NO;
+        for (UIWindow *window in windowScene.windows) {
+            if (window.isKeyWindow) { hasKeyWindow = YES; break; }
+        }
+        if (!hasKeyWindow) continue;
+        UIViewController *controller = ApolloTabBarControllerForWindowScene(windowScene);
+        if (controller) return controller;
+    }
+    for (UIScene *candidate in scenes) {
+        if (![candidate isKindOfClass:UIWindowScene.class] ||
+            candidate.activationState != UISceneActivationStateForegroundActive) continue;
+        UIViewController *controller = ApolloTabBarControllerForWindowScene((UIWindowScene *)candidate);
+        if (controller) return controller;
+    }
+    for (UIScene *candidate in scenes) {
+        if (![candidate isKindOfClass:UIWindowScene.class]) continue;
+        UIViewController *controller = ApolloTabBarControllerForWindowScene((UIWindowScene *)candidate);
+        if (controller) return controller;
+    }
     return ApolloTabBarControllerIvarOn(application.delegate);
+}
+
+UIViewController *ApolloMainTabBarController(void) {
+    return ApolloMainTabBarControllerForScene(nil);
 }
 
 // ApolloCommon is included by nearly every file, so it must not import the pane
@@ -1438,9 +1583,11 @@ void ApolloSetLinkPreviewCardColorHex(NSString *hex) {
     UIColor *color = ApolloColorFromHexString(hex);
     // Canonicalize to "RRGGBB" uppercase so persistence + UI display stay tidy.
     sLinkPreviewCardColorHex = color ? ApolloHexStringFromColor(color) : nil;
-    // Publish the render snapshot AFTER the string, so a background reader that
-    // observes a non-zero packed value already has a consistent RGB to draw.
-    sLinkPreviewCardColorPacked = color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0;
+    // Background renderers consume only this self-contained packed value; the
+    // NSString remains main-thread settings state.
+    __atomic_store_n(&sLinkPreviewCardColorPacked,
+                     color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0,
+                     __ATOMIC_RELAXED);
 }
 
 double ApolloPerfNowMs(void) {

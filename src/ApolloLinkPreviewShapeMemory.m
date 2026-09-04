@@ -4,6 +4,7 @@
 
 #import <UIKit/UIKit.h>
 #import <os/lock.h>
+#import <stdlib.h>
 
 #import "ApolloCommon.h"
 #import "ApolloLinkPreviewCache.h"
@@ -69,6 +70,16 @@ static const NSTimeInterval kApolloLPDiskFlushInterval = 8.0;
 
 @implementation ApolloLPShapeEntry
 @end
+
+// Plain persistence snapshot row. The writer retains each host while holding
+// the state lock, then performs all NSNumber/NSArray/NSDictionary allocation
+// and JSON work after releasing it.
+typedef struct {
+    CFStringRef host;
+    uint32_t imageless;
+    uint32_t imaged;
+    NSTimeInterval lastSeen;
+} ApolloLPShapeDiskRow;
 
 @implementation ApolloLinkPreviewShapeMemory {
     // _hosts is read from Texture's background layout threads on every measure
@@ -184,26 +195,35 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
     // Unconditional overlay — these never learn their way out.
     if (ApolloLPHostIsBuiltInImageless(normalized)) return ApolloLPHostShapeImageless;
 
-    ApolloLPHostShape shape = ApolloLPHostShapeUnknown;
-    os_unfair_lock_lock(&_lock);
     // Exact host first, then up to two parent domains so a verdict recorded for
     // `journals.sagepub.com` also covers `www2.journals.sagepub.com`. Bounded
-    // walk (never the linear scan over every known host this replaces).
-    NSString *candidate = normalized;
-    for (NSUInteger attempt = 0; attempt < 3 && candidate.length > 0; attempt++) {
-        ApolloLPShapeEntry *entry = _hosts[candidate];
-        if (entry) {
-            shape = ApolloLPShapeForEntry(entry);
-            break;
+    // walk (never the linear scan over every known host this replaces). Derive
+    // the strings before locking: substring/range work allocates and can run
+    // arbitrary Objective-C code, while the actual protected reads are only
+    // three dictionary probes plus primitive field loads.
+    NSString *parent = nil;
+    NSString *grandparent = nil;
+    NSRange firstDot = [normalized rangeOfString:@"."];
+    if (firstDot.location != NSNotFound) {
+        NSString *candidate = [normalized substringFromIndex:firstDot.location + 1];
+        if ([candidate rangeOfString:@"."].location != NSNotFound) {
+            parent = candidate;
+            NSRange secondDot = [candidate rangeOfString:@"."];
+            if (secondDot.location != NSNotFound) {
+                candidate = [candidate substringFromIndex:secondDot.location + 1];
+                if ([candidate rangeOfString:@"."].location != NSNotFound) {
+                    grandparent = candidate;
+                }
+            }
         }
-        NSRange dot = [candidate rangeOfString:@"."];
-        if (dot.location == NSNotFound) break;
-        NSString *parent = [candidate substringFromIndex:dot.location + 1];
-        // Stop before bare registry suffixes ("co.uk", "com") — those are never
-        // recorded, so continuing would just burn lookups.
-        if ([parent rangeOfString:@"."].location == NSNotFound) break;
-        candidate = parent;
     }
+
+    ApolloLPHostShape shape = ApolloLPHostShapeUnknown;
+    os_unfair_lock_lock(&_lock);
+    ApolloLPShapeEntry *entry = _hosts[normalized];
+    if (!entry && parent) entry = _hosts[parent];
+    if (!entry && grandparent) entry = _hosts[grandparent];
+    shape = ApolloLPShapeForEntry(entry);
     os_unfair_lock_unlock(&_lock);
     return shape;
 }
@@ -217,11 +237,23 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
 
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
 
+    BOOL inserted = NO;
+    NS_VALID_UNTIL_END_OF_SCOPE ApolloLPShapeEntry *created = nil;
+    CFTypeRef evictedHost = NULL;
+    CFTypeRef evictedEntry = NULL;
     os_unfair_lock_lock(&_lock);
     ApolloLPShapeEntry *entry = _hosts[normalized];
     if (!entry) {
-        entry = [ApolloLPShapeEntry new];
-        _hosts[normalized] = entry;
+        // Object allocation stays outside the unfair-lock critical section.
+        os_unfair_lock_unlock(&_lock);
+        created = [ApolloLPShapeEntry new];
+        os_unfair_lock_lock(&_lock);
+        entry = _hosts[normalized];
+        if (!entry) {
+            entry = created;
+            _hosts[normalized] = entry;
+            inserted = YES;
+        }
     }
     // Each observation also decays the opposite counter by one, so a verdict
     // reflects the host's RECENT behaviour rather than its whole history. Without
@@ -238,8 +270,10 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
         if (entry->imaged > 0) entry->imaged--;
     }
     entry->lastSeen = now;
-    [self evictIfNeededLocked];
+    if (inserted) [self evictIfNeededLockedRetainingHost:&evictedHost entry:&evictedEntry];
     os_unfair_lock_unlock(&_lock);
+    if (evictedHost) CFRelease(evictedHost);
+    if (evictedEntry) CFRelease(evictedEntry);
 
     [self markDirty];
 }
@@ -249,34 +283,59 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
     if (!normalized) return;
     if (ApolloLPHostIsIgnored(normalized)) return;
 
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    BOOL inserted = NO;
+    NS_VALID_UNTIL_END_OF_SCOPE ApolloLPShapeEntry *created = nil;
+    CFTypeRef evictedHost = NULL;
+    CFTypeRef evictedEntry = NULL;
     os_unfair_lock_lock(&_lock);
     ApolloLPShapeEntry *entry = _hosts[normalized];
     if (!entry) {
-        entry = [ApolloLPShapeEntry new];
-        _hosts[normalized] = entry;
+        os_unfair_lock_unlock(&_lock);
+        created = [ApolloLPShapeEntry new];
+        os_unfair_lock_lock(&_lock);
+        entry = _hosts[normalized];
+        if (!entry) {
+            entry = created;
+            _hosts[normalized] = entry;
+            inserted = YES;
+        }
     }
     // Same shape as an ordinary imageless observation: the fetcher already
     // counted this host as imageful on the strength of an og:image URL that
     // turns out to 404, so that credit has to come back off.
     if (entry->imaged > 0) entry->imaged--;
     if (entry->imageless < kApolloLPMaxCount) entry->imageless++;
-    entry->lastSeen = [[NSDate date] timeIntervalSince1970];
-    [self evictIfNeededLocked];
+    entry->lastSeen = now;
+    if (inserted) [self evictIfNeededLockedRetainingHost:&evictedHost entry:&evictedEntry];
     os_unfair_lock_unlock(&_lock);
+    if (evictedHost) CFRelease(evictedHost);
+    if (evictedEntry) CFRelease(evictedEntry);
 
     [self markDirty];
 }
 
-- (void)evictIfNeededLocked {
+- (void)evictIfNeededLockedRetainingHost:(CFTypeRef *)retainedHost
+                                   entry:(CFTypeRef *)retainedEntry {
     if (_hosts.count <= kApolloLPMaxHosts) return;
-    NSArray<NSString *> *ordered = [_hosts keysSortedByValueUsingComparator:^NSComparisonResult(ApolloLPShapeEntry *a, ApolloLPShapeEntry *b) {
-        if (a->lastSeen < b->lastSeen) return NSOrderedAscending;
-        if (a->lastSeen > b->lastSeen) return NSOrderedDescending;
-        return NSOrderedSame;
-    }];
-    NSUInteger removeCount = _hosts.count - kApolloLPMaxHosts;
-    for (NSUInteger index = 0; index < removeCount && index < ordered.count; index++) {
-        [_hosts removeObjectForKey:ordered[index]];
+
+    // At most one host was inserted since the previous bound check, so find
+    // the oldest entry in one pass. The old sort allocated an O(n) key array
+    // and ran an Objective-C comparator O(n log n) times while holding this
+    // unfair lock on a request-processing path.
+    NSString *oldestHost = nil;
+    ApolloLPShapeEntry *oldestEntry = nil;
+    for (NSString *candidateHost in _hosts) {
+        ApolloLPShapeEntry *candidateEntry = _hosts[candidateHost];
+        if (!oldestEntry || candidateEntry->lastSeen < oldestEntry->lastSeen) {
+            oldestHost = candidateHost;
+            oldestEntry = candidateEntry;
+        }
+    }
+    if (oldestHost) {
+        if (retainedHost) *retainedHost = CFRetain((__bridge CFTypeRef)oldestHost);
+        if (retainedEntry) *retainedEntry = CFRetain((__bridge CFTypeRef)oldestEntry);
+        [_hosts removeObjectForKey:oldestHost];
     }
 }
 
@@ -327,7 +386,8 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
     NSDictionary *hosts = [root[@"hosts"] isKindOfClass:[NSDictionary class]] ? root[@"hosts"] : nil;
     BOOL seeded = [root[@"seeded"] respondsToSelector:@selector(boolValue)] ? [root[@"seeded"] boolValue] : NO;
 
-    os_unfair_lock_lock(&_lock);
+    // Initialization has not published this instance yet, so no lock is
+    // needed while allocating and hydrating the initial dictionary.
     _seeded = seeded;
     for (NSString *host in hosts) {
         NSArray *value = [hosts[host] isKindOfClass:[NSArray class]] ? hosts[host] : nil;
@@ -339,7 +399,6 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
         _hosts[host] = entry;
     }
     NSUInteger count = _hosts.count;
-    os_unfair_lock_unlock(&_lock);
     ApolloLog(@"[LinkPreviews] shape memory: %lu host verdicts loaded", (unsigned long)count);
 }
 
@@ -368,19 +427,63 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
 }
 
 - (void)writeToDisk {
-    os_unfair_lock_lock(&_lock);
-    if (!_dirty) {
+    ApolloLPShapeDiskRow *rows = NULL;
+    NSUInteger rowCount = 0;
+    BOOL seeded = NO;
+
+    // Allocate before entering the critical section. If the dictionary grows
+    // before capture, retry with the new capacity; no state is lost because
+    // _dirty is cleared only after a complete snapshot fits.
+    for (;;) {
+        os_unfair_lock_lock(&_lock);
+        if (!_dirty) {
+            os_unfair_lock_unlock(&_lock);
+            return;
+        }
+        NSUInteger capacity = _hosts.count;
         os_unfair_lock_unlock(&_lock);
-        return;
+
+        rows = capacity > 0 ? calloc(capacity, sizeof(*rows)) : NULL;
+        if (capacity > 0 && !rows) return;
+
+        os_unfair_lock_lock(&_lock);
+        if (!_dirty) {
+            os_unfair_lock_unlock(&_lock);
+            free(rows);
+            return;
+        }
+        if (_hosts.count > capacity) {
+            os_unfair_lock_unlock(&_lock);
+            free(rows);
+            rows = NULL;
+            continue;
+        }
+
+        _dirty = NO;
+        seeded = _seeded;
+        for (NSString *host in _hosts) {
+            ApolloLPShapeEntry *entry = _hosts[host];
+            rows[rowCount].host = (CFStringRef)CFRetain((__bridge CFStringRef)host);
+            rows[rowCount].imageless = entry->imageless;
+            rows[rowCount].imaged = entry->imaged;
+            rows[rowCount].lastSeen = entry->lastSeen;
+            rowCount++;
+        }
+        os_unfair_lock_unlock(&_lock);
+        break;
     }
-    _dirty = NO;
-    NSMutableDictionary *hosts = [NSMutableDictionary dictionaryWithCapacity:_hosts.count];
-    for (NSString *host in _hosts) {
-        ApolloLPShapeEntry *entry = _hosts[host];
-        hosts[host] = @[ @(entry->imageless), @(entry->imaged), @(entry->lastSeen) ];
+
+    NSMutableDictionary *hosts = [NSMutableDictionary dictionaryWithCapacity:rowCount];
+    for (NSUInteger index = 0; index < rowCount; index++) {
+        NSString *host = (__bridge NSString *)rows[index].host;
+        hosts[host] = @[
+            @(rows[index].imageless),
+            @(rows[index].imaged),
+            @(rows[index].lastSeen),
+        ];
+        CFRelease(rows[index].host);
     }
-    BOOL seeded = _seeded;
-    os_unfair_lock_unlock(&_lock);
+    free(rows);
 
     NSDictionary *root = @{ @"v": @1, @"seeded": @(seeded), @"hosts": hosts };
     NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
@@ -389,8 +492,11 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
 }
 
 - (void)reset {
+    NSMutableDictionary *replacement = [NSMutableDictionary dictionary];
+    NS_VALID_UNTIL_END_OF_SCOPE NSMutableDictionary *retiredHosts = nil;
     os_unfair_lock_lock(&_lock);
-    [_hosts removeAllObjects];
+    retiredHosts = _hosts;
+    _hosts = replacement;
     _seeded = NO;
     _dirty = NO;
     os_unfair_lock_unlock(&_lock);

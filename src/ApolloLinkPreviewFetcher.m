@@ -8,6 +8,7 @@
 #import "ApolloState.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloUserProfileCache.h"
+#import "ApolloWebTextDecoding.h"
 
 static const NSUInteger ApolloLinkPreviewMaxHTMLBytes = 2 * 1024 * 1024;
 
@@ -18,6 +19,17 @@ static dispatch_queue_t ApolloLinkPreviewFetcherQueue(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         queue = dispatch_queue_create("com.apollo.linkpreviews.fetcher", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+// Preserve the fetcher's historical serial callback ordering without running
+// foreign completion code on the queue that owns the pending-fetch registry.
+static dispatch_queue_t ApolloLinkPreviewCompletionQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.apollo.linkpreviews.completions", DISPATCH_QUEUE_SERIAL);
     });
     return queue;
 }
@@ -853,11 +865,12 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
         [[ApolloLinkPreviewCache sharedCache] markNoMetadataForURL:url];
         NSString *key = url.absoluteString ?: @"";
         dispatch_async(ApolloLinkPreviewFetcherQueue(), ^{
-            NSMutableArray *completions = ApolloLinkPreviewPendingFetches()[key];
+            NSArray *completions =
+                [ApolloLinkPreviewPendingFetches()[key] copy] ?: @[];
             [ApolloLinkPreviewPendingFetches() removeObjectForKey:key];
-            for (ApolloLinkPreviewCompletion completion in completions) {
-                completion(nil);
-            }
+            dispatch_async(ApolloLinkPreviewCompletionQueue(), ^{
+                for (ApolloLinkPreviewCompletion completion in completions) completion(nil);
+            });
         });
         return;
     }
@@ -881,11 +894,12 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
 
     NSString *key = url.absoluteString ?: @"";
     dispatch_async(ApolloLinkPreviewFetcherQueue(), ^{
-        NSMutableArray *completions = ApolloLinkPreviewPendingFetches()[key];
+        NSArray *completions =
+            [ApolloLinkPreviewPendingFetches()[key] copy] ?: @[];
         [ApolloLinkPreviewPendingFetches() removeObjectForKey:key];
-        for (ApolloLinkPreviewCompletion completion in completions) {
-            completion(preview);
-        }
+        dispatch_async(ApolloLinkPreviewCompletionQueue(), ^{
+            for (ApolloLinkPreviewCompletion completion in completions) completion(preview);
+        });
     });
 }
 
@@ -1412,8 +1426,8 @@ static NSURL *ApolloLinkPreviewWWWSiblingURL(NSURL *url) {
     }
 
     NSString *urlString = sLatestRedditBearerToken.length > 0
-        ? [NSString stringWithFormat:@"https://oauth.reddit.com/api/info.json?raw_json=1&url=%@", escaped]
-        : [NSString stringWithFormat:@"https://www.reddit.com/api/info.json?raw_json=1&url=%@", escaped];
+        ? [@"https://oauth.reddit.com/api/info.json?raw_json=1&url=" stringByAppendingString:escaped]
+        : [@"https://www.reddit.com/api/info.json?raw_json=1&url=" stringByAppendingString:escaped];
     NSMutableURLRequest *request = ApolloLinkPreviewRequest([NSURL URLWithString:urlString], 10.0);
     if (sLatestRedditBearerToken.length > 0) {
         [request setValue:[@"Bearer " stringByAppendingString:sLatestRedditBearerToken] forHTTPHeaderField:@"Authorization"];
@@ -1665,9 +1679,15 @@ static NSData *ApolloLinkPreviewHeadSliceOfData(NSData *data) {
         }
 
         NSData *headSlice = ApolloLinkPreviewHeadSliceOfData(data);
-        NSString *html = [[NSString alloc] initWithData:headSlice encoding:NSUTF8StringEncoding];
-        if (html.length == 0) {
-            html = [[NSString alloc] initWithData:headSlice encoding:NSISOLatin1StringEncoding];
+        // Decode with the charset the page declares, not a UTF-8 guess: Korean
+        // (EUC-KR/CP949), Japanese (Shift_JIS) and Chinese (GB18030/Big5) news
+        // sites are not valid UTF-8, so a UTF-8-first read failed and the
+        // Latin-1 rescue turned every og: tag into mojibake (issue #945).
+        NSStringEncoding htmlEncoding = 0;
+        NSString *html = ApolloWebTextFromData(headSlice, httpResponse, &htmlEncoding);
+        if (htmlEncoding != 0 && htmlEncoding != NSUTF8StringEncoding) {
+            ApolloLog(@"[LinkPreviews] HTML decoded as %@ host=%@",
+                      ApolloWebTextNameForEncoding(htmlEncoding), ApolloLinkPreviewHost(url));
         }
 
         NSDictionary<NSString *, NSString *> *meta = [self metaValuesFromHTML:html];

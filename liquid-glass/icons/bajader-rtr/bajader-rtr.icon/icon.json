@@ -1,0 +1,109 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "display-p3:0.32837,0.66187,0.97270,1.00000",
+          "display-p3:0.42550,0.35501,0.96490,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.5,
+            "y" : 1
+          },
+          "stop" : {
+            "x" : 0.5,
+            "y" : 0.3
+          }
+        }
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : "system-dark"
+    }
+  ],
+  "groups" : [
+    {
+      "blend-mode-specializations" : [
+        {
+          "appearance" : "dark",
+          "value" : "normal"
+        }
+      ],
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill-specializations" : [
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "display-p3:0.83406,0.55284,0.66851,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Frame 29.svg",
+          "name" : "Frame 29",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              4.134500000000003,
+              -31.000499999999988
+            ]
+          }
+        },
+        {
+          "fill" : "none",
+          "hidden" : false,
+          "image-name" : "Frame 22 3.svg",
+          "name" : "Frame 22 3"
+        },
+        {
+          "hidden" : false,
+          "image-name" : "Frame 23 3.svg",
+          "name" : "Frame 23 3"
+        },
+        {
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Frame 28 2.svg",
+          "name" : "Frame 28 2"
+        },
+        {
+          "fill" : "none",
+          "hidden" : false,
+          "image-name" : "Frame 25 3.svg",
+          "name" : "Frame 25 3"
+        },
+        {
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Frame 27 3.svg",
+          "name" : "Frame 27 3"
+        },
+        {
+          "hidden" : false,
+          "image-name" : "Frame 26 3.svg",
+          "name" : "Frame 26 3"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

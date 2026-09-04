@@ -16,7 +16,16 @@ BOOL ApolloPaneLayoutSupported(void) {
     static BOOL supported = NO;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        supported = (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad);
+        // The experiment's navigation model depends on UIKit's system tab
+        // sidebar. Earlier iPadOS releases can render the split columns, but
+        // retain Apollo's tab bar alongside them, which does not match the UI
+        // promised by the setting and has not received the same test coverage.
+        // Keep the production opt-in honest and conservative: iPadOS 18 is the
+        // first supported release, while Apollo's normal layout remains
+        // untouched everywhere else.
+        if (@available(iOS 18.0, *)) {
+            supported = (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad);
+        }
     });
     return supported;
 }

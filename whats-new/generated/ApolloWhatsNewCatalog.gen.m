@@ -16,6 +16,7 @@ typedef struct {
 static const ApolloWhatsNewReleaseEntry kWhatsNewReleases[] = {
     { "3.5.0", "What's New in Apollo Reborn" },
     { "3.5.1", "What's New in Apollo Reborn" },
+    { "3.6.0", "What's New in Apollo Reborn" },
 };
 
 static const ApolloWhatsNewItemEntry kWhatsNewItems[] = {
@@ -32,6 +33,12 @@ static const ApolloWhatsNewItemEntry kWhatsNewItems[] = {
     { "3.5.1", "square.grid.2x2.fill", "Better Multireddits", "Browse multireddits in Gallery View, then rename them and add descriptions or custom icons." },
     { "3.5.1", "checkmark.circle.fill", "Posting & Media Fixes", "New comments appear correctly right away, while videos, previews, uploads, saves, and shares work more reliably." },
     { "3.5.1", "shield.fill", "Smoother, More Stable Apollo", "Major memory and crash fixes make Apollo more reliable, with smoother headers, profiles, themes, navigation, and iOS 27 layouts." },
+    { "3.6.0", "square.grid.2x2.fill", "Gallery View Everywhere", "Browse Home, Popular, All, and any profile as a media grid, now with real video controls and rotation." },
+    { "3.6.0", "sportscourt.fill", "Live Interactive Posts", "Live match threads, games, and other interactive posts now play inline instead of showing a placeholder." },
+    { "3.6.0", "slider.horizontal.below.rectangle", "Scrub Feed Videos", "Slide along an inline video's progress bar to seek, and let feed videos play with sound." },
+    { "3.6.0", "paintbrush.fill", "Redesigned Icon Picker", "Browse icon packs as cards, discover a new Daily Spotlight, and pin any icon to Light or Dark artwork." },
+    { "3.6.0", "photo.on.rectangle.angled", "Goodbye Wallpapers", "Apollo's farewell wallpapers are back for iPhone, iPad, and Mac, ready to save straight to Photos." },
+    { "3.6.0", "checkmark.shield.fill", "Stability & Fixes", "Crash fixes, no more hijacked video ads, smoother scrolling, and better link, tweet, and sports-clip previews." },
 };
 
 static NSString *S(const char *value) { return [NSString stringWithUTF8String:value]; }

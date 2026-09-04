@@ -17,6 +17,7 @@
 #import "settings/InlineMediaSettingsViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/ApolloSubredditLayoutViewController.h"
+#import "settings/ApolloSubredditSectionsViewController.h"
 #import "settings/ApolloProfileLayoutViewController.h"
 #import "settings/TranslationSettingsViewController.h"
 
@@ -64,7 +65,11 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
         add(@"comments", @"Comments", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloCommentsSettingsViewController class]));
         add(@"media", @"Media", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloMediaSettingsViewController class]));
         add(@"subreddits", @"Subreddits", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloSubredditsSettingsViewController class]));
+        add(@"feed-shortcuts", @"Feed Shortcuts", @"Apollo Reborn → Features → Subreddits", ^UIViewController *{
+            return [[ApolloFeedShortcutsSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        });
         add(@"subreddit-layout", @"Subreddit Layout", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloSubredditLayoutViewController class]));
+        add(@"subreddit-sections", @"Subreddit Sections", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloSubredditSectionsViewController class]));
         add(@"profiles", @"Profiles", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloProfilesSettingsViewController class]));
         add(@"profile-layout", @"Profile Layout", @"Apollo Reborn → Features → Profiles", ApolloSettingsInsetGrouped([ApolloProfileLayoutViewController class]));
         add(@"interface", @"Interface", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloInterfaceSettingsViewController class]));
@@ -130,12 +135,12 @@ UIViewController *ApolloSettingsRouteInstantiate(NSString *routeId) {
     return builder ? builder() : nil;
 }
 
-BOOL ApolloSettingsRouteOpenNow(NSString *routeId) {
+BOOL ApolloSettingsRouteOpenNowInScene(NSString *routeId, UIWindowScene *scene) {
     ApolloSettingsRouterEnsureRegistry();
     ApolloSettingsRouteBuilder builder = [routeId isKindOfClass:[NSString class]] ? sRouteBuilders[routeId.lowercaseString] : nil;
     if (!builder) return NO;
 
-    UIViewController *tabBarController = ApolloMainTabBarController();
+    UIViewController *tabBarController = ApolloMainTabBarControllerForScene(scene);
     if (!tabBarController) return NO;
 
     if ([tabBarController respondsToSelector:@selector(goToSettingsTab)]) {
@@ -161,6 +166,10 @@ BOOL ApolloSettingsRouteOpenNow(NSString *routeId) {
     [nav pushViewController:builder() animated:YES];
     ApolloLog(@"[SettingsRouter] Opened route '%@'", routeId);
     return YES;
+}
+
+BOOL ApolloSettingsRouteOpenNow(NSString *routeId) {
+    return ApolloSettingsRouteOpenNowInScene(routeId, nil);
 }
 
 static void ApolloSettingsRouteOpenWithRetry(NSString *routeId, NSUInteger attempt) {

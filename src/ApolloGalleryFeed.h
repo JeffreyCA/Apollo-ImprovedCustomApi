@@ -106,13 +106,16 @@ static ApolloGalleryMediaKind const ApolloGalleryMediaKindAll =
 
 @end
 
-// Listing sorts offered by the gallery's own sort menu. `top` and `controversial`
-// carry a time window; the others ignore it.
+// Listing sorts offered by the gallery's own sort menu — the same set
+// Apollo's subreddit sort menu offers. `top` and `controversial` carry a
+// time window; the others ignore it.
 typedef NS_ENUM(NSInteger, ApolloGallerySort) {
     ApolloGallerySortHot = 0,
     ApolloGallerySortNew,
     ApolloGallerySortTop,
     ApolloGallerySortRising,
+    ApolloGallerySortBest,
+    ApolloGallerySortControversial,
 };
 
 typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
@@ -123,15 +126,28 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
     ApolloGalleryTopWindowAll,
 };
 
-// A subreddit's or multireddit's media feed. Not thread-safe: drive it from the
-// main thread (completions are always delivered there).
+// Whether the sort's listing takes the `&t=` time window. The single source of
+// truth for it — the request builder, the feed's reset-on-window-change, and
+// the sort menu's checkmarks must all agree on which sorts a window applies to.
+static inline BOOL ApolloGallerySortUsesWindow(ApolloGallerySort sort) {
+    return sort == ApolloGallerySortTop || sort == ApolloGallerySortControversial;
+}
+
+// A subreddit's, multireddit's, or user profile's media feed. Not thread-safe:
+// drive it from the main thread (completions are always delivered there).
 @interface ApolloGalleryFeed : NSObject
 
+// The signed-in HOME front page (subscribed subreddits, root-path listings).
+- (instancetype)initWithHomeFeed NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithSubreddit:(NSString *)subreddit NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithMultiredditPath:(NSString *)multiredditPath NS_DESIGNATED_INITIALIZER;
+// `username` is the bare name, no "u/" prefix. Loads the user's submitted
+// posts (`/user/<name>/submitted`), defaulting to New — a person's gallery
+// reads most naturally in the order they posted.
+- (instancetype)initWithUsername:(NSString *)username NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
-// Populated for a single-subreddit feed and empty for a multireddit feed.
+// Populated for a single-subreddit feed and empty for every other feed kind.
 @property (nonatomic, readonly, copy) NSString *subreddit;
 // The items the UI should show: everything fetched so far, minus the kinds the
 // filter excludes. Filtering happens here rather than at parse time so toggling
@@ -148,6 +164,12 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
 // How many of everything fetched so far are of `kind`, for the filter menu's
 // subtitles.
 - (NSUInteger)countOfKind:(ApolloGalleryMediaKind)kind;
+
+// NO for user-profile feeds: Reddit's user listing endpoint accepts
+// hot/new/top/controversial but not rising or best, so the sort menu drops
+// those entries there.
+@property (nonatomic, readonly) BOOL supportsRisingSort;
+@property (nonatomic, readonly) BOOL supportsBestSort;
 
 // Changing either resets the feed (items cleared, cursor dropped). Use
 // -setSort:topWindow: to change both at once so only one reset happens.

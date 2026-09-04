@@ -6,11 +6,13 @@
 #include <dlfcn.h>
 #include <float.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #import "ApolloCommon.h"
 #import "ApolloDeletedCommentsData.h"
 #import "ApolloState.h"
+#import "ApolloToast.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloTranslation.h"
 #import "Tweak.h"
@@ -137,7 +139,68 @@ static const void *kApolloLastAppliedPostBodyKey = &kApolloLastAppliedPostBodyKe
 // so we don't run multi-pass restore work mid swipe-back.
 static const void *kApolloReconcileGenerationKey = &kApolloReconcileGenerationKey;
 
-static NSString *const kApolloDefaultLibreTranslateURL = @"https://libretranslate.de/translate";
+// libretranslate.de — the free public instance this defaulted to since the
+// feature shipped — was shut down in 2026: the domain now 301s to
+// de.libretranslate.com, which (like libretranslate.com) requires a paid API
+// key from portal.libretranslate.com. No keyless public instance survives
+// (issue #995), so the default points at the official keyed instance: with an
+// API key entered in settings it works as-is, and without one it returns a
+// descriptive JSON error we surface instead of the old redirect-mangled
+// silence. %ctor and backup-restore migrate a stored .de URL to this default.
+static NSString *const kApolloDefaultLibreTranslateURL = @"https://libretranslate.com/translate";
+static NSString *const kApolloDeadLibreTranslateURL = @"https://libretranslate.de/translate";
+
+// userInfo marker meaning "this failure was a quota/rate-limit rejection, not
+// a bug or an outage". Set by any provider leg that gets throttled; read by the
+// failure notification so the user is told the actual cause and what to do
+// about it, instead of a generic "translation failed" (issue #995).
+static NSString *const kApolloTranslationQuotaErrorKey = @"ApolloTranslationQuotaError";
+
+// userInfo marker on errors from the on-device Apple leg. Apple failures are
+// routine per-item conditions — an undetectable short title, a language model
+// Apple retries or prompts to download itself — that by contract leave the
+// original text, never evidence of the network-provider outage the failure
+// toast exists to explain. Without this, browsing an ENGLISH feed with Apple
+// selected tripped "Translation Failed" off three undetectable titles, with
+// network advice (keys, quotas) that means nothing to an Apple user (#995
+// device testing). The toast counter ignores errors carrying this marker.
+static NSString *const kApolloTranslationAppleLegErrorKey = @"ApolloTranslationAppleLegError";
+
+// Single chokepoint mapping the stored LibreTranslate URL setting to a usable
+// endpoint — %ctor, backup-restore, and the settings screen all route through
+// this so the dead .de default migrates everywhere at once.
+NSString *ApolloNormalizedLibreTranslateURLSetting(NSString *stored) {
+    NSString *trimmed = [stored stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length == 0 || [trimmed isEqualToString:kApolloDeadLibreTranslateURL]) {
+        return kApolloDefaultLibreTranslateURL;
+    }
+    return trimmed;
+}
+
+// True when `host` is one of the KEYED public LibreTranslate instances (exact
+// host or a subdomain — dot-anchored so a self-hosted "mylibretranslate.com"
+// isn't swept in). Self-hosted instances run keyless by design.
+static BOOL ApolloLibreHostIsPublicInstance(NSString *host) {
+    NSString *lower = [host lowercaseString] ?: @"";
+    for (NSString *publicHost in @[ @"libretranslate.com", @"libretranslate.de" ]) {
+        if ([lower isEqualToString:publicHost] ||
+            [lower hasSuffix:[@"." stringByAppendingString:publicHost]]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// Single capability predicate for "LibreTranslate cannot work as configured":
+// a keyed public instance with no key entered. The request leg's fail-fast,
+// the cross-provider fallback chooser, and the settings screen's key warning
+// all route through this so they can never disagree about which configurations
+// are usable (a keyless SELF-HOSTED instance is fully valid).
+BOOL ApolloLibreTranslateNeedsAPIKey(void) {
+    if (sLibreTranslateAPIKey.length > 0) return NO;
+    NSURL *url = [NSURL URLWithString:ApolloNormalizedLibreTranslateURLSetting(sLibreTranslateURL)];
+    return ApolloLibreHostIsPublicInstance(url.host);
+}
 
 static NSCache<NSString *, NSString *> *sTranslationCache;
 // Language recognition is CPU-heavy enough to show up while rows enter the
@@ -295,7 +358,7 @@ static __weak UIViewController *sVisibleCommentsViewController = nil;
 // us walk *all* off-screen / preloaded text nodes on toggle-off, instead of
 // only those whose UITableViewCells happen to be in `visibleCells`.
 static NSHashTable<id> *sOwnedTextNodes = nil;
-static dispatch_queue_t sOwnedTextNodesQueue = NULL;
+static NSObject *sOwnedTextNodesLock = nil;
 static BOOL sPendingVisibleFeedTitleApplied = NO;
 static NSMutableDictionary<NSString *, NSNumber *> *sFeedTitleModeByFeedKey = nil;
 static BOOL sLastFeedTitleModeKnown = NO;
@@ -2102,7 +2165,6 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     // overwrites the node (e.g. on vote/score-flair refresh).
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [comment.body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
@@ -2769,7 +2831,6 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
     // Same vote-resilience marker pattern as comment cells.
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
     // EXACT no-op gate (see comment apply): the vote-time headerReapply
@@ -2886,7 +2947,6 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
     // EXACT no-op gate (see comment apply): skip the write + relayout when the
@@ -2984,9 +3044,8 @@ static NSString *ApolloExtractGoogleTranslation(id jsonObject) {
     return nil;
 }
 
-static void ApolloTranslateViaGoogle(NSString *text,
-                                     NSString *targetLanguage,
-                                     void (^completion)(NSString *translated, NSError *error)) {
+// The primary free Google endpoint (what the feature has always used).
+static NSURL *ApolloGoogleTranslatePrimaryURL(NSString *text, NSString *targetLanguage) {
     NSURLComponents *components = [[NSURLComponents alloc] init];
     components.scheme = @"https";
     components.host = @"translate.googleapis.com";
@@ -2998,14 +3057,34 @@ static void ApolloTranslateViaGoogle(NSString *text,
         [NSURLQueryItem queryItemWithName:@"dt" value:@"t"],
         [NSURLQueryItem queryItemWithName:@"q" value:text],
     ];
+    return components.URL;
+}
 
-    NSURL *url = components.URL;
-    if (!url) {
-        NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:100 userInfo:@{NSLocalizedDescriptionKey: @"Failed to build Google Translate URL"}];
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
-        return;
-    }
+// Second free Google endpoint (the Chrome dictionary-extension client) on a
+// DIFFERENT host with a different client id, so per-IP throttling or blocking
+// of the gtx endpoint — the way translation died wholesale for the users in
+// issue #995 while the code was provably fine — doesn't take the feature down
+// with it. Response shape is [["<full translated text>","<source lang>"]],
+// which ApolloExtractGoogleTranslation's segment walk already handles.
+static NSURL *ApolloGoogleTranslateFallbackURL(NSString *text, NSString *targetLanguage) {
+    NSURLComponents *components = [[NSURLComponents alloc] init];
+    components.scheme = @"https";
+    components.host = @"clients5.google.com";
+    components.path = @"/translate_a/t";
+    components.queryItems = @[
+        [NSURLQueryItem queryItemWithName:@"client" value:@"dict-chrome-ex"],
+        [NSURLQueryItem queryItemWithName:@"sl" value:@"auto"],
+        [NSURLQueryItem queryItemWithName:@"tl" value:targetLanguage],
+        [NSURLQueryItem queryItemWithName:@"q" value:text],
+    ];
+    return components.URL;
+}
 
+// One GET against a Google translate endpoint + shared response parsing.
+// `endpointLabel` only feeds the local diagnostic log.
+static void ApolloGoogleTranslateFetch(NSURL *url,
+                                       NSString *endpointLabel,
+                                       void (^completion)(NSString *translated, NSError *error)) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:12.0];
     request.HTTPMethod = @"GET";
 
@@ -3017,7 +3096,22 @@ static void ApolloTranslateViaGoogle(NSString *text,
 
         NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
         if (![httpResponse isKindOfClass:[NSHTTPURLResponse class]] || httpResponse.statusCode < 200 || httpResponse.statusCode >= 300) {
-            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:101 userInfo:@{NSLocalizedDescriptionKey: @"Google Translate request failed"}];
+            // Keep the HTTP status (and a snippet of the error page) in the local
+            // log — "request failed" alone can't distinguish a 429 rate-limit
+            // from a 4xx rejection when triaging user reports (issue #995).
+            NSInteger status = [httpResponse isKindOfClass:[NSHTTPURLResponse class]] ? httpResponse.statusCode : 0;
+            NSString *snippet = data.length > 0 ? [[NSString alloc] initWithData:[data subdataWithRange:NSMakeRange(0, MIN(data.length, (NSUInteger)200))] encoding:NSUTF8StringEncoding] : nil;
+            ApolloLog(@"[Translation] Google(%@) HTTP %ld body=%@", endpointLabel, (long)status, snippet ?: @"(none)");
+            // 429 is Google throttling this device's IP on the free endpoint —
+            // the exact cause behind #995. Tag it so the failure notification can
+            // say so plainly rather than blaming translation generally.
+            BOOL quota = (status == 429);
+            NSString *message = quota
+                ? @"Google's free translation limit was reached for your connection"
+                : [NSString stringWithFormat:@"Google Translate request failed (HTTP %ld)", (long)status];
+            NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:message forKey:NSLocalizedDescriptionKey];
+            if (quota) info[kApolloTranslationQuotaErrorKey] = @YES;
+            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:101 userInfo:info];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, statusError); });
             return;
         }
@@ -3025,12 +3119,14 @@ static void ApolloTranslateViaGoogle(NSString *text,
         NSError *jsonError = nil;
         id jsonObject = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
         if (jsonError) {
+            ApolloLog(@"[Translation] Google(%@) response not JSON: %@", endpointLabel, jsonError.localizedDescription);
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, jsonError); });
             return;
         }
 
         NSString *translated = ApolloExtractGoogleTranslation(jsonObject);
         if (![translated isKindOfClass:[NSString class]] || translated.length == 0) {
+            ApolloLog(@"[Translation] Google(%@) response parse failed (unrecognized shape)", endpointLabel);
             NSError *parseError = [NSError errorWithDomain:@"ApolloTranslation" code:102 userInfo:@{NSLocalizedDescriptionKey: @"Google Translate response parse error"}];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, parseError); });
             return;
@@ -3042,11 +3138,239 @@ static void ApolloTranslateViaGoogle(NSString *text,
     [task resume];
 }
 
+// Time-boxed backoff for the gtx endpoint. Once it 429s, every request for the
+// backoff window goes straight to clients5 instead of re-paying the doomed gtx
+// attempt (a throttle storm is per-IP and lasts hours; without this, a chunked
+// long post serially burns a failed gtx round-trip — up to its full 12s
+// timeout — PER CHUNK). Main-thread only, like the toast counters: every
+// provider completion and translation entry point runs on main.
+static NSTimeInterval sGoogleGtxBackoffUntil = 0;
+static const NSTimeInterval kApolloGoogleGtxBackoffInterval = 120.0;
+
+static void ApolloTranslateViaGoogle(NSString *text,
+                                     NSString *targetLanguage,
+                                     void (^completion)(NSString *translated, NSError *error)) {
+    // One clients5 attempt, delivering `primaryError`'s quota tag even when the
+    // fallback fails for a DIFFERENT reason — the gtx 429 is what the user
+    // needs explained, and dropping it here would turn the purpose-built
+    // "Translation Limit Reached" toast back into a generic failure.
+    void (^runClients5)(NSError *) = ^(NSError *primaryError) {
+        NSURL *fallbackURL = ApolloGoogleTranslateFallbackURL(text, targetLanguage);
+        if (!fallbackURL) {
+            completion(nil, primaryError);
+            return;
+        }
+        ApolloGoogleTranslateFetch(fallbackURL, @"clients5", ^(NSString *retried, NSError *fallbackError) {
+            if ([retried isKindOfClass:[NSString class]] && retried.length > 0) {
+                completion(retried, nil);
+                return;
+            }
+            NSError *delivered = fallbackError ?: primaryError;
+            if (delivered && ![delivered.userInfo[kApolloTranslationQuotaErrorKey] boolValue] &&
+                [primaryError.userInfo[kApolloTranslationQuotaErrorKey] boolValue]) {
+                NSMutableDictionary *info = [delivered.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+                info[kApolloTranslationQuotaErrorKey] = @YES;
+                delivered = [NSError errorWithDomain:delivered.domain code:delivered.code userInfo:info];
+            }
+            completion(nil, delivered);
+        });
+    };
+
+    if ([NSDate timeIntervalSinceReferenceDate] < sGoogleGtxBackoffUntil) {
+        runClients5(nil);
+        return;
+    }
+
+    NSURL *primaryURL = ApolloGoogleTranslatePrimaryURL(text, targetLanguage);
+    if (!primaryURL) {
+        NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:100 userInfo:@{NSLocalizedDescriptionKey: @"Failed to build Google Translate URL"}];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+        return;
+    }
+    ApolloGoogleTranslateFetch(primaryURL, @"gtx", ^(NSString *translated, NSError *primaryError) {
+        if ([translated isKindOfClass:[NSString class]] && translated.length > 0) {
+            completion(translated, nil);
+            return;
+        }
+        if ([primaryError.userInfo[kApolloTranslationQuotaErrorKey] boolValue]) {
+            sGoogleGtxBackoffUntil = [NSDate timeIntervalSinceReferenceDate] + kApolloGoogleGtxBackoffInterval;
+            ApolloLog(@"[Translation] gtx throttled — routing to clients5 for the next %.0fs", kApolloGoogleGtxBackoffInterval);
+        }
+        ApolloLog(@"[Translation] Google primary endpoint failed (%@) — retrying via clients5",
+                  primaryError.localizedDescription ?: @"unknown error");
+        runClients5(primaryError);
+    });
+}
+
+// Azure's supported-language list keys some languages by dialect/script code
+// where the app (and Google/Apple) use a bare ISO 639-1 code — bare "zh" and
+// "no" are simply absent from /languages?scope=translation and the translate
+// endpoint 400s on them, which would break the Microsoft provider outright for
+// those target languages (both are offered in the Target Language picker; the
+// rest arrive via Device Default locales). Map the knowns; anything else
+// passes through and, if Azure still rejects it, surfaces its own error.
+static NSString *ApolloMicrosoftTargetLanguageCode(NSString *code) {
+    static NSDictionary<NSString *, NSString *> *map;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        map = @{
+            @"zh": @"zh-Hans",   // Chinese — Azure only has zh-Hans/zh-Hant; Simplified matches Google's default
+            @"no": @"nb",        // Norwegian — Azure uses Bokmål's code
+            @"sr": @"sr-Cyrl",   // Serbian — Cyrillic matches Google's output script
+            @"tl": @"fil",       // Tagalog — Azure files it under Filipino
+            @"iw": @"he",        // legacy Hebrew code some locales still carry
+            @"mn": @"mn-Cyrl",   // Mongolian — Azure splits by script
+        };
+    });
+    return map[code] ?: code;
+}
+
+// Microsoft (Azure AI Translator), bring-your-own-key like LibreTranslate.
+// Unlike the free Google endpoints this is an official, documented, versioned
+// API: the F0 tier grants 2M characters/month, so ordinary use never hits the
+// throttling that broke the free Google path (issue #995). Omitting `from`
+// asks Azure to auto-detect, matching every other provider's contract.
+static void ApolloTranslateViaMicrosoft(NSString *text,
+                                        NSString *targetLanguage,
+                                        void (^completion)(NSString *translated, NSError *error)) {
+    if (sMicrosoftTranslateAPIKey.length == 0) {
+        NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:300
+                                         userInfo:@{NSLocalizedDescriptionKey: @"Microsoft Translator needs an API key — add one in Translation settings"}];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+        return;
+    }
+
+    NSURLComponents *components = [[NSURLComponents alloc] init];
+    components.scheme = @"https";
+    components.host = @"api.cognitive.microsofttranslator.com";
+    components.path = @"/translate";
+    components.queryItems = @[
+        [NSURLQueryItem queryItemWithName:@"api-version" value:@"3.0"],
+        [NSURLQueryItem queryItemWithName:@"to" value:ApolloMicrosoftTargetLanguageCode(targetLanguage)],
+    ];
+    NSURL *url = components.URL;
+    if (!url) {
+        NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:301
+                                         userInfo:@{NSLocalizedDescriptionKey: @"Failed to build Microsoft Translator URL"}];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+        return;
+    }
+
+    // Body is an array of {"Text": …} objects — the API is natively batched, so
+    // this is the natural shape even though we currently send one string.
+    NSError *jsonError = nil;
+    NSData *body = [NSJSONSerialization dataWithJSONObject:@[@{@"Text": text}] options:0 error:&jsonError];
+    if (!body) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, jsonError); });
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:12.0];
+    request.HTTPMethod = @"POST";
+    [request setValue:@"application/json; charset=UTF-8" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:sMicrosoftTranslateAPIKey forHTTPHeaderField:@"Ocp-Apim-Subscription-Key"];
+    // Regional resources reject the request without their region; "global" ones
+    // don't need it, so only send it when the user supplied one.
+    if (sMicrosoftTranslateRegion.length > 0) {
+        [request setValue:sMicrosoftTranslateRegion forHTTPHeaderField:@"Ocp-Apim-Subscription-Region"];
+    }
+    request.HTTPBody = body;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+            return;
+        }
+
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        NSInteger status = [httpResponse isKindOfClass:[NSHTTPURLResponse class]] ? httpResponse.statusCode : 0;
+        if (status < 200 || status >= 300) {
+            // Azure returns {"error":{"code":…,"message":…}} with genuinely
+            // useful text; map the documented statuses to plain-language causes
+            // so a mistyped key doesn't read like an outage.
+            NSString *azureMessage = nil;
+            if (data.length > 0) {
+                id errorBody = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+                id errorNode = [errorBody isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)errorBody)[@"error"] : nil;
+                if ([errorNode isKindOfClass:[NSDictionary class]] &&
+                    [((NSDictionary *)errorNode)[@"message"] isKindOfClass:[NSString class]]) {
+                    azureMessage = ((NSDictionary *)errorNode)[@"message"];
+                }
+            }
+            ApolloLog(@"[Translation] Microsoft HTTP %ld: %@", (long)status, azureMessage ?: @"(no message)");
+            NSString *cause = nil;
+            BOOL quota = NO;
+            if (status == 401) {
+                cause = @"Microsoft Translator rejected your API key — check it in Translation settings";
+            } else if (status == 403) {
+                cause = @"Microsoft Translator quota exhausted — the free tier resets at the start of each month";
+                quota = YES;
+            } else if (status == 429) {
+                cause = @"Microsoft Translator is rate limiting — too many requests at once";
+                quota = YES;
+            } else {
+                cause = azureMessage.length > 0
+                    ? [NSString stringWithFormat:@"Microsoft Translator: %@", azureMessage]
+                    : [NSString stringWithFormat:@"Microsoft Translator request failed (HTTP %ld)", (long)status];
+            }
+            NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:cause forKey:NSLocalizedDescriptionKey];
+            if (quota) info[kApolloTranslationQuotaErrorKey] = @YES;
+            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:302 userInfo:info];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, statusError); });
+            return;
+        }
+
+        NSError *parseError = nil;
+        id jsonObject = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
+        if (parseError) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, parseError); });
+            return;
+        }
+
+        // [{"detectedLanguage":{…},"translations":[{"text":"…","to":"en"}]}]
+        NSString *translated = nil;
+        id first = [jsonObject isKindOfClass:[NSArray class]] ? [(NSArray *)jsonObject firstObject] : nil;
+        if ([first isKindOfClass:[NSDictionary class]]) {
+            id translations = ((NSDictionary *)first)[@"translations"];
+            id firstTranslation = [translations isKindOfClass:[NSArray class]] ? [(NSArray *)translations firstObject] : nil;
+            if ([firstTranslation isKindOfClass:[NSDictionary class]]) {
+                id candidate = ((NSDictionary *)firstTranslation)[@"text"];
+                if ([candidate isKindOfClass:[NSString class]]) translated = candidate;
+            }
+        }
+
+        if (translated.length == 0) {
+            NSError *shapeError = [NSError errorWithDomain:@"ApolloTranslation" code:303
+                                                  userInfo:@{NSLocalizedDescriptionKey: @"Microsoft Translator response parse error"}];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, shapeError); });
+            return;
+        }
+
+        NSString *result = translated;
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(result, nil); });
+    }];
+
+    [task resume];
+}
+
 static void ApolloTranslateViaLibre(NSString *text,
                                     NSString *targetLanguage,
                                     void (^completion)(NSString *translated, NSError *error)) {
-    NSString *urlString = [sLibreTranslateURL length] > 0 ? sLibreTranslateURL : kApolloDefaultLibreTranslateURL;
+    // Normalize at the request site too (not just %ctor/backup load) so a dead
+    // default URL can never sneak back in via a later settings write.
+    NSString *urlString = ApolloNormalizedLibreTranslateURLSetting(sLibreTranslateURL);
     NSURL *url = [NSURL URLWithString:urlString];
+
+    // Every surviving PUBLIC instance requires a key, so a keyless request to one
+    // is a guaranteed 400. Fail immediately with the actionable reason instead of
+    // burning a round-trip (issue #995). Self-hosted instances need no key —
+    // the shared predicate leaves them alone.
+    if (ApolloLibreTranslateNeedsAPIKey()) {
+        NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:204
+                                         userInfo:@{NSLocalizedDescriptionKey: @"LibreTranslate needs an API key — add one in Translation settings, or use your own self-hosted server"}];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+        return;
+    }
     if (!url) {
         NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:200 userInfo:@{NSLocalizedDescriptionKey: @"Invalid LibreTranslate URL"}];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
@@ -3084,7 +3408,34 @@ static void ApolloTranslateViaLibre(NSString *text,
 
         NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
         if (![httpResponse isKindOfClass:[NSHTTPURLResponse class]] || httpResponse.statusCode < 200 || httpResponse.statusCode >= 300) {
-            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:201 userInfo:@{NSLocalizedDescriptionKey: @"LibreTranslate request failed"}];
+            // Same triage aid as the Google leg: status + final URL. The final URL
+            // matters here because a dead instance that 301s (libretranslate.de →
+            // de.libretranslate.com) turns our POST into a bodyless GET and the
+            // failure surfaces as a 4xx from a URL we never configured.
+            NSInteger status = [httpResponse isKindOfClass:[NSHTTPURLResponse class]] ? httpResponse.statusCode : 0;
+            ApolloLog(@"[Translation] Libre HTTP %ld finalURL=%@", (long)status, httpResponse.URL.absoluteString ?: @"(none)");
+            // LibreTranslate reports failures as {"error": "..."} with real,
+            // user-actionable text ("Visit portal.libretranslate.com to get an
+            // API key") — pass it through instead of a bare status code.
+            NSString *instanceMessage = nil;
+            if (data.length > 0) {
+                id errorBody = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+                if ([errorBody isKindOfClass:[NSDictionary class]] &&
+                    [((NSDictionary *)errorBody)[@"error"] isKindOfClass:[NSString class]]) {
+                    instanceMessage = ((NSDictionary *)errorBody)[@"error"];
+                }
+            }
+            // Same quota tagging as the Google and Microsoft legs so a throttled
+            // LibreTranslate instance also explains itself (issue #995). 429 is
+            // its rate limit; 403 is a rejected/exhausted key on the hosted
+            // instances, which the user experiences the same way.
+            BOOL quota = (status == 429 || status == 403);
+            NSString *message = instanceMessage.length > 0
+                ? [NSString stringWithFormat:@"LibreTranslate: %@", instanceMessage]
+                : [NSString stringWithFormat:@"LibreTranslate request failed (HTTP %ld)", (long)status];
+            NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:message forKey:NSLocalizedDescriptionKey];
+            if (quota) info[kApolloTranslationQuotaErrorKey] = @YES;
+            NSError *statusError = [NSError errorWithDomain:@"ApolloTranslation" code:201 userInfo:info];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, statusError); });
             return;
         }
@@ -3092,7 +3443,20 @@ static void ApolloTranslateViaLibre(NSString *text,
         NSError *parseError = nil;
         id jsonObject = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
         if (parseError) {
-            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, parseError); });
+            // A 200 that isn't JSON is almost always a redirect landing page:
+            // NSURLSession follows a 301/302 by re-issuing the POST as a bodyless
+            // GET, so a moved/dead instance serves its homepage HTML with 200.
+            // Name the real problem (and destination) instead of "bad format".
+            NSString *requestHost = url.host ?: @"";
+            NSString *finalHost = httpResponse.URL.host ?: requestHost;
+            NSError *deliveredError = parseError;
+            if (![finalHost isEqualToString:requestHost]) {
+                ApolloLog(@"[Translation] Libre instance redirected %@ → %@ (moved or shut down)", requestHost, finalHost);
+                NSString *message = [NSString stringWithFormat:@"LibreTranslate instance %@ redirected to %@ — it has moved or shut down; set a working instance URL in Translation settings", requestHost, finalHost];
+                deliveredError = [NSError errorWithDomain:@"ApolloTranslation" code:203 userInfo:@{NSLocalizedDescriptionKey: message}];
+            }
+            NSError *finalError = deliveredError;
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, finalError); });
             return;
         }
 
@@ -3432,7 +3796,8 @@ static void ApolloTranslateViaAppleWithSource(NSString *text,
         // Could not confidently fingerprint the full input — do not guess (a wrong source
         // makes Apple prompt for the wrong language and fail). Leave the original text.
         NSError *err = [NSError errorWithDomain:@"ApolloTranslation" code:301
-            userInfo:@{NSLocalizedDescriptionKey: @"Apple: source language undetected"}];
+            userInfo:@{NSLocalizedDescriptionKey: @"Apple: source language undetected",
+                       kApolloTranslationAppleLegErrorKey: @YES}];
         if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, err); });
         return;
     }
@@ -3448,8 +3813,16 @@ static void ApolloTranslateViaAppleWithSource(NSString *text,
                                 from:source
                                   to:targetLanguage
                           completion:^(NSString *translated, NSError *error) {
-        // The Swift shim already delivers on the main thread.
-        if (completion) completion(translated, error);
+        // The Swift shim already delivers on the main thread. Stamp forwarded
+        // failures as Apple-leg so the outage-toast counter ignores them (see
+        // kApolloTranslationAppleLegErrorKey).
+        NSError *tagged = error;
+        if (error && ![error.userInfo[kApolloTranslationAppleLegErrorKey] boolValue]) {
+            NSMutableDictionary *info = [error.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+            info[kApolloTranslationAppleLegErrorKey] = @YES;
+            tagged = [NSError errorWithDomain:error.domain code:error.code userInfo:info];
+        }
+        if (completion) completion(translated, tagged);
     }];
 #else
     NSError *error = [NSError errorWithDomain:@"ApolloTranslation" code:300
@@ -3762,10 +4135,11 @@ static void ApolloTranslateTextWithFallback(NSString *text,
         return;
     }
 
-    // Provider can be: "google" or "libre". Anything unrecognized defaults to Google.
-    // Primary = user's choice; fallback = the other one.
+    // Network providers: "google", "libre", "microsoft". Anything unrecognized
+    // defaults to Google. Primary = user's choice.
     NSString *primaryProvider = sTranslationProvider;
     if (![primaryProvider isEqualToString:@"libre"] &&
+        ![primaryProvider isEqualToString:@"microsoft"] &&
         ![primaryProvider isEqualToString:@"google"]) {
         primaryProvider = @"google";
     }
@@ -3775,6 +4149,8 @@ static void ApolloTranslateTextWithFallback(NSString *text,
         void (^one)(NSString *, NSString *, void (^)(NSString *, NSError *)) = ^(NSString *chunk, NSString *target, void (^cb)(NSString *, NSError *)) {
             if ([provider isEqualToString:@"libre"]) {
                 ApolloTranslateViaLibre(chunk, target, cb);
+            } else if ([provider isEqualToString:@"microsoft"]) {
+                ApolloTranslateViaMicrosoft(chunk, target, cb);
             } else {
                 ApolloTranslateViaGoogle(chunk, target, cb);
             }
@@ -3787,13 +4163,52 @@ static void ApolloTranslateTextWithFallback(NSString *text,
     };
 
     // If the primary provider fails (including a mid-chunk failure), fall back to the other.
-    runProvider(primaryProvider, ^(NSString *translated, NSError *error) {
+    runProvider(primaryProvider, ^(NSString *translated, NSError *primaryError) {
         if ([translated isKindOfClass:[NSString class]] && translated.length > 0) {
             completion(translated, nil);
             return;
         }
-        NSString *other = [primaryProvider isEqualToString:@"google"] ? @"libre" : @"google";
-        runProvider(other, completion);
+        // Pick the fallback that can actually succeed. A configured Microsoft
+        // key is the most reliable option (official API, 2M chars/month), so it
+        // wins when the user has one; otherwise the free legs cover each other.
+        // LibreTranslate qualifies whenever its configuration is usable — a
+        // keyed public instance OR a keyless self-hosted one (the same
+        // predicate the request leg's fail-fast uses, so the chooser can never
+        // rule out a configuration the leg itself would accept).
+        NSString *other = nil;
+        if (![primaryProvider isEqualToString:@"microsoft"] && sMicrosoftTranslateAPIKey.length > 0) {
+            other = @"microsoft";
+        } else if (![primaryProvider isEqualToString:@"google"]) {
+            other = @"google";
+        } else if (!ApolloLibreTranslateNeedsAPIKey()) {
+            other = @"libre";
+        }
+        if (!other) {
+            completion(nil, primaryError);
+            return;
+        }
+        runProvider(other, ^(NSString *fallbackTranslated, NSError *fallbackError) {
+            if ([fallbackTranslated isKindOfClass:[NSString class]] && fallbackTranslated.length > 0) {
+                completion(fallbackTranslated, nil);
+                return;
+            }
+            // Both providers failed. Surface BOTH legs' reasons: a Google-primary
+            // user otherwise only ever sees the LibreTranslate fallback's error,
+            // which reads like a provider they never chose broke (issue #995).
+            NSString *primaryDescription = primaryError.localizedDescription ?: @"unknown error";
+            NSString *fallbackDescription = fallbackError.localizedDescription ?: @"unknown error";
+            NSString *message = [NSString stringWithFormat:@"%@ · %@", primaryDescription, fallbackDescription];
+            NSMutableDictionary *info = [NSMutableDictionary dictionaryWithObject:message forKey:NSLocalizedDescriptionKey];
+            NSError *underlying = fallbackError ?: primaryError;
+            if (underlying) info[NSUnderlyingErrorKey] = underlying;
+            // Quota is the headline cause whenever EITHER leg was throttled —
+            // that's the case the user most needs explained (issue #995).
+            if ([primaryError.userInfo[kApolloTranslationQuotaErrorKey] boolValue] ||
+                [fallbackError.userInfo[kApolloTranslationQuotaErrorKey] boolValue]) {
+                info[kApolloTranslationQuotaErrorKey] = @YES;
+            }
+            completion(nil, [NSError errorWithDomain:@"ApolloTranslation" code:110 userInfo:info]);
+        });
     });
 }
 
@@ -3807,6 +4222,128 @@ static NSString *ApolloTranslationFailureCooldownKey(NSString *cacheKey) {
 // handed back to yet another rebuilt cell" — inside a cell-rebuild storm the
 // latter fired the same failure log several times a second.
 static NSString *const kApolloTranslationCooldownReplayKey = @"ApolloTranslationCooldownReplay";
+
+// Make sustained provider failure VISIBLE. Translation failures were fully
+// silent — when every provider died at once (issue #995: the public
+// LibreTranslate instance shut down while Google throttled some users), the
+// feature just quietly stopped and users had nothing to report but "the globe
+// isn't green anymore". A toast fires only after several consecutive fresh
+// failures with no success in between (one flaky request stays silent), and
+// then at most once per interval per session.
+static NSUInteger sConsecutiveTranslationFailures = 0;
+static NSTimeInterval sLastTranslationFailureToastTime = 0;
+static const NSUInteger kApolloTranslationFailureToastThreshold = 3;
+static const NSTimeInterval kApolloTranslationFailureToastMinInterval = 180.0;
+
+static void ApolloNoteTranslationSuccessForToast(void) {
+    sConsecutiveTranslationFailures = 0;
+}
+
+static void ApolloNoteTranslationFailureForToast(NSError *error) {
+    if (!error) return;
+    // Cooldown replays are the same failure re-delivered to rebuilt cells, not
+    // new evidence that the provider is down.
+    if ([error.userInfo[kApolloTranslationCooldownReplayKey] boolValue]) return;
+    // On-device Apple failures leave the original text by design and are not
+    // outage evidence — never count them (see kApolloTranslationAppleLegErrorKey).
+    if ([error.userInfo[kApolloTranslationAppleLegErrorKey] boolValue]) return;
+    sConsecutiveTranslationFailures++;
+    if (sConsecutiveTranslationFailures < kApolloTranslationFailureToastThreshold) return;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - sLastTranslationFailureToastTime < kApolloTranslationFailureToastMinInterval) return;
+    sLastTranslationFailureToastTime = now;
+
+    // A quota/rate-limit rejection isn't a malfunction and shouldn't read like
+    // one — name the cause and point at the fix. Everything else keeps the
+    // generic title with the provider's own reason as detail.
+    if ([error.userInfo[kApolloTranslationQuotaErrorKey] boolValue]) {
+        // The toast's detail line is single-line, middle-truncating (ApolloToast),
+        // so this must stay short — the title carries "what happened" and the
+        // detail carries only "what to do next".
+        // Never suggest something the user already has. Apple is the only
+        // genuinely unlimited option, so it leads when it's available and isn't
+        // already selected. The Microsoft check is on KEY PRESENCE, not the
+        // selected provider: a Google-primary user with an Azure key reaches
+        // this toast only after that key's leg also failed, so telling them to
+        // "add a Microsoft API key" would suggest the thing they already have.
+        NSString *detail = nil;
+        if (IsAppleTranslationSupported() && ![sTranslationProvider isEqualToString:@"apple"]) {
+            detail = @"Try Apple (On-Device) in Translation settings";
+        } else if ([sTranslationProvider isEqualToString:@"microsoft"] || sMicrosoftTranslateAPIKey.length > 0) {
+            detail = @"Limits reset over time — Azure monthly";
+        } else {
+            detail = @"Add a Microsoft API key in Translation settings";
+        }
+        ApolloShowToastWithStyle(@"Translation Limit Reached", detail, ApolloToastStyleError, @"exclamationmark.triangle");
+        return;
+    }
+
+    ApolloShowToastWithStyle(@"Translation Failed",
+                             error.localizedDescription ?: @"The translation provider could not be reached",
+                             ApolloToastStyleError, nil);
+}
+
+#if APOLLO_SIM_BUILD
+// Debug-bridge probe (`translate <leg> <text>` in ApolloSimDebugTap.xm):
+// exercises the real provider request path — same NSURLSession, URL building,
+// and response parsing the feed/comment flows use — with zero UI or Reddit-
+// session dependencies, and logs the outcome. Legs: google (primary+fallback
+// chain), google2 (clients5 fallback endpoint alone), libre, failtoast (drives
+// the consecutive-failure toast with a synthetic error; text = toast detail),
+// anything else = the user-selected provider with cross-provider fallback.
+void ApolloTranslationDebugProbe(NSString *spec) {
+    NSRange space = [spec rangeOfString:@" "];
+    NSString *leg = space.location != NSNotFound ? [spec substringToIndex:space.location] : spec;
+    NSString *text = space.location != NSNotFound ? [spec substringFromIndex:NSMaxRange(space)] : @"";
+    if (text.length == 0) { ApolloLog(@"[Translation][Probe] no text given"); return; }
+    NSString *target = ApolloResolvedTargetLanguageCode() ?: @"en";
+    void (^report)(NSString *, NSError *) = ^(NSString *translated, NSError *error) {
+        // quota= is the flag that decides whether the user sees the
+        // "Translation Limit Reached" notification rather than a generic
+        // failure, so surface it here — it isn't visible in the message text.
+        ApolloLog(@"[Translation][Probe] leg=%@ target=%@ ok=%d quota=%d apple=%d translated='%@' error=%@",
+                  leg, target, translated.length > 0,
+                  [error.userInfo[kApolloTranslationQuotaErrorKey] boolValue],
+                  [error.userInfo[kApolloTranslationAppleLegErrorKey] boolValue],
+                  translated ?: @"(nil)",
+                  error ? [NSString stringWithFormat:@"%@/%ld %@", error.domain, (long)error.code, error.localizedDescription] : @"none");
+    };
+    ApolloLog(@"[Translation][Probe] start leg=%@ target=%@ textLen=%lu provider=%@",
+              leg, target, (unsigned long)text.length, sTranslationProvider ?: @"(nil)");
+    if ([leg isEqualToString:@"google"]) {
+        ApolloTranslateViaGoogle(text, target, report);
+    } else if ([leg isEqualToString:@"google2"]) {
+        NSURL *fallbackURL = ApolloGoogleTranslateFallbackURL(text, target);
+        if (!fallbackURL) { ApolloLog(@"[Translation][Probe] clients5 URL build failed"); return; }
+        ApolloGoogleTranslateFetch(fallbackURL, @"clients5", report);
+    } else if ([leg isEqualToString:@"libre"]) {
+        ApolloTranslateViaLibre(text, target, report);
+    } else if ([leg isEqualToString:@"microsoft"]) {
+        ApolloTranslateViaMicrosoft(text, target, report);
+    } else if ([leg isEqualToString:@"apple"]) {
+        ApolloTranslateViaApple(text, target, report);
+    } else if ([leg isEqualToString:@"appletoast"]) {
+        // Drives the noter with an Apple-leg-tagged error: the counter must NOT
+        // move (regression check for the English-feed false "Translation Failed").
+        ApolloNoteTranslationFailureForToast([NSError errorWithDomain:@"ApolloTranslation" code:301
+                                                             userInfo:@{NSLocalizedDescriptionKey: text,
+                                                                        kApolloTranslationAppleLegErrorKey: @YES}]);
+        ApolloLog(@"[Translation][Probe] appletoast consecutive=%lu", (unsigned long)sConsecutiveTranslationFailures);
+    } else if ([leg isEqualToString:@"quotatoast"]) {
+        // Drives the quota-specific notification path (issue #995).
+        ApolloNoteTranslationFailureForToast([NSError errorWithDomain:@"ApolloTranslation" code:110
+                                                             userInfo:@{NSLocalizedDescriptionKey: text,
+                                                                        kApolloTranslationQuotaErrorKey: @YES}]);
+        ApolloLog(@"[Translation][Probe] quotatoast consecutive=%lu", (unsigned long)sConsecutiveTranslationFailures);
+    } else if ([leg isEqualToString:@"failtoast"]) {
+        ApolloNoteTranslationFailureForToast([NSError errorWithDomain:@"ApolloTranslation" code:110
+                                                             userInfo:@{NSLocalizedDescriptionKey: text}]);
+        ApolloLog(@"[Translation][Probe] failtoast consecutive=%lu", (unsigned long)sConsecutiveTranslationFailures);
+    } else {
+        ApolloTranslateTextWithFallback(text, target, report);
+    }
+}
+#endif
 
 static NSError *ApolloRecentTranslationFailure(NSString *cacheKey) {
     if (cacheKey.length == 0 || !sTranslationFailureCooldowns) return nil;
@@ -3897,7 +4434,14 @@ static void ApolloRequestTranslation(NSString *cacheKey,
     NSDictionary<NSString *, NSString *> *protectedLinks = nil;
     NSString *requestText = ApolloProtectTranslationLinks(nameProtected, &protectedLinks);
 
-    void (^deliverTranslation)(NSString *, NSError *) = ^(NSString *translated, NSError *error) {
+    // providerRoundTrip distinguishes real provider deliveries from skip-path
+    // echoes (proper-noun/name-only text, skip-listed or already-target
+    // language). Only the former is evidence the provider is healthy: letting
+    // skip echoes reset the consecutive-failure counter meant a mixed feed —
+    // English posts interleaved with foreign ones — kept the counter below the
+    // toast threshold for an entire outage, silencing exactly the notification
+    // issue #995 added.
+    void (^deliverTranslationInternal)(NSString *, NSError *, BOOL) = ^(NSString *translated, NSError *error, BOOL providerRoundTrip) {
         NSString *restoredTranslation = ApolloRestoreTranslationLinks(translated, protectedLinks);
         restoredTranslation = ApolloRestoreTranslationNames(restoredTranslation, protectedNames);
         NSArray *callbacks = nil;
@@ -3911,14 +4455,19 @@ static void ApolloRequestTranslation(NSString *cacheKey,
             @synchronized (sTranslationFailureCooldowns) {
                 [sTranslationFailureCooldowns removeObjectForKey:ApolloTranslationFailureCooldownKey(cacheKey)];
             }
+            if (providerRoundTrip) ApolloNoteTranslationSuccessForToast();
         } else if (error) {
             ApolloRecordTranslationFailure(cacheKey, error);
+            ApolloNoteTranslationFailureForToast(error);
         }
 
         for (id callbackObj in callbacks) {
             void (^callback)(NSString *, NSError *) = callbackObj;
             callback(restoredTranslation, error);
         }
+    };
+    void (^deliverTranslation)(NSString *, NSError *) = ^(NSString *translated, NSError *error) {
+        deliverTranslationInternal(translated, error, YES);
     };
 
     // Skip the round-trip and hand back the original when the text is just name(s): either a
@@ -3945,7 +4494,15 @@ static void ApolloRequestTranslation(NSString *cacheKey,
     if (properNounTitle || onlyDetectedNames) {
         ApolloTranslationVerboseLog(@"[Translation] Skipping proper-noun text (titleHeuristic=%d nerOnly=%d): \"%@\"",
                                     properNounTitle, onlyDetectedNames, sourceText);
-        deliverTranslation(sourceText, nil);
+        deliverTranslationInternal(sourceText, nil, NO);
+        return;
+    }
+
+    // Front-run ApolloTranslateTextWithFallback's identical language-skip check
+    // (same text, same target) so the delivery carries providerRoundTrip=NO —
+    // through the provider path it would arrive flagged as a real success.
+    if (ApolloShouldSkipTranslationForText(requestText, targetLanguage)) {
+        deliverTranslationInternal(requestText, nil, NO);
         return;
     }
 
@@ -6479,14 +7036,23 @@ static UIView *ApolloFindTrailingButtonContainer(UINavigationItem *navItem, UIBu
     return nil;
 }
 
-// Detach the globe from any container it was merged into, restoring that
-// container's original button layout (shift back, shrink).
+// Detach the globe from a container WE merged it into, restoring that
+// container's original button layout (shift back, shrink). A merged container
+// is recognised by the shift we recorded on it; any other superview is left
+// alone. That matters for the standalone fallback: once the globe is a bar
+// item of its own, UIKit hosts it inside its own item wrapper, and ripping it
+// out of that wrapper (the old "detach from whatever superview" behaviour) is
+// exactly how the search-results screen ended up with a globe-sized hole in
+// its trailing capsule — the item still reserved the slot, but every refresh
+// pulled the button back out of UIKit's wrapper.
 static void ApolloDetachGlobeFromContainer(UIButton *globe) {
-    if (!globe || ![globe.superview isKindOfClass:[UIView class]]) return;
     UIView *container = globe.superview;
-    // Undo exactly the right-shift we applied when merging (stored on the
-    // container), falling back to the slot width if unknown.
-    CGFloat shift = [objc_getAssociatedObject(container, kApolloGlobeMergeShiftKey) doubleValue];
+    if (!container) return;
+    NSNumber *storedShift = objc_getAssociatedObject(container, kApolloGlobeMergeShiftKey);
+    if (!storedShift) return;  // not a container we merged into — nothing to unpack
+    // Undo exactly the right-shift we applied when merging, falling back to
+    // the slot width if the stored value is unusable.
+    CGFloat shift = storedShift.doubleValue;
     if (shift <= 0.0) shift = globe.frame.size.width > 1.0 ? globe.frame.size.width : kApolloGlobeMergeSlotWidth;
     [globe removeFromSuperview];
     for (UIView *sub in container.subviews) {
@@ -6542,7 +7108,11 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
 
         CGFloat gw = kApolloGlobeMergeSlotWidth;
         CGFloat h = container.bounds.size.height > 1.0 ? container.bounds.size.height : 44.0;
-        [globe removeFromSuperview];  // out of any previous (stale) container
+        // Out of any previous host: unpack a stale merged container properly
+        // (restore its layout), then leave whatever else held it — e.g. the
+        // wrapper of the standalone item we just dropped above.
+        ApolloDetachGlobeFromContainer(globe);
+        [globe removeFromSuperview];
 
         // Measure Apollo's button cluster and the container's trailing inset so
         // we can insert the globe and keep the whole group SYMMETRIC inside the
@@ -6640,15 +7210,24 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     // setRightBarButtonItem(s) hook re-runs this as soon as Apollo sets its
     // container. Only fall back to standalone if the globe truly has nowhere to
     // go (already detached and no container appeared).
-    if (globe.superview && ![globe.superview isKindOfClass:[UIView class]]) {
-        // shouldn't happen, but normalize
+    //
+    // This path runs on EVERY refresh (viewWillAppear/viewDidAppear, the
+    // staggered state refreshes, each viewDidLayoutSubviews settle), so it has
+    // to be a strict no-op once the standalone item is in place: from then on
+    // UIKit owns the globe's superview (its bar-item wrapper). Screens whose
+    // only trailing button is a plain image item — PostsSearchResultsViewController
+    // with its sort bullseye — live on this path permanently.
+    ApolloDetachGlobeFromContainer(globe);  // only unpacks a container we merged into
+    if (standalone && standalone.customView == globe && [navItem.rightBarButtonItems containsObject:standalone]) {
+        return;  // already hosted as its own item — leave UIKit's wrapper alone
     }
-    ApolloDetachGlobeFromContainer(globe);
     globe.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
     globe.frame = CGRectMake(0.0, 0.0, kApolloGlobeMergeSlotWidth, 32.0);
     if (!standalone) {
         standalone = [[UIBarButtonItem alloc] initWithCustomView:globe];
         objc_setAssociatedObject(navItem, kApolloGlobeStandaloneItemKey, standalone, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[Translation] Globe: no trailing container to merge into on '%@' - hosting as a standalone bar item",
+                  navItem.title ?: @"(untitled)");
     } else if (standalone.customView != globe) {
         standalone.customView = globe;
     }
@@ -6679,6 +7258,9 @@ static void ApolloRemoveGlobeMergeForNavItem(UINavigationItem *navItem) {
             sApplyingGlobeMerge = NO;
         }
     }
+    // The globe is gone for good on this nav item: make sure no host (a
+    // standalone item's wrapper included) keeps drawing it.
+    [globe removeFromSuperview];
     objc_setAssociatedObject(navItem, kApolloGlobeStandaloneItemKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(navItem, kApolloGlobeMergeButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // The stock container is asymmetric inside the glass capsule; with the
@@ -6992,12 +7574,10 @@ static void ApolloScheduleThreadTranslationReconcileForController(UIViewControll
                 ApolloForceVisibleCommentsTableRelayoutForController(strongVC);
             } else {
                 ApolloRestoreVisibleCommentsForController(strongVC);
-                // Skip the global restore walk when nothing remains to
-                // restore \u2014 avoids the four-deep storm of full-registry walks
-                // per toggle that the user sees as swipe-back / toggle lag.
-                if (sOwnedTextNodes && sOwnedTextNodes.count > 0) {
-                    ApolloRestoreAllOwnedTextNodes();
-                }
+                // The restore helper takes one cheap empty-registry snapshot.
+                // Avoid a separate unsynchronized hint: publishing a marker and a
+                // weak-table membership are one logical state transition.
+                ApolloRestoreAllOwnedTextNodes();
                 ApolloClearVisibleTranslationApplied(strongVC);
                 ApolloForceVisibleCommentsTableRelayoutForController(strongVC);
             }
@@ -7051,16 +7631,23 @@ static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSStr
 }
 
 static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (textNode && sOwnedTextNodes) {
+        @synchronized (sOwnedTextNodesLock) {
+            // Removal and marker clearing are the inverse of registration's
+            // single publication transaction. Whichever operation acquires
+            // the monitor last determines the coherent final state.
+            objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey,
+                                     nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [sOwnedTextNodes removeObject:textNode];
+        }
+    } else {
+        objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    if (textNode && sOwnedTextNodes) {
-        dispatch_sync(sOwnedTextNodesQueue, ^{
-            [sOwnedTextNodes removeObject:textNode];
-        });
-    }
 }
 
 // Add `textNode` to the global weak registry. Called from
@@ -7070,9 +7657,14 @@ static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
 // UITableViewCell is currently off-screen.
 static void ApolloRegisterOwnedTextNode(id textNode) {
     if (!textNode || !sOwnedTextNodes) return;
-    dispatch_sync(sOwnedTextNodesQueue, ^{
+    @synchronized (sOwnedTextNodesLock) {
+        // The marker and registry membership are one publication. A restore
+        // snapshot can therefore observe both or neither, never a tagged node
+        // that is still absent from the registry.
+        objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey,
+                                 (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [sOwnedTextNodes addObject:textNode];
-    });
+    }
 }
 
 // Walk every text node we've ever stamped with the ownership marker and
@@ -7117,24 +7709,27 @@ static void ApolloTapModeStripDecorations(void) {
 static void ApolloRestoreAllOwnedTextNodes(void) {
     ApolloTapModeStripDecorations();
     if (!sOwnedTextNodes) return;
-    // Cheap fast-path: nothing's been stamped, nothing to do. Avoids the
-    // hashtable snapshot + full log line on every gateOK=NO refresh of
-    // ApolloUpdateTranslationUIForController and on toggle reconciles after
-    // the immediate pass already drained the registry.
-    if (sOwnedTextNodes.count == 0) return;
     NSArray *snapshot = nil;
-    {
-        __block NSArray *capture = nil;
-        dispatch_sync(sOwnedTextNodesQueue, ^{
-            capture = [sOwnedTextNodes allObjects];
-        });
-        snapshot = capture;
+    @synchronized (sOwnedTextNodesLock) {
+        NSMutableArray *owned = [NSMutableArray array];
+        for (id textNode in sOwnedTextNodes) {
+            if (![objc_getAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
+            objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey,
+                                     nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [owned addObject:textNode];
+        }
+        snapshot = [owned copy];
+        // Registrations arriving after this transaction remain in the table
+        // and reapply the marker; the loop below detects that newer ownership.
+        [sOwnedTextNodes removeAllObjects];
     }
+    if (snapshot.count == 0) return;
     NSUInteger restored = 0, skippedNoOriginal = 0, skippedReuse = 0, skippedTitleStaleReuse = 0;
     for (id textNode in snapshot) {
         if (!textNode) continue;
-        // Only act if still tagged.
-        if (![objc_getAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
+        // A concurrent registration after our snapshot is newer than this
+        // restore transaction. Leave its marker and payload intact.
+        if ([objc_getAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
 
         BOOL isTitleOwned = [objc_getAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey) boolValue];
         NSString *cachedTranslated = objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey);
@@ -7142,7 +7737,6 @@ static void ApolloRestoreAllOwnedTextNodes(void) {
 
         // Drop ownership keys FIRST so the global setAttributedText: hook
         // won't re-swap when we write the original below.
-        objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -7259,12 +7853,6 @@ static void ApolloRestoreAllOwnedTextNodes(void) {
         } @catch (__unused NSException *e) {}
     }
 
-    // Drain dead weak entries.
-    dispatch_sync(sOwnedTextNodesQueue, ^{
-        // NSHashTable handles weak entries automatically; a no-op iteration
-        // suffices to compact in some implementations. Nothing else needed.
-        (void)[sOwnedTextNodes count];
-    });
     ApolloLog(@"[Translation] RestoreAllOwnedTextNodes total=%lu restored=%lu skippedNoOriginal=%lu skippedReuse=%lu skippedTitleStaleReuse=%lu",
               (unsigned long)snapshot.count,
               (unsigned long)restored,
@@ -7479,7 +8067,6 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     // that is what Apollo hands rebuilt nodes, so future matches are exact.
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [incomingText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translated copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (!objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey)) {
         objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [incoming copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -7587,7 +8174,6 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     // Adopt ownership so the normal prepareSwap path handles future updates.
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translated copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // Register in the global owned-nodes set so toggle-off's
     // ApolloRestoreAllOwnedTextNodes walk will restore us even when the
     // header is scrolled offscreen and the visible-cells walk skips us.
@@ -8216,7 +8802,6 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
     // bypass the per-thread translated-mode gate. Cache stays CLEAN (marker-free).
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
@@ -9214,7 +9799,7 @@ static NSString *const kApolloTranslationDiskCacheVersion = @"v1";
 static NSURL *ApolloTranslationDiskCacheURL(void) {
     NSURL *dir = [[[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask] firstObject];
     if (!dir) return nil;
-    return [dir URLByAppendingPathComponent:@"apollo-translation-cache-v1.plist"];
+    return [dir URLByAppendingPathComponent:@"apollo-translation-cache-v1.plist" isDirectory:NO];
 }
 
 static NSString *ApolloCurrentTranslationTag(void) {
@@ -9679,7 +10264,7 @@ static void ApolloDbgPurgeNSCaches(CFNotificationCenterRef c, void *o, CFStringR
     sRichPreviewTranslationInFlightKeys = [NSMutableSet set];
     sFeedTitleModeByFeedKey = [NSMutableDictionary dictionary];
     sOwnedTextNodes = [NSHashTable hashTableWithOptions:(NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality)];
-    sOwnedTextNodesQueue = dispatch_queue_create("ca.jeffrey.apollo.translation.ownednodes", DISPATCH_QUEUE_SERIAL);
+    sOwnedTextNodesLock = [NSObject new];
 
     // Hydrate disk cache early so any cells laid out during the first frame
     // already see translations.

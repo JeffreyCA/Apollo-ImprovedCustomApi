@@ -5,12 +5,14 @@ Groups are defined in icons.json under the top-level "groups" key:
 
   "groups": [
     { "id": "original", "title": "Original",
-      "coverIconIDs": ["igerman00", "jryng"], "description": "...", "author": "..." },
+      "coverIconIDs": ["igerman00", "jryng"], "description": "..." },
     { "id": "helios",   "title": "Helios" }
   ]
 
-Every icon's "group" field must name one of these group ids — there is no
-default/fallback group, so every icon is required to declare one explicitly.
+Every icon must belong either to one Liquid Glass "group" or to a supported
+native-style pack through "standardPack". Standard-pack icons are compiled
+into Assets.car and emitted separately for their owning picker, so they never
+appear in Liquid Glass pack grids or the Daily Spotlight rotation.
 The generator emits one per-group entry array and a kLGIconGroups[]
 descriptor table that the picker reads at runtime — no source changes are
 needed to add, rename, or reorder groups.
@@ -23,16 +25,11 @@ Per-group optional fields:
                     listed IDs are registered on a given IPA.
   "description"  — short sentence shown as a header above the pack's icon
                     grid.
-  "author"       — pack-level curator credit (distinct from each icon's own
-                    "designer"), shown on the pack card.
 
-A top-level "featured" key lists icon IDs (must already exist in "icons")
-to surface as one-tap shortcuts above the pack list:
-
-  "featured": ["jryng", "helios"]
-
-Omit or leave empty for no Featured section — this is the default and is
-fully backward compatible with registries that predate this key.
+Pack-level authors are intentionally unsupported. Credits belong on each icon
+through its "designer" field, where they remain visible inside the pack. The
+picker selects its daily Featured icons from these generated group entries at
+runtime, so Featured choices require no separate registry field.
 
 Preview images are NOT embedded here. They are compiled as named imagesets
 into the app's Assets.car by rebuild_assets.py and loaded at runtime via
@@ -79,40 +76,52 @@ def main() -> int:
     if not raw_groups:
         print('error: icons.json has no "groups"', file=sys.stderr)
         return 1
+    for group in raw_groups:
+        if "author" in group:
+            print(f'error: group "{group.get("id", "(unknown)")}" uses unsupported '
+                  'pack-level "author"; credit individual icons with "designer" instead',
+                  file=sys.stderr)
+            return 1
 
-    # icon_id -> (displayName, designer), used both for bucketing and for
-    # resolving the top-level "featured" list below.
+    # icon_id -> (displayName, designer), used for both Liquid Glass groups
+    # and tweak-owned additions to Apollo's native-style packs.
     icon_lookup: dict[str, tuple[str, str]] = {}
     for entry in registry["icons"]:
         icon_lookup[entry["id"]] = (entry.get("displayName", entry["id"]), entry.get("designer", ""))
 
-    # Bucket icons into groups, preserving registry order within each group.
-    # Every icon must declare a "group" naming one of the ids above — there
-    # is no default/fallback group.
+    # Bucket icons by exactly one placement, preserving registry order.
     buckets: dict[str, list[tuple[str, str, str]]] = {g["id"]: [] for g in raw_groups}
+    standard_buckets: dict[str, list[tuple[str, str, str, int]]] = {"ultra": []}
     for entry in registry["icons"]:
         icon_id      = entry["id"]
         display_name, designer = icon_lookup[icon_id]
         group = entry.get("group")
-        if group not in buckets:
-            print(f'error: icon "{icon_id}" has no valid "group" '
-                  f'(got {group!r}; must be one of {sorted(buckets)})', file=sys.stderr)
+        standard_pack = entry.get("standardPack")
+        if (group is None) == (standard_pack is None):
+            print(f'error: icon "{icon_id}" must declare exactly one of '
+                  '"group" or "standardPack"', file=sys.stderr)
             return 1
-        buckets[group].append((icon_id, display_name, designer))
-
-    # Resolve the top-level "featured" list against icon_lookup. Unlike a
-    # bad "group" reference (which is now a hard error above), a featured ID
-    # that doesn't exist at all is called out separately for a clearer
-    # message about which key is at fault.
-    featured_ids = registry.get("featured", [])
-    featured_entries: list[tuple[str, str, str]] = []
-    for icon_id in featured_ids:
-        if icon_id not in icon_lookup:
-            print(f'error: "featured" references unknown icon id "{icon_id}" '
-                  f'(not present in "icons")', file=sys.stderr)
-            return 1
-        display_name, designer = icon_lookup[icon_id]
-        featured_entries.append((icon_id, display_name, designer))
+        if group is not None:
+            if group not in buckets:
+                print(f'error: icon "{icon_id}" has invalid "group" {group!r}; '
+                      f'must be one of {sorted(buckets)}', file=sys.stderr)
+                return 1
+            buckets[group].append((icon_id, display_name, designer))
+        else:
+            if standard_pack not in standard_buckets:
+                print(f'error: icon "{icon_id}" has unsupported "standardPack" '
+                      f'{standard_pack!r}; must be one of {sorted(standard_buckets)}', file=sys.stderr)
+                return 1
+            native_anchor_row = entry.get("insertAfterNativeRow", -1)
+            if (isinstance(native_anchor_row, bool) or
+                    not isinstance(native_anchor_row, int) or native_anchor_row < -1):
+                print(f'error: icon "{icon_id}" has invalid "insertAfterNativeRow" '
+                      f'{native_anchor_row!r}; must be -1 or a nonnegative integer',
+                      file=sys.stderr)
+                return 1
+            standard_buckets[standard_pack].append(
+                (icon_id, display_name, designer, native_anchor_row)
+            )
 
     with open(out_path, "w") as fp:
         fp.write("// Auto-generated by liquid-glass/scripts/generate_previews_header.py.\n")
@@ -124,13 +133,13 @@ def main() -> int:
         fp.write("    const char *iconID;\n")
         fp.write("    const char *displayName;\n")
         fp.write("    const char *designer;\n")
+        fp.write("    int nativeAnchorRow;\n")
         fp.write("} LGIconRowEntry;\n\n")
 
         fp.write("typedef struct {\n")
         fp.write("    const char          *groupID;\n")
         fp.write("    const char          *title;\n")
         fp.write("    const char          *description;\n")
-        fp.write("    const char          *author;\n")
         fp.write("    const LGIconRowEntry *entries;\n")
         fp.write("    size_t               entryCount;\n")
         fp.write("    const char *const   *coverIconIDs;\n")
@@ -143,7 +152,8 @@ def main() -> int:
             entries = buckets[gid]
             fp.write(f"static const LGIconRowEntry kLGGroupEntries_{c_id(gid)}[] = {{\n")
             for icon_id, display_name, designer in entries:
-                fp.write(f'    {{ "{escape(icon_id)}", "{escape(display_name)}", "{escape(designer)}" }},\n')
+                fp.write(f'    {{ "{escape(icon_id)}", "{escape(display_name)}", '
+                         f'"{escape(designer)}", -1 }},\n')
             fp.write("};\n\n")
 
         # ── Per-group cover-icon-ID arrays (only when non-empty) ───────────
@@ -163,7 +173,6 @@ def main() -> int:
             gid         = g["id"]
             title       = g.get("title", gid)
             description = g.get("description", "")
-            author      = g.get("author", "")
             arr         = f"kLGGroupEntries_{c_id(gid)}"
             n           = len(buckets[gid])
             cover_ids   = g.get("coverIconIDs", [])
@@ -174,25 +183,30 @@ def main() -> int:
                 cover_arr  = "NULL"
                 cover_n    = 0
             fp.write(f'    {{ "{escape(gid)}", "{escape(title)}", "{escape(description)}", '
-                     f'"{escape(author)}", {arr}, {n}, {cover_arr}, {cover_n} }},\n')
+                     f'{arr}, {n}, {cover_arr}, {cover_n} }},\n')
         fp.write("};\n\n")
+
+        # ── Tweak-owned additions to native-style Standard packs ──────────
+        for pack_id, entries in standard_buckets.items():
+            array_name = f"kLGStandardPackEntries_{c_id(pack_id)}"
+            fp.write(f"static const LGIconRowEntry {array_name}[] = {{\n")
+            for icon_id, display_name, designer, native_anchor_row in entries:
+                fp.write(f'    {{ "{escape(icon_id)}", "{escape(display_name)}", '
+                         f'"{escape(designer)}", {native_anchor_row} }},\n')
+            fp.write("};\n")
+            fp.write(f"static const size_t {array_name}Count = {len(entries)};\n\n")
 
         fp.write(f"static const size_t kLGIconGroupCount = {len(raw_groups)};\n\n")
-
-        # ── Featured entries (top-level, cross-group shortcuts) ────────────
-        fp.write("static const LGIconRowEntry kLGFeaturedEntries[] = {\n")
-        for icon_id, display_name, designer in featured_entries:
-            fp.write(f'    {{ "{escape(icon_id)}", "{escape(display_name)}", "{escape(designer)}" }},\n')
-        fp.write("};\n\n")
-        fp.write(f"static const size_t kLGFeaturedEntryCount = {len(featured_entries)};\n\n")
 
         primary = registry["primaryIconID"]
         fp.write(f'static const char *const kLGPrimaryIconIDCString = "{escape(primary)}";\n')
 
-    total = sum(len(v) for v in buckets.values())
-    summary = ", ".join(f"{len(buckets[g['id']])} {g['id']}" for g in raw_groups)
-    print(f"Wrote {len(raw_groups)} groups ({summary}), {total} total, "
-          f"{len(featured_entries)} featured → {out_path}")
+    total = sum(len(v) for v in buckets.values()) + sum(len(v) for v in standard_buckets.values())
+    summary_parts = [f"{len(buckets[g['id']])} {g['id']}" for g in raw_groups]
+    summary_parts.extend(f"{len(entries)} standard/{pack_id}"
+                         for pack_id, entries in standard_buckets.items() if entries)
+    summary = ", ".join(summary_parts)
+    print(f"Wrote {len(raw_groups)} groups ({summary}), {total} total → {out_path}")
     return 0
 
 

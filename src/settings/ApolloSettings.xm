@@ -13,10 +13,14 @@
 #import "ApolloReportViewController.h"
 #import "ApolloThemeRuntime.h"
 #import "ipad/ApolloPaneLayout.h"
+#import "ApolloWallpapersViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
 @interface SettingsViewController : UIViewController
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView;
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section;
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath;
 @end
 
 @interface SettingsAboutViewController : UIViewController
@@ -56,6 +60,39 @@ static void ApolloApplyRootNativeSurface(UITableViewCell *cell, UIColor *surface
     if (!cell || !surface) return;
     cell.backgroundColor = surface;
     cell.contentView.backgroundColor = [UIColor clearColor];
+}
+
+static BOOL ApolloRootCellCopiesNativeSurface(NSIndexPath *indexPath) {
+    // Both cards are made from tweak-owned cells. They must follow a freshly
+    // themed native donor rather than retaining a resolved surface from the
+    // appearance in which they were first created.
+    return indexPath.section == 0 || indexPath.section == 2;
+}
+
+// `cellForRowAtIndexPath:` runs inside UITableView's update transaction. UIKit
+// asserts if code asks for visibleCells from that callback, so propagate the
+// native donor surface only after the table has committed. Theme/appearance
+// transitions can span more than one run-loop turn; retry briefly instead of
+// racing the update or retaining a stale surface on the tweak-owned cards.
+static void ApolloApplyRootNativeSurfaceWhenStable(UITableView *tableView, UIColor *surface,
+                                                    NSUInteger retriesRemaining) {
+    __weak UITableView *weakTable = tableView;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UITableView *liveTable = weakTable;
+        if (!liveTable) return;
+        if (liveTable.hasUncommittedUpdates) {
+            if (retriesRemaining > 0) {
+                ApolloApplyRootNativeSurfaceWhenStable(liveTable, surface, retriesRemaining - 1);
+            }
+            return;
+        }
+        for (UITableViewCell *visibleCell in liveTable.visibleCells) {
+            NSIndexPath *visiblePath = [liveTable indexPathForCell:visibleCell];
+            if (ApolloRootCellCopiesNativeSurface(visiblePath)) {
+                ApolloApplyRootNativeSurface(visibleCell, surface);
+            }
+        }
+    });
 }
 
 // Apollo's root Settings screen adds an Export button for its legacy settings
@@ -145,6 +182,10 @@ static UIImage *ApolloRootSettingsArtworkAtStandardSize(UIImage *artwork) {
     }];
 }
 
+// Matches UIKit's inset-grouped spacing between two adjacent groups, which is
+// what Apollo's own sections use; see the first-section note in -viewWillAppear:.
+static const CGFloat kApolloRootFirstSectionTopPadding = 18.0;
+
 static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     if ([view isKindOfClass:UITableView.class]) return (UITableView *)view;
     for (UIView *subview in view.subviews) {
@@ -164,31 +205,61 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     ApolloSettingsSearchAttach((UIViewController *)self);
     ApolloRemoveLegacySettingsExportButton((UIViewController *)self);
 
-    // Apollo predates navigation-item search on this screen and leaves its old
-    // first-section breathing room in place. With a pinned, always-visible
-    // search bar that becomes a conspicuous empty band, so trim only the modern
-    // extra padding and leave the grouped section's own inset intact.
-    UITableView *tableView = ApolloRootSettingsTableInView(((UIViewController *)self).view);
-    if (tableView) {
-        if (@available(iOS 15.0, *)) tableView.sectionHeaderTopPadding = 0.0;
-        UIEdgeInsets inset = tableView.contentInset;
-        inset.top -= 24.0;
-        tableView.contentInset = inset;
-        UIEdgeInsets indicatorInsets = tableView.verticalScrollIndicatorInsets;
-        indicatorInsets.top -= 24.0;
-        tableView.verticalScrollIndicatorInsets = indicatorInsets;
-    }
+    // Apollo 1.15.11's two-row About group is rendered below as Wallpapers,
+    // About, and Apollo Ultra. The native destinations retain their original
+    // handlers while no Apollo-owned cell is remapped.
+    ApolloLog(@"[Settings] Wallpapers row installed in native About group");
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     ApolloRemoveLegacySettingsExportButton((UIViewController *)self);
+
+    // Apollo's Settings root takes all of its group spacing from the headers of
+    // sections AFTER the first: section 0's header measures 0pt, so the first
+    // card butts straight against the navigation bar — and against the search
+    // field once the bar is on screen (issue #756). Give the table the
+    // first-section top padding it never had.
+    //
+    // A spacer rather than extra contentInset, because Apollo's own
+    // scroll-to-top compares contentOffset against safeAreaInsets.top: added
+    // inset would leave a tab double-tap resting short of the real top with the
+    // search bar half collapsed. A header is plain content, so that arithmetic
+    // is untouched. It goes in here rather than -viewDidLoad because Apollo
+    // clears the header again before the first appearance; re-checking on every
+    // appearance also repairs it if that ever happens later.
+    UITableView *tableView = ApolloRootSettingsTableInView(((UIViewController *)self).view);
+    if (tableView && !tableView.tableHeaderView) {
+        UIView *spacer = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, CGRectGetWidth(tableView.bounds),
+                                                                  kApolloRootFirstSectionTopPadding)];
+        spacer.backgroundColor = [UIColor clearColor];
+        spacer.userInteractionEnabled = NO;
+        tableView.tableHeaderView = spacer;
+    }
 }
 
 // Capture the live SettingsVC instance for the About > Tip Jar fallback path.
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     sApolloLastSettingsVC = (UIViewController *)self;
+    // The search bar is attached pinned so it's on screen the moment Settings
+    // opens; from here on it scrolls away and reveals like a stock iOS one.
+    ApolloSettingsSearchEnableScrollAway((UIViewController *)self);
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    UIViewController *controller = (UIViewController *)self;
+    if (!previousTraitCollection ||
+        previousTraitCollection.userInterfaceStyle == controller.traitCollection.userInterfaceStyle) return;
+
+    // The native surface captured below may be a trait-resolved color. Drop
+    // it before rebuilding so the native rows donate their new appearance,
+    // then propagate that surface back to both tweak-owned cards.
+    objc_setAssociatedObject(self, &kApolloRootNativeSurfaceKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UITableView *tableView = ApolloRootSettingsTableInView(controller.view);
+    [tableView reloadData];
 }
 
 // Reborn and support form one compact primary card. The cells are tweak-owned
@@ -202,6 +273,7 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 2;
+    if (section == 2) return 3;
     return %orig;
 }
 
@@ -218,7 +290,45 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
         cell.imageView.image = indexPath.row == 0
             ? (ApolloRebornOptionsSettingsIcon(29.0) ?: createSettingsIcon(@"key.fill", [UIColor systemTealColor]))
             : ApolloBuyMeACoffeeSettingsIcon(29.0);
+        cell.accessoryView = nil;
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        ApolloApplyRootNativeSurface(cell, objc_getAssociatedObject(self, &kApolloRootNativeSurfaceKey));
+        return cell;
+    }
+
+    if (indexPath.section == 2) {
+        NSArray<NSString *> *titles = @[ @"Wallpapers", @"About", @"Apollo Ultra" ];
+        NSString *title = titles[indexPath.row];
+        NSString *reuseID = [@"Cell_ApolloInfoRoot_" stringByAppendingString:title];
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseID];
+        }
+        cell.textLabel.text = title;
+        UIColor *primaryText = ApolloThemeRuntimeColor(ApolloThemeTokenLabel);
+        if (primaryText) cell.textLabel.textColor = primaryText;
+        cell.imageView.image = indexPath.row == 0
+            ? createSettingsIcon(@"photo.on.rectangle.angled", UIColor.systemRedColor)
+            : ApolloRootSettingsIconForTitle(title);
+        if (indexPath.row == 0) {
+            UIImageSymbolConfiguration *accessoryConfig =
+                [UIImageSymbolConfiguration configurationWithPointSize:17.0 weight:UIImageSymbolWeightRegular];
+            UIView *accessoryContainer = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 24.0, 24.0)];
+            accessoryContainer.clipsToBounds = NO;
+            accessoryContainer.accessibilityElementsHidden = YES;
+            UIImageView *downloadAccessory = [[UIImageView alloc]
+                initWithImage:[UIImage systemImageNamed:@"arrow.down.to.line" withConfiguration:accessoryConfig]];
+            downloadAccessory.tintColor = UIColor.tertiaryLabelColor;
+            downloadAccessory.contentMode = UIViewContentModeCenter;
+            downloadAccessory.frame = CGRectMake(8.0, 0.0, 24.0, 24.0);
+            [accessoryContainer addSubview:downloadAccessory];
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = accessoryContainer;
+        } else {
+            cell.accessoryView = nil;
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         ApolloApplyRootNativeSurface(cell, objc_getAssociatedObject(self, &kApolloRootNativeSurfaceKey));
         return cell;
@@ -229,18 +339,7 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     if (nativeSurface) {
         objc_setAssociatedObject(self, &kApolloRootNativeSurfaceKey, nativeSurface,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        for (UITableViewCell *visibleCell in tableView.visibleCells) {
-            NSIndexPath *visiblePath = [tableView indexPathForCell:visibleCell];
-            if (visiblePath.section == 0) ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
-        }
-        __weak UITableView *weakTable = tableView;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UITableView *liveTable = weakTable;
-            for (UITableViewCell *visibleCell in liveTable.visibleCells) {
-                NSIndexPath *visiblePath = [liveTable indexPathForCell:visibleCell];
-                if (visiblePath.section == 0) ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
-            }
-        });
+        ApolloApplyRootNativeSurfaceWhenStable(tableView, nativeSurface, 4);
     }
     UIImage *normalizedIcon = ApolloRootSettingsIconForTitle(cell.textLabel.text);
     if (normalizedIcon) cell.imageView.image = normalizedIcon;
@@ -278,6 +377,21 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
             return;
         }
     }
+
+    if (indexPath.section == 2 && indexPath.row == 0) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        UITableViewCell *sourceCell = [tableView cellForRowAtIndexPath:indexPath];
+        [ApolloWallpapersViewController presentDevicePickerFromViewController:(UIViewController *)self
+                                                                   sourceView:sourceCell ?: ((UIViewController *)self).view];
+        return;
+    }
+
+    if (indexPath.section == 2 && indexPath.row > 0) {
+        NSIndexPath *nativePath = [NSIndexPath indexPathForRow:indexPath.row - 1 inSection:2];
+        %orig(tableView, nativePath);
+        return;
+    }
+
     %orig;
 }
 
@@ -293,6 +407,7 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) return 52.0;
+    if (indexPath.section == 2) return 52.0;
     return %orig;
 }
 
@@ -501,6 +616,42 @@ static void ApolloPresentFeatureRequestsChooser(UIViewController *aboutVC,
 
     NSIndexPath *adjusted = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
     %orig(tableView, adjusted);
+}
+
+%end
+
+// Apollo's SceneDelegate owns the "tap the selected tab to go back to the top"
+// behavior: it walks to the tab's table and scrolls it to -safeAreaInsets.top.
+// That measurement predates this screen having a navigation-item search bar, so
+// with the bar scrolled away it lands one search-bar short of the real top and
+// the field stays hidden. Restore the bar to the palette before Apollo measures
+// (so its own arithmetic carries the field along) and hand it back to
+// scroll-away once the scroll has settled.
+%hook _TtC6Apollo13SceneDelegate
+
+- (BOOL)tabBarController:(UITabBarController *)tabBarController shouldSelectViewController:(UIViewController *)viewController {
+    // Only when Settings itself is what's on screen: a re-tap from a pushed
+    // screen pops back without scrolling, so there is nothing to compensate for
+    // (and the next tap, with the root on top, gets the full treatment).
+    UIViewController *settingsVC = nil;
+    if (tabBarController.selectedViewController == viewController &&
+        [viewController isKindOfClass:UINavigationController.class]) {
+        UIViewController *top = ((UINavigationController *)viewController).topViewController;
+        if ([top isKindOfClass:objc_getClass("_TtC6Apollo22SettingsViewController")]) settingsVC = top;
+    }
+
+    ApolloSettingsSearchPrepareForScrollToTop(settingsVC);
+    BOOL result = %orig;
+    if (settingsVC) {
+        // After Apollo's animated scroll, so the bar isn't handed back to
+        // scroll-away while the table is still moving toward the top. Weak, so
+        // a Settings screen torn down in the meantime isn't kept alive for it.
+        __weak UIViewController *weakSettingsVC = settingsVC;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloSettingsSearchFinishScrollToTop(weakSettingsVC);
+        });
+    }
+    return result;
 }
 
 %end

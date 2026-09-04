@@ -1,5 +1,6 @@
 #import "ApolloBadgeBookScraper.h"
 #import "ApolloCommon.h"
+#import "ApolloScrapeWebView.h"   // off-screen scrape web view + ad/media blocker
 #import "ApolloState.h"                // sLatestRedditBearerToken, sUserAgent
 #import "ApolloProfileSocialLinks.h"   // ApolloSharedScrapeDataStore()
 #import "ApolloWebSessionStore.h"      // ApolloActiveWebSession() — logged-in scrape cookies
@@ -703,6 +704,13 @@ typedef NS_ENUM(NSInteger, ApolloBBPhase) {
 @end
 
 @implementation ApolloBBWebFetch
+// Last-resort insurance: Create attaches the web view, so the window (not this
+// object) holds the strong reference — dropping the fetch without Destroy would
+// orphan an attached web view behind the app. Every normal path already goes
+// through Destroy; this makes "no orphaned attached web view" structural.
+- (void)dealloc {
+    ApolloScrapeWebViewDestroy(_web);
+}
 
 // Give a hydrating/challenged page plenty of room: 3s initial + 2s per poll.
 // Reddit's JS bot-challenge typically clears in ~5-10s and then auto-redirects to
@@ -782,13 +790,8 @@ static NSTimeInterval const kApolloBBWebFetchWatchdog = 90.0;
         });
     }
 
-    UIWindow *win = nil;
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-        if (![s isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene *)s).windows) { if (w.isKeyWindow) win = w; }
-    }
-    if (!win) win = ApolloAllWindows().firstObject;
-    if (!win) { [self finish]; return; }
+    // No window lookup: the scrape web view is deliberately never added to one
+    // (ApolloScrapeWebView.h explains why), and it sizes its own viewport.
 
     // Reddit HARD-BLOCKS logged-out page loads from flagged networks — the
     // interstitial literally says "log in to your Reddit account to continue"
@@ -808,13 +811,15 @@ static NSTimeInterval const kApolloBBWebFetchWatchdog = 90.0;
         if (self.finished) return;
         WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
         config.websiteDataStore = store;
-        self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:config];
-        self.web.navigationDelegate = self;
-        self.web.alpha = 0.011;
-        self.web.userInteractionEnabled = NO;
-        self.web.customUserAgent = kApolloBBDesktopUA;
-        [win insertSubview:self.web atIndex:0];
-        [self loadPhase:self.startPhase];
+        ApolloScrapeWebViewCreate(config, ^(WKWebView *web) {
+            // Blocker resolution adds another async hop before the web view
+            // exists, so re-check finished for the same reason as above.
+            if (self.finished) return;
+            self.web = web;
+            web.navigationDelegate = self;
+            web.customUserAgent = kApolloBBDesktopUA;
+            [self loadPhase:self.startPhase];
+        });
     };
 
     if (session.cookieHeader.length == 0) {
@@ -1027,7 +1032,7 @@ static NSTimeInterval const kApolloBBWebFetchWatchdog = 90.0;
 - (void)finish {
     if (self.finished) return;
     self.finished = YES;
-    if (self.web) { self.web.navigationDelegate = nil; [self.web stopLoading]; [self.web removeFromSuperview]; self.web = nil; }
+    if (self.web) { ApolloScrapeWebViewDestroy(self.web); self.web = nil; }
     // Release the slot BEFORE the completion so a waiting scrape starts straight
     // away rather than a callback-chain later.
     NSMutableArray<ApolloBBWebFetch *> *queue = ApolloBBWebFetchQueue();

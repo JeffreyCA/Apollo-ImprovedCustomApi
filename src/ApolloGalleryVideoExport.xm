@@ -113,7 +113,8 @@ static void ApolloGalleryExportDownload(NSURL *url, NSString *extension,
             return;
         }
         NSString *name = [[NSUUID UUID].UUIDString stringByAppendingPathExtension:extension];
-        NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
+        NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]
+                                    isDirectory:NO];
         [[NSFileManager defaultManager] removeItemAtURL:fileURL error:NULL];
         NSError *moveError = nil;
         if (![[NSFileManager defaultManager] moveItemAtURL:location toURL:fileURL error:&moveError]) {
@@ -218,7 +219,8 @@ static void ApolloGalleryExportMux(NSURL *videoFile, NSURL *audioFile,
     }
 
     NSString *name = [[NSUUID UUID].UUIDString stringByAppendingPathExtension:@"mp4"];
-    NSURL *outputURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
+    NSURL *outputURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]
+                                  isDirectory:NO];
     [[NSFileManager defaultManager] removeItemAtURL:outputURL error:NULL];
 
     // `export` is a reserved word in C++, and this file is ObjC++.

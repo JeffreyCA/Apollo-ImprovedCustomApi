@@ -19,6 +19,11 @@ NSRegularExpression *ApolloNativeGiphyMarkdownTokenRegex(void);
 extern "C" {
 #endif
 BOOL ApolloCommentLinkUploadPending(void);
+/// Auto mode (sCommentLinkPreferNative): the armed comment-editor window can be
+/// in NATIVE mode instead — the subreddit is known to allow image comments, so
+/// the upload is forced onto Reddit's native media path regardless of the Media
+/// Upload Host. Mutually exclusive with ApolloCommentLinkUploadPending().
+BOOL ApolloCommentNativeUploadPending(void);
 void ApolloCommentLinkClearUpload(void);
 /// Keyboard-anchored toast confirming the plain-link upload ("Uploaded to
 /// <hostName> — ..."), shown once per compose session.

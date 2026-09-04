@@ -563,7 +563,7 @@ static NSString *SpacedThemeName(NSString *raw) {
     if (store.activeSelectionKind == ApolloThemeSelectionGallery) {
         NSDictionary *active = [store activeTheme];
         NSString *name = [active[@"name"] isKindOfClass:NSString.class] ? active[@"name"] : @"Gallery Theme";
-        return [NSString stringWithFormat:@"%@ active", name];
+        return [name stringByAppendingString:@" active"];
     }
     return nil;
 }
@@ -594,7 +594,7 @@ static NSString *SpacedThemeName(NSString *raw) {
     }
     switch (store.activeSelectionKind) {
         case ApolloThemeSelectionGallery:
-            return modeSuffix ? [NSString stringWithFormat:@"From Gallery · %@", modeSuffix] : @"Gallery Theme";
+            return modeSuffix ? [@"From Gallery · " stringByAppendingString:modeSuffix] : @"Gallery Theme";
         case ApolloThemeSelectionCustom: {
             NSDictionary *active = [store activeTheme];
             if (!active) return @"Custom Theme";
@@ -648,7 +648,7 @@ static NSString *SpacedThemeName(NSString *raw) {
     if (store.activeSelectionKind == ApolloThemeSelectionCustom) {
         NSDictionary *theme = [store activeTheme];
         ApolloThemeFont font = ApolloThemeFontFromKey(theme[kApolloThemeFontKey]);
-        if (font != ApolloThemeFontSystem) [parts addObject:[NSString stringWithFormat:@"%@ font", ApolloThemeFontDetailName(font)]];
+        if (font != ApolloThemeFontSystem) [parts addObject:[ApolloThemeFontDetailName(font) stringByAppendingString:@" font"]];
         if ([theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]) [parts addObject:@"Custom text and separator colours enabled"];
         if ([theme[kApolloThemeVoteArrowsAccentKey] boolValue]) [parts addObject:@"Vote arrows use accent colour"];
     }
@@ -983,7 +983,7 @@ static NSString *SpacedThemeName(NSString *raw) {
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         if ([self isRecoveryState] && ip.row == 0) {
             cell.textLabel.text = @"Custom themes were disabled after a crash.";
-            cell.detailTextLabel.text = [NSString stringWithFormat:@"Last active: %@", [self activeThemeTitle]];
+            cell.detailTextLabel.text = [@"Last active: " stringByAppendingString:[self activeThemeTitle]];
             cell.detailTextLabel.numberOfLines = 0;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
             return cell;
@@ -2054,7 +2054,7 @@ static NSString *SpacedThemeName(NSString *raw) {
     ApolloThemeCardActivityItem *item = [[ApolloThemeCardActivityItem alloc] init];
     item.image = card;
     item.title = ([theme[@"name"] isKindOfClass:[NSString class]] && [theme[@"name"] length])
-        ? [NSString stringWithFormat:@"%@ — Apollo theme", theme[@"name"]] : @"Apollo theme";
+        ? [theme[@"name"] stringByAppendingString:@" — Apollo theme"] : @"Apollo theme";
     UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[item] applicationActivities:nil];
     UIView *anchor = [self.tableView cellForRowAtIndexPath:ip] ?: self.view;
     av.popoverPresentationController.sourceView = anchor;
@@ -2068,7 +2068,8 @@ static NSString *SpacedThemeName(NSString *raw) {
     NSData *data = [[self store] exportDataForTheme:theme];
     if (!data) { [self showError:@"Couldn't export that theme."]; return; }
     NSString *name = [[self store] exportFilenameForName:theme[@"name"]];
-    NSURL *tmp = [[NSURL fileURLWithPath:NSTemporaryDirectory()] URLByAppendingPathComponent:name];
+    NSURL *tmp = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+        URLByAppendingPathComponent:name isDirectory:NO];
     if (![data writeToURL:tmp atomically:YES]) { [self showError:@"Couldn't export that theme."]; return; }
     UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[tmp] applicationActivities:nil];
     UIView *src = anchor ?: self.view;

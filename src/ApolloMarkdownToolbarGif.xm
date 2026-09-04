@@ -1446,11 +1446,23 @@ static void ApolloMarkdownGifSetActiveComposeController(UIViewController *contro
 // image button was enabled on the promise of a link.
 static double sApolloCommentLinkUploadUntil = 0.0;
 static __weak UIViewController *sApolloCommentLinkArmedComposer = nil;
+// Auto mode: the window is armed in NATIVE mode when the subreddit is known to
+// allow image comments — the upload is forced onto Reddit's native media path
+// instead of the link host. Re-decided on every photo-button tap (the cache can
+// warm mid-composer), so a single mode flag rides the one shared window.
+static BOOL sApolloCommentUploadNativeMode = NO;
 static char kApolloCommentLinkToastShownKey;
 
 static void ApolloCommentLinkMarkUpload(UIViewController *composer) {
     sApolloCommentLinkUploadUntil = [NSDate timeIntervalSinceReferenceDate] + 1800.0;   // backstop only; scope = composer lifetime
     sApolloCommentLinkArmedComposer = composer;
+    sApolloCommentUploadNativeMode = NO;
+}
+
+static void ApolloCommentNativeMarkUpload(UIViewController *composer) {
+    sApolloCommentLinkUploadUntil = [NSDate timeIntervalSinceReferenceDate] + 1800.0;
+    sApolloCommentLinkArmedComposer = composer;
+    sApolloCommentUploadNativeMode = YES;
 }
 
 #ifdef __cplusplus
@@ -1458,12 +1470,21 @@ extern "C" {
 #endif
 BOOL ApolloCommentLinkUploadPending(void) {
     return sCommentLinkHost != CommentLinkHostOff &&
+           !sApolloCommentUploadNativeMode &&
            sApolloCommentLinkArmedComposer != nil &&   // weak: dies with the arming composer
+           [NSDate timeIntervalSinceReferenceDate] < sApolloCommentLinkUploadUntil;
+}
+BOOL ApolloCommentNativeUploadPending(void) {
+    return sCommentLinkHost != CommentLinkHostOff &&   // auto only exists while a link host is set
+           sCommentLinkPreferNative &&
+           sApolloCommentUploadNativeMode &&
+           sApolloCommentLinkArmedComposer != nil &&
            [NSDate timeIntervalSinceReferenceDate] < sApolloCommentLinkUploadUntil;
 }
 void ApolloCommentLinkClearUpload(void) {
     sApolloCommentLinkUploadUntil = 0.0;
     sApolloCommentLinkArmedComposer = nil;
+    sApolloCommentUploadNativeMode = NO;
 }
 void ApolloCommentLinkShowUploadedToast(NSString *hostName) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1602,9 +1623,34 @@ void ApolloMarkdownGifInstall(void) {
 - (void)cameraButtonTapped:(id)sender {
     if (sCommentLinkHost != CommentLinkHostOff) {
         UIViewController *composer = ApolloMarkdownGifActiveComposeController();
-        if (ApolloMarkdownGifResolveCommentSubreddit(composer).length > 0) {
-            ApolloCommentLinkMarkUpload(composer);
-            ApolloLog(@"[CommentLinkHost] Armed comment-editor upload window (host=%ld)", (long)sCommentLinkHost);
+        NSString *subreddit = ApolloMarkdownGifResolveCommentSubreddit(composer);
+        if (subreddit.length > 0) {
+            // Auto mode: force Reddit's native upload where the subreddit is
+            // KNOWN to allow image comments (inline images beat links); the link
+            // host handles "disallowed" and "unknown" — a plain link always
+            // posts, while a native comment in a gated subreddit is rejected at
+            // submit time. Decided per tap: the media-gating fetch fired when
+            // the composer opened, so the cache is warm in all but the very
+            // first cold-network tap, and a later tap picks up a warmed cache.
+            ApolloSubredditInfo *cached = sCommentLinkPreferNative
+                ? [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subreddit] : nil;
+            if (cached && cached.commentMediaInfoAvailable && cached.allowsImageComments) {
+                ApolloCommentNativeMarkUpload(composer);
+                ApolloLog(@"[CommentLinkHost] Auto: r/%@ allows image comments — forcing native Reddit upload", subreddit);
+            } else {
+                ApolloCommentLinkMarkUpload(composer);
+                if (sCommentLinkPreferNative) {
+                    BOOL known = cached && cached.commentMediaInfoAvailable;
+                    ApolloLog(@"[CommentLinkHost] Auto: r/%@ %@ — using link host (host=%ld)",
+                              subreddit, known ? @"disallows image comments" : @"comment media permissions unknown", (long)sCommentLinkHost);
+                    if (!known) {
+                        // Warm the cache so the next tap (or composer) can go native.
+                        [[ApolloSubredditInfoCache sharedCache] requestCommentMediaInfoForSubreddit:subreddit completion:^(__unused ApolloSubredditInfo *info) {}];
+                    }
+                } else {
+                    ApolloLog(@"[CommentLinkHost] Armed comment-editor upload window (host=%ld)", (long)sCommentLinkHost);
+                }
+            }
         } else {
             ApolloCommentLinkClearUpload();
         }

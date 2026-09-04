@@ -397,10 +397,9 @@ static NSTimeInterval const ApolloUserProfileImageNotFoundTTL = 15.0 * 60.0;
     // Encode + write on a dedicated serial IO queue, NOT on self.queue. This
     // runs after every info fetch / batch / follow toggle, and the JSON encode
     // (up to ~2000 entries) plus the synchronous atomic write would otherwise
-    // occupy self.queue — blocking the main-thread dispatch_sync in
-    // cachedInfoForUsername on the hot cell-layout path (a scroll hitch). `root`
-    // is an immutable snapshot of freshly-built dictionaries, safe off-queue;
-    // the serial IO queue keeps writes ordered so the newest snapshot wins.
+    // occupy self.queue and delay network-state mutations. `root` is an
+    // immutable snapshot of freshly-built dictionaries, safe off-queue; the
+    // serial IO queue keeps writes ordered so the newest snapshot wins.
     static dispatch_queue_t ioQueue;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ ioQueue = dispatch_queue_create("com.apollo.reborn.profilecache.io", DISPATCH_QUEUE_SERIAL); });
@@ -1258,8 +1257,10 @@ static BOOL ApolloImageHasAlphaChannel(UIImage *image) {
 
         NSString *path = [self cachePath];
         NSError *error = nil;
-        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
-            [[NSFileManager defaultManager] removeItemAtPath:path error:&error];
+        if (![[NSFileManager defaultManager] removeItemAtPath:path error:&error] &&
+            [error.domain isEqualToString:NSCocoaErrorDomain] &&
+            error.code == NSFileNoSuchFileError) {
+            error = nil;
         }
 
         ApolloLog(@"[UserAvatars] Cleared profile cache (info entries=%lu, removeError=%@)", (unsigned long)infoCount, error.localizedDescription ?: @"none");

@@ -19,12 +19,18 @@
 #import "ApolloAutoHideTabBar.h"
 #import "ApolloCommentVoteInsights.h"
 #import "ApolloCommon.h"
+#import "ApolloFloatingTabs.h"
+#import "ApolloGalleryImageLoader.h"
+#import "ApolloLinkPreviewFetcher.h"
+#import "ApolloTranslation.h"
+#import "ApolloWebTextDecoding.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "UIWindow+Apollo.h"
 #import "ipad/ApolloPaneSplitViewController.h"
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <mach/mach.h>
 
 @interface UITouch (ApolloSimDebugTap)
 - (void)setPhase:(UITouchPhase)phase;
@@ -1487,11 +1493,255 @@ static void ApolloSimDebugPerformShortcut(NSString *arguments) {
     ApolloLog(@"[SimDebugTap] shortcut: no scene delegate accepted the item");
 }
 
+void ApolloSubredditListDiagRearm(void);
+
+#pragma mark - gifmem probe (issue #1000)
+
+static double ApolloSimDebugFootprintMB(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return -1.0;
+    return info.phys_footprint / 1048576.0;
+}
+
+// Keeps the probe's view + image alive between samples.
+static UIImageView *sApolloSimDebugGIFView = nil;
+static UIImage *sApolloSimDebugGIFImage = nil;
+
+static void ApolloSimDebugSampleGIFMemory(NSInteger remaining, double baseline) {
+    ApolloLog(@"[gifmem] t+%lds footprint %.0f MB (+%.0f)",
+              (long)(6 - remaining), ApolloSimDebugFootprintMB(), ApolloSimDebugFootprintMB() - baseline);
+    if (remaining <= 0) {
+        [sApolloSimDebugGIFView removeFromSuperview];
+        sApolloSimDebugGIFView = nil;
+        sApolloSimDebugGIFImage = nil;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloLog(@"[gifmem] released: footprint %.0f MB (+%.0f)",
+                      ApolloSimDebugFootprintMB(), ApolloSimDebugFootprintMB() - baseline);
+        });
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ApolloSimDebugSampleGIFMemory(remaining - 1, baseline);
+    });
+}
+
+static void ApolloSimDebugMeasureGIFMemory(NSString *source) {
+    double baseline = ApolloSimDebugFootprintMB();
+    ApolloLog(@"[gifmem] baseline footprint %.0f MB, source %@", baseline, source);
+
+    void (^measure)(NSData *) = ^(NSData *data) {
+        if (data.length == 0) { ApolloLog(@"[gifmem] no bytes"); return; }
+        ApolloLog(@"[gifmem] %.1f MB of source bytes", data.length / 1048576.0);
+
+        UIWindow *window = nil;
+        for (UIWindow *candidate in ApolloAllWindows()) if (candidate.isKeyWindow) { window = candidate; break; }
+        window = window ?: ApolloAllWindows().firstObject;
+        if (!window) { ApolloLog(@"[gifmem] no window"); return; }
+
+        NSDate *start = NSDate.date;
+        ApolloGalleryDecodedImage *decoded = [ApolloGalleryImageLoader apollo_debugDecodeData:data];
+        if (!decoded) { ApolloLog(@"[gifmem] decode returned nil"); return; }
+        ApolloLog(@"[gifmem] decoded %.0fx%.0f in %.2fs, animated=%@",
+                  decoded.image.size.width, decoded.image.size.height,
+                  -[start timeIntervalSinceNow], decoded.animatedImage ? @"YES" : @"NO");
+
+        // Mounted exactly the way a viewer page mounts it, so the sample covers
+        // the frame traffic UIKit generates during playback and not just the
+        // decode.
+        Class viewClass = NSClassFromString(@"FLAnimatedImageView") ?: UIImageView.class;
+        UIImageView *view = [[viewClass alloc] initWithFrame:window.bounds];
+        if (decoded.animatedImage && [view respondsToSelector:@selector(setAnimatedImage:)]) {
+            [view setValue:decoded.animatedImage forKey:@"animatedImage"];
+        } else {
+            view.image = decoded.image;
+        }
+        sApolloSimDebugGIFImage = decoded.image;
+        double afterDecode = ApolloSimDebugFootprintMB();
+        ApolloLog(@"[gifmem] after build: footprint %.0f MB (+%.0f)", afterDecode, afterDecode - baseline);
+
+        view.contentMode = UIViewContentModeScaleAspectFit;
+        [window addSubview:view];
+        sApolloSimDebugGIFView = view;
+        ApolloLog(@"[gifmem] installed on screen, sampling for 6s…");
+        ApolloSimDebugSampleGIFMemory(6, baseline);
+    };
+
+    if ([source hasPrefix:@"http"]) {
+        NSURL *url = [NSURL URLWithString:source];
+        [[NSURLSession.sharedSession dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+            dispatch_async(dispatch_get_main_queue(), ^{ measure(data); });
+        }] resume];
+    } else {
+        measure([NSData dataWithContentsOfFile:source]);
+    }
+}
+
+// "scrollto Y" command support: pin the tallest on-screen scroll view (the
+// comments table on a thread) to a content offset, so a test can land on the
+// same comments every run — a synthesized flick's inertia varies run to run.
+static UIScrollView *ApolloSimDebugTallestScrollViewIn(UIView *view) {
+    UIScrollView *best = nil;
+    if ([view isKindOfClass:[UIScrollView class]] && !view.hidden && view.window) {
+        best = (UIScrollView *)view;
+    }
+    for (UIView *sub in view.subviews) {
+        UIScrollView *candidate = ApolloSimDebugTallestScrollViewIn(sub);
+        if (candidate && (!best || candidate.contentSize.height > best.contentSize.height)) {
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+static void ApolloSimDebugScrollTo(CGFloat y) {
+    UIScrollView *best = nil;
+    for (UIWindow *window in ApolloAllWindows()) {
+        if (window.hidden) continue;
+        UIScrollView *candidate = ApolloSimDebugTallestScrollViewIn(window);
+        if (candidate && (!best || candidate.contentSize.height > best.contentSize.height)) {
+            best = candidate;
+        }
+    }
+    if (!best) { ApolloLog(@"[SimDebugTap] scrollto: no scroll view"); return; }
+    CGFloat top = best.adjustedContentInset.top;
+    CGFloat maxY = MAX(-top, best.contentSize.height - best.bounds.size.height + best.adjustedContentInset.bottom);
+    CGFloat target = MIN(MAX(y - top, -top), maxY);
+    [best setContentOffset:CGPointMake(best.contentOffset.x, target) animated:NO];
+    ApolloLog(@"[SimDebugTap] scrollto %.0f -> offset %.0f (%@ content %.0f)",
+              y, target, NSStringFromClass([best class]), best.contentSize.height);
+}
+
+// "lpm on|off" command support: the simulator has no Battery settings pane,
+// so Low Power Mode can't be toggled there. Force -[NSProcessInfo
+// isLowPowerModeEnabled] instead and post the real power-state notification,
+// so the inline-GIF autoplay rules (which must ignore LPM — #634/#1004) and
+// anything else listening to the power state react exactly as on a device.
+// Swizzled by hand on the CONCRETE class of +[NSProcessInfo processInfo]
+// (swift-foundation hands back an _NSSwiftProcessInfo subclass on current
+// iOS, so a plain `%hook NSProcessInfo` never sees the call).
+static BOOL sApolloSimForceLowPowerMode = NO;
+static BOOL (*sApolloSimOrigIsLowPowerModeEnabled)(id, SEL) = NULL;
+
+static BOOL ApolloSimHookedIsLowPowerModeEnabled(id self, SEL _cmd) {
+    if (sApolloSimForceLowPowerMode) return YES;
+    return sApolloSimOrigIsLowPowerModeEnabled ? sApolloSimOrigIsLowPowerModeEnabled(self, _cmd) : NO;
+}
+
+static void ApolloSimInstallLowPowerModeOverride(void) {
+    Class cls = object_getClass(NSProcessInfo.processInfo);
+    Method m = class_getInstanceMethod(cls, @selector(isLowPowerModeEnabled));
+    if (!m) {
+        ApolloLog(@"[SimDebugTap] lpm override: no isLowPowerModeEnabled on %@", NSStringFromClass(cls));
+        return;
+    }
+    sApolloSimOrigIsLowPowerModeEnabled = (BOOL (*)(id, SEL))method_getImplementation(m);
+    method_setImplementation(m, (IMP)ApolloSimHookedIsLowPowerModeEnabled);
+    ApolloLog(@"[SimDebugTap] lpm override installed on %@", NSStringFromClass(cls));
+}
+
+static BOOL ApolloSimDebugHandleIntegratedMainCommand(NSString *contents) {
+    if ([contents hasPrefix:@"listdiag"]) {
+        ApolloSubredditListDiagRearm();
+        return YES;
+    }
+    if ([contents hasPrefix:@"gifmode "]) {
+        NSInteger mode = [[contents substringFromIndex:8] integerValue];
+        [NSUserDefaults.standardUserDefaults setInteger:mode forKey:UDKeyAutoplayInlineGIFs];
+        ApolloLog(@"[SimDebugTap] gifmode -> %ld", (long)mode);
+        return YES;
+    }
+    if ([contents hasPrefix:@"scrollto "]) {
+        ApolloSimDebugScrollTo([[contents substringFromIndex:9] doubleValue]);
+        return YES;
+    }
+    if ([contents hasPrefix:@"lpm "]) {
+        NSString *payload = [[contents substringFromIndex:4]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        sApolloSimForceLowPowerMode = [payload isEqualToString:@"on"];
+        [NSNotificationCenter.defaultCenter
+            postNotificationName:NSProcessInfoPowerStateDidChangeNotification
+                          object:NSProcessInfo.processInfo];
+        ApolloLog(@"[SimDebugTap] lpm -> %d (isLowPowerModeEnabled=%d)",
+                  sApolloSimForceLowPowerMode, NSProcessInfo.processInfo.isLowPowerModeEnabled);
+        return YES;
+    }
+    if ([contents hasPrefix:@"devvitjs "]) {
+        extern void ApolloDevvitDebugEvaluateJS(NSString *js);
+        ApolloDevvitDebugEvaluateJS([contents substringFromIndex:9]);
+        return YES;
+    }
+    if ([contents hasPrefix:@"devvitsweep"]) {
+        extern void ApolloDevvitDebugSweep(void);
+        ApolloDevvitDebugSweep();
+        return YES;
+    }
+    if ([contents hasPrefix:@"rotate "]) {
+        NSString *direction = [[contents substringFromIndex:7]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (@available(iOS 16.0, *)) {
+            UIInterfaceOrientationMask mask = [direction isEqualToString:@"landscape"]
+                ? UIInterfaceOrientationMaskLandscapeRight
+                : UIInterfaceOrientationMaskPortrait;
+            UIWindowScene *scene = ApolloAllWindows().firstObject.windowScene;
+            if (!scene) {
+                ApolloLog(@"[SimDebugTap] rotate: no window scene");
+                return YES;
+            }
+            UIWindowSceneGeometryPreferencesIOS *preferences =
+                [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:mask];
+            [scene requestGeometryUpdateWithPreferences:preferences errorHandler:^(NSError *error) {
+                ApolloLog(@"[SimDebugTap] rotate error: %@", error.localizedDescription);
+            }];
+            ApolloLog(@"[SimDebugTap] rotate -> %@", direction);
+        } else {
+            ApolloLog(@"[SimDebugTap] rotate: needs iOS 16+");
+        }
+        return YES;
+    }
+    if ([contents hasPrefix:@"gifmem "]) {
+        NSString *argument = [[contents substringFromIndex:7]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        ApolloSimDebugMeasureGIFMemory(argument);
+        return YES;
+    }
+    if ([contents hasPrefix:@"linkpreview "]) {
+        NSString *urlString = [[contents substringFromIndex:12]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSURL *previewURL = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
+        if (!previewURL) {
+            ApolloLog(@"[SimDebugTap] malformed linkpreview url: %@", urlString);
+            return YES;
+        }
+        [ApolloLinkPreviewFetcher requestPreviewForURL:previewURL
+                                            completion:^(ApolloLinkPreview *preview) {
+            ApolloLog(@"[SimDebugTap] linkpreview %@\n  site=%@\n  title=%@\n  desc=%@\n  image=%@",
+                      urlString, preview.siteName ?: @"(nil)", preview.title ?: @"(nil)",
+                      preview.desc ?: @"(nil)", preview.imageURL.absoluteString ?: @"(nil)");
+        }];
+        return YES;
+    }
+    if ([contents hasPrefix:@"translate "]) {
+        NSString *spec = [[contents substringFromIndex:10]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        ApolloTranslationDebugProbe(spec);
+        return YES;
+    }
+    if ([contents hasPrefix:@"floattab "]) {
+        NSString *payload = [[contents substringFromIndex:9]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        ApolloFloatingTabsDebugCommand(payload);
+        return YES;
+    }
+    return NO;
+}
+
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *contents = [NSString stringWithContentsOfFile:kApolloSimTapFile
                                                        encoding:NSUTF8StringEncoding error:nil];
+        if (ApolloSimDebugHandleIntegratedMainCommand(contents)) return;
         if ([contents hasPrefix:@"insetbottom "]) {
             ApolloSimDebugForceBottomInset([[contents substringFromIndex:12] doubleValue]);
             return;
@@ -1812,12 +2062,17 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
 }
 
 %ctor {
+    ApolloSimInstallLowPowerModeOverride();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
         ApolloSimDebugTapNotification, CFSTR("apollofix.debugtap"), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
     ApolloLog(@"[SimDebugTap] listening for apollofix.debugtap");
     ApolloLog(@"[CommentInsights][parser] self-tests %@",
               ApolloCommentVoteInsightsRunParserSelfTests() ? @"passed" : @"FAILED");
+    NSString *charsetFailure = nil;
+    BOOL charsetOK = ApolloWebTextDecodingRunSelfTests(&charsetFailure);
+    ApolloLog(@"[WebTextDecoding] self-tests %@", charsetOK ? @"passed"
+              : [NSString stringWithFormat:@"FAILED at \"%@\"", charsetFailure]);
 }
 
 #endif

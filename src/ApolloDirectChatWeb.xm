@@ -3197,6 +3197,16 @@ void ApolloModernChatControllerSetInboxVisible(UIViewController *controller, BOO
     }
 }
 
+BOOL ApolloModernChatControllerIsOnConversationRoute(UIViewController *controller) {
+    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return NO;
+    ApolloDirectChatWebViewController *chatController =
+        (ApolloDirectChatWebViewController *)controller;
+    // lastObservedWebPath tracks the URL KVO (covers same-document SPA
+    // transitions); fall back to the live URL before the first observation.
+    NSString *path = chatController.lastObservedWebPath ?: (chatController.webView.URL.path ?: @"");
+    return [chatController apollo_isChatConversationPath:path];
+}
+
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller) {
     if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return;
     ApolloDirectChatWebViewController *chatController =

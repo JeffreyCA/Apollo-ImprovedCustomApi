@@ -876,14 +876,20 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     [provider loadObjectOfClass:[UIImage class] completionHandler:^(__kindof id<NSItemProviderReading> object, NSError *error) {
         if (error || ![object isKindOfClass:[UIImage class]]) return;
         UIImage *image = (UIImage *)object;
+        // NSItemProvider documents that load completions use an internal queue,
+        // so crop/encode/write here and return only UIKit work to main.
+        NSError *saveError = nil;
+        BOOL saved = NO;
+        if (assetKind == ApolloSubredditHeaderAssetKindIcon) {
+            saved = [[ApolloSubredditCustomIconCache sharedCache] saveIcon:image
+                                                               forSubreddit:subredditName
+                                                                       error:&saveError];
+        } else {
+            saved = [[ApolloSubredditCustomBannerCache sharedCache] saveBanner:image
+                                                                    forSubreddit:subredditName
+                                                                            error:&saveError];
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSError *saveError = nil;
-            BOOL saved = NO;
-            if (assetKind == ApolloSubredditHeaderAssetKindIcon) {
-                saved = [[ApolloSubredditCustomIconCache sharedCache] saveIcon:image forSubreddit:subredditName error:&saveError];
-            } else {
-                saved = [[ApolloSubredditCustomBannerCache sharedCache] saveBanner:image forSubreddit:subredditName error:&saveError];
-            }
             if (saved) {
                 if (header && ApolloSubredditNamesEqual(header.subredditName, subredditName)) {
                     ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName];
@@ -1177,6 +1183,14 @@ static BOOL ApolloSubredditPostsTypeTag(id viewController, uint8_t *tag) {
 // Non-static: ApolloGalleryMenu.xm needs the same "is this really a single
 // subreddit, and which one" answer to decide whether the subreddit "..." menu
 // gets a Gallery View row.
+// Exported for ApolloGalleryMenu.xm's home-feed gate: the raw PostsType case
+// tag, or -1 when the ivar can't be read on this binary.
+NSInteger ApolloPostsTypeTagFromViewController(UIViewController *viewController) {
+    uint8_t tag = 0;
+    if (!viewController || !ApolloSubredditPostsTypeTag(viewController, &tag)) return -1;
+    return (NSInteger)tag;
+}
+
 NSString *ApolloSubredditNameFromViewController(UIViewController *viewController) {
     if (!viewController) return nil;
 
@@ -1205,6 +1219,44 @@ NSString *ApolloSubredditNameFromViewController(UIViewController *viewController
     }
 
     return nil;
+}
+
+// The slug for one of Apollo's three pseudo-subreddit feeds — Popular Posts,
+// All Posts, Moderator Posts — and nil for everything else, including real
+// subreddits.
+//
+// PostsType carries all three as ordinary `.subreddit` cases, so the tag alone
+// can't separate them from a real subreddit; ApolloNormalizedSubredditName is
+// what rejects them, because a pseudo-subreddit has no banner/icon/sidebar for
+// the header feature to install. Gallery View wants the opposite: Reddit serves
+// all three from ordinary listing paths (/r/popular, /r/all, /r/mod), so the
+// grid needs nothing new once the slug is known.
+//
+// The slug comes from navigationItem.title, which Apollo sets from the
+// PostsType payload rather than the friendly display name. Measured in the sim
+// (2026-08-17): the moderator feed's visible title reads "Modded Subs" while
+// navigationItem.title is "Mod", matching its own "Search r/Mod" placeholder.
+// `currentSubreddit` stays nil on all three — Apollo never fetches an about for
+// them — so it can't be the source here the way it is for a real subreddit.
+NSString *ApolloSpecialFeedSlugFromViewController(UIViewController *viewController) {
+    if (!viewController) return nil;
+
+    uint8_t tag = 0;
+    if (!ApolloSubredditPostsTypeTag(viewController, &tag)) return nil;
+    if (tag != kApolloPostsTypeSubreddit) return nil;
+
+    NSString *title = viewController.navigationItem.title;
+    if (title.length == 0) title = viewController.title;
+    NSString *slug = [title stringByTrimmingCharactersInSet:
+                      [NSCharacterSet whitespaceAndNewlineCharacterSet]].lowercaseString;
+    if ([slug hasPrefix:@"r/"]) slug = [slug substringFromIndex:2];
+
+    static NSSet<NSString *> *specialSlugs = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        specialSlugs = [NSSet setWithObjects:@"popular", @"all", @"mod", nil];
+    });
+    return [specialSlugs containsObject:slug] ? slug : nil;
 }
 
 // Resolve the canonical `/user/<owner>/m/<name>` path for a multireddit feed.

@@ -396,9 +396,9 @@ static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarCont
     // Had this required `tabs`, the alternative would have been rebuilding
     // Apollo's tab model by hand, which is a far larger and more fragile change.
     //
-    // iOS 17 and earlier have no tab sidebar. Those keep the floating tab bar
-    // beside the two-column panes, which is a coherent, if less native, layout —
-    // the feature degrades rather than becoming unavailable.
+    // ApolloPaneLayoutSupported() gates production installation to iPadOS 18+
+    // so the experiment always gets this navigation model. Keep the fallback
+    // for defensive safety if this function is ever invoked directly.
     if (@available(iOS 18.0, *)) {
         UITabBarControllerMode originalMode = tabBarController.mode;
         @try {

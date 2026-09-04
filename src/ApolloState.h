@@ -23,14 +23,46 @@ extern BOOL sShowRecentlyReadThumbnails;
 extern BOOL sFeedTextPostThumbnails;
 // Default-on large-feed carousel for Reddit-native multi-image galleries.
 extern BOOL sFeedGalleryCarousel;
+// Default-on: at the carousel's first/last image, swiping past the edge hands
+// the drag to Apollo's swipe-back/forward navigation instead of rubber-banding.
+extern BOOL sFeedGalleryEdgeSwipeNav;
+// Default-on: scrolling the feed a few posts past where you swiped back drops
+// Apollo's forward-swipe memory (ApolloForwardSwipeExpiry.xm).
+extern BOOL sForwardSwipeForgetAfterScrolling;
 // Default-on fullscreen-media comments pane, opened by upward flick or button.
 extern BOOL sSwipeUpForComments;
+// Opt-in (default OFF) live interactive Devvit posts (embedded web widget).
+extern BOOL sDevvitInteractivePosts;
+// Sub-toggle: Devvit widgets in large-mode feed cards too (vs comments only).
+// Default on, but only consulted while the master toggle is on.
+extern BOOL sDevvitFeedWidgets;
+// Opt-in (default OFF) chat-heads-style floating post tabs (up to 5 bubbles
+// that keep posts open). See ApolloFloatingTabs.xm.
+extern BOOL sFloatingPostTabs;
+// Sub-toggle: bubbles released near each other magnetize into a pile (drag
+// moves the pile, tap fans it apart). Default on; only consulted while the
+// master toggle is on.
+extern BOOL sFloatingPostTabsMagnet;
+// Sub-toggle: hold a bubble for a peek-and-pop snapshot preview (release
+// opens, slide away cancels). Default on; consulted while the master is on.
+extern BOOL sFloatingPostTabsPreview;
 extern NSInteger sPreferredGIFFallbackFormat;
 
 extern NSInteger sReadPostMaxCount;
 
 // 0 = Default (off), 1 = Remember from Full Screen, 2 = Always
 extern NSInteger sUnmuteCommentsVideos;
+
+// "Unmute Videos in Feed" — how feed videos sound when they autoplay while
+// scrolling. 0 = Never (default, stock behaviour), 1 = Remember (mirror the
+// user's last manual mute/unmute of a feed video, stored in
+// UDKeyFeedVideosUnmutedMemory), 2 = Always. See ApolloVideoUnmute.xm.
+extern NSInteger sUnmuteFeedVideos;
+
+// "Feed Video Scrubber" — when ON, press-and-hold the progress bar at the
+// bottom of a feed video and slide to scrub it in place; taps keep opening the
+// fullscreen viewer as stock. Default OFF. See ApolloFeedVideoScrubber.xm.
+extern BOOL sFeedVideoScrubber;
 
 // "Hold for Video Speed": when ON (default), press-and-hold the right side of a
 // fullscreen video to play it at sVideoHoldSpeed while held; release restores the
@@ -226,8 +258,26 @@ BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController);
 // cluster; unrelated windows and navigation stacks are never traversed.
 void ApolloSubredditRequestTitleRelayout(UINavigationItem *navigationItem);
 extern BOOL sModernSubredditDividers;
-// Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
+// Master toggle for subreddit list polish; Feed Shortcuts remains independent.
 extern BOOL sSubredditListEnhancements;
+typedef NS_ENUM(NSInteger, ApolloSubredditFeedIconStyle) {
+    ApolloSubredditFeedIconStyleClassic = 0,
+    ApolloSubredditFeedIconStyleCircle = 1,
+    ApolloSubredditFeedIconStyleTinted = 2,
+    ApolloSubredditFeedIconStyleSoftTile = 3,
+    ApolloSubredditFeedIconStyleSolidTile = 4,
+};
+typedef NS_ENUM(NSInteger, ApolloSubredditFeedLayout) {
+    ApolloSubredditFeedLayoutRows = 0,
+    ApolloSubredditFeedLayoutGrid = 1,
+    ApolloSubredditFeedLayoutSideBySide = 2,
+    ApolloSubredditFeedLayoutIconDock = 3,
+};
+// Home / Popular / All / Moderator icon appearance and arrangement. Independent
+// of the subreddit-list polish master.
+extern NSInteger sSubredditFeedIconStyle;
+extern NSInteger sSubredditFeedLayout;
+
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;
@@ -361,10 +411,10 @@ extern NSInteger sLinkPreviewCardColor;
 // the packed snapshot below instead. Both are updated together via
 // ApolloSetLinkPreviewCardColorHex().
 extern NSString *sLinkPreviewCardColorHex;
-// Render-safe snapshot of the card color, readable from any thread (an aligned
-// 32-bit volatile load is atomic on arm64). 0 = Default; otherwise
+// Render-safe snapshot of the card color, readable from any thread through the
+// __atomic load/store helpers. 0 = Default; otherwise
 // (1<<24) | (R<<16) | (G<<8) | B.
-extern volatile uint32_t sLinkPreviewCardColorPacked;
+extern uint32_t sLinkPreviewCardColorPacked;
 
 // Media upload host selection. Imgur is the default; Reddit uses Apollo's signed-in
 // session to upload directly to Reddit's media storage; ImgChest uploads to
@@ -388,6 +438,33 @@ typedef NS_ENUM(NSInteger, CommentLinkHost) {
     CommentLinkHostImgChest = 2,
 };
 extern NSInteger sCommentLinkHost;
+// Auto mode (UDKeyCommentLinkPreferNative): comment images go to Reddit's native
+// upload where the subreddit allows image comments; the link host is only the
+// fallback. Consulted at photo-button arming time in ApolloMarkdownToolbarGif.xm.
+extern BOOL sCommentLinkPreferNative;
+
+// Share Link Host: rewrites outgoing Reddit URLs in Apollo share sheets. Default
+// preserves Apollo's original reddit.com links; Old Reddit/vxReddit swap only
+// the host/scheme while preserving the path and query.
+typedef NS_ENUM(NSInteger, ShareLinkHost) {
+    ShareLinkHostDefault = 0,
+    ShareLinkHostOldReddit = 1,
+    ShareLinkHostVXReddit = 2,
+    ShareLinkHostFXReddit = 3,
+};
+// extern "C" so the ObjC++ (.xm) caller in ApolloShareAsImageLink.xm and the
+// ObjC (.m) definitions in ApolloState.m agree on the unmangled symbol name.
+#ifdef __cplusplus
+extern "C" {
+#endif
+// nil for ShareLinkHostDefault — callers keep Apollo's original host.
+NSString *ApolloShareLinkHostDomain(ShareLinkHost host);
+// Settings-facing label for the picker row and its detail text.
+NSString *ApolloShareLinkHostDisplayName(ShareLinkHost host);
+#ifdef __cplusplus
+}
+#endif
+extern NSInteger sShareLinkHost;
 
 // Most recently observed Reddit bearer token, captured from outgoing Authorization
 // headers. Used by the native Reddit image upload path. nil if Apollo hasn't made an
@@ -402,9 +479,11 @@ extern BOOL sShowTranslationTitleDetails;
 extern BOOL sTranslationMarkerUseThemeColor;
 extern BOOL sTranslatePostTitles;
 extern NSString *sTranslationTargetLanguage;
-extern NSString *sTranslationProvider; // @"google", @"libre", or @"apple"
+extern NSString *sTranslationProvider; // @"google", @"libre", @"apple", or @"microsoft"
 extern NSString *sLibreTranslateURL;
 extern NSString *sLibreTranslateAPIKey;
+extern NSString *sMicrosoftTranslateAPIKey;
+extern NSString *sMicrosoftTranslateRegion;
 // Lowercased 2-letter language codes the user has opted out of translating.
 extern NSArray<NSString *> *sTranslationSkipLanguages;
 // Redirects Apollo's own Translate button to iOS's on-device Translate sheet
@@ -490,6 +569,8 @@ extern BOOL sPiPSkipButtons;
 extern NSInteger sPiPSkipSeconds;
 extern BOOL sPiPProgressBar;
 
+// Native NSFW media blur override: 0 follow Reddit setting, 1 always, 2 never.
+extern NSInteger sNSFWBlurOverride;
 // Tag filter feature (NSFW / Spoiler).
 extern BOOL sTagFilterEnabled;
 extern NSString *sTagFilterMode;          // @"hide" or @"blur"

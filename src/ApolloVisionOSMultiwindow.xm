@@ -284,6 +284,25 @@ static NSURL *ApolloActiveDeepLink(void) {
 
 #pragma mark - New-window delivery
 
+// Diagnostics must describe the route without retaining subreddit names,
+// post IDs, comment IDs, usernames, or arbitrary query strings. Those values
+// are necessary for delivery but not for understanding whether scene routing
+// succeeded.
+static NSString *ApolloPrivateDestinationKind(NSURL *url) {
+    NSString *host = url.host.lowercaseString ?: @"";
+    NSArray<NSString *> *components = url.pathComponents;
+    if ([host hasSuffix:@"reddit.com"]) {
+        if ([components containsObject:@"comments"]) return @"reddit-post";
+        if ([components containsObject:@"r"]) return @"reddit-community";
+        if ([components containsObject:@"user"] || [components containsObject:@"u"]) {
+            return @"reddit-profile";
+        }
+        return @"reddit-root";
+    }
+    return [url.scheme.lowercaseString isEqualToString:@"apollo"]
+        ? @"apollo-route" : @"external-web";
+}
+
 // Hand a URL to a scene through Apollo's handoff entry point. The activity type
 // is the Foundation browsing-web constant, which is the type Apollo's activity
 // handler gates its webpageURL branch on.
@@ -297,7 +316,8 @@ static void ApolloDeliverURLToScene(UIWindowScene *scene, NSURL *url) {
     NSUserActivity *activity =
         [[NSUserActivity alloc] initWithActivityType:NSUserActivityTypeBrowsingWeb];
     activity.webpageURL = url;
-    ApolloLog(@"[VisionOSMultiwindow] handing %@ to the new scene", url.absoluteString);
+    ApolloLog(@"[VisionOSMultiwindow] handing destination=%@ to the new scene",
+              ApolloPrivateDestinationKind(url));
     [delegate scene:scene continueUserActivity:activity];
 }
 
@@ -306,8 +326,8 @@ static void ApolloDeliverURLToScene(UIWindowScene *scene, NSURL *url) {
 // unreliable; polling connectedScenes cannot miss.
 static void ApolloAwaitNewScene(NSHashTable<UIScene *> *existing, NSURL *url, int attemptsLeft) {
     if (attemptsLeft <= 0) {
-        ApolloLog(@"[VisionOSMultiwindow] no new scene appeared within 8s; %@ not delivered",
-                  url.absoluteString);
+        ApolloLog(@"[VisionOSMultiwindow] no new scene appeared within 8s; destination=%@ not delivered",
+                  ApolloPrivateDestinationKind(url));
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),

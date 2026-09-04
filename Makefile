@@ -45,10 +45,12 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAISummary.xm \
     $(SRC_DIR)/ApolloAICloudBridge.m \
     $(SRC_DIR)/ApolloAutoHideMetaFeeds.xm \
+    $(SRC_DIR)/ApolloDevvitPosts.xm \
     $(SRC_DIR)/ApolloWhatsNew.xm \
     $(WHATS_NEW_GEN_M) \
     $(SRC_DIR)/Tweak.xm \
     $(SRC_DIR)/ApolloCommon.m \
+    $(SRC_DIR)/ApolloWebTextDecoding.m \
     $(SRC_DIR)/ApolloMemoryDiagnostics.m \
     $(SRC_DIR)/settings/ApolloSettingsTableViewController.m \
     $(SRC_DIR)/settings/ApolloSettingsForm.m \
@@ -56,6 +58,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/settings/ApolloBackupRestore.m \
     $(SRC_DIR)/settings/ApolloThanksToViewController.m \
     $(SRC_DIR)/settings/ApolloBuyUsACoffeeViewController.m \
+    $(SRC_DIR)/settings/ApolloWallpaperViewerViewController.m \
+    $(SRC_DIR)/settings/ApolloWallpapersViewController.m \
     $(SRC_DIR)/settings/ApolloReportViewController.m \
     $(SRC_DIR)/settings/ApolloSettingsRouter.m \
     $(SRC_DIR)/settings/ApolloSettingsSearch.m \
@@ -64,6 +68,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloNotificationBackend.m \
     $(SRC_DIR)/ApolloUsageHeartbeat.m \
     $(SRC_DIR)/ApolloPushNotifications.m \
+    $(SRC_DIR)/ApolloLiquidGlassIconIDs.m \
     $(SRC_DIR)/ApolloBarkNotifications.m \
     $(SRC_DIR)/ApolloChatUnreadPoller.m \
     $(SRC_DIR)/ApolloUserProfileCache.m \
@@ -74,6 +79,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloImmersiveHeaderBackground.m \
     $(SRC_DIR)/ApolloIdentityHeaderLayout.m \
     $(SRC_DIR)/ApolloUserAvatars.xm \
+    $(SRC_DIR)/ApolloScrapeWebView.m \
     $(SRC_DIR)/ApolloProfileSocialLinks.m \
     $(SRC_DIR)/ApolloBadgeBookCatalog.m \
     $(SRC_DIR)/ApolloBadgeBookScraper.m \
@@ -89,10 +95,12 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloGalleryViewController.m \
     $(SRC_DIR)/ApolloGalleryVideoExport.xm \
     $(SRC_DIR)/ApolloGalleryMenu.xm \
+    $(SRC_DIR)/ApolloGalleryOrientation.xm \
     $(SRC_DIR)/ApolloBannedProfile.xm \
     $(SRC_DIR)/ApolloImageUploadHost.xm \
     $(SRC_DIR)/ApolloPhotoPostComposerScrollFix.xm \
     $(SRC_DIR)/ApolloMarkdownToolbarGif.xm \
+    $(SRC_DIR)/ApolloComposerToolbarTint.xm \
     $(SRC_DIR)/ApolloMarkdownBodyCleanup.xm \
     $(SRC_DIR)/ApolloGiphyClient.m \
     $(SRC_DIR)/GiphyPickerViewController.m \
@@ -110,6 +118,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloMediaAutoplay.m \
     $(SRC_DIR)/ApolloCommentsCollapse.xm \
     $(SRC_DIR)/ApolloInboxCommentScroll.xm \
+    $(SRC_DIR)/ApolloFindInComments.xm \
     $(SRC_DIR)/ApolloStatsRowTouch.xm \
     $(SRC_DIR)/ApolloCommentVoteFlicker.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \
@@ -137,10 +146,12 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloProgressiveBlur.xm \
     $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
+    $(SRC_DIR)/ApolloProfileMoreMenu.xm \
     $(SRC_DIR)/ApolloHiddenContentData.m \
     $(SRC_DIR)/ApolloHiddenContentViewController.m \
     $(SRC_DIR)/ApolloHiddenContentMenu.xm \
     $(SRC_DIR)/ApolloHideLinksBatchFix.xm \
+    $(SRC_DIR)/ApolloSavedItemsDeduplicator.m \
     $(SRC_DIR)/ApolloSavedCategories.xm \
     $(SRC_DIR)/ApolloSwiftIvarBridge.swift \
     $(SRC_DIR)/ApolloUserFlair.xm \
@@ -148,6 +159,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFlairColors.xm \
     $(SRC_DIR)/ApolloNativeActionMenus.xm \
     $(SRC_DIR)/ApolloContextMenuPreviewTheme.xm \
+    $(SRC_DIR)/ApolloActionMenu.xm \
     $(SRC_DIR)/ApolloHostedVideo.m \
     $(SRC_DIR)/ApolloSportsClipResolver.m \
     $(SRC_DIR)/ApolloSportsClips.xm \
@@ -161,15 +173,21 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAppleTranslateSheet.swift \
     $(SRC_DIR)/ApolloAppleTranslateSheet.xm \
     $(SRC_DIR)/ApolloVideoUnmute.xm \
+    $(SRC_DIR)/ApolloFeedVideoScrubber.xm \
+    $(SRC_DIR)/ApolloForwardSwipeExpiry.xm \
     $(SRC_DIR)/ApolloVideoSwipeFix.xm \
     $(SRC_DIR)/ApolloVideoPlaybackSpeed.xm \
     $(SRC_DIR)/ApolloVideoHoldSpeed.xm \
     $(SRC_DIR)/ApolloPictureInPicture.xm \
+    $(SRC_DIR)/ApolloFloatingTabs.xm \
     $(SRC_DIR)/ApolloMediaPreviewErrorFix.xm \
+    $(SRC_DIR)/ApolloFeedShortcutsAppearance.m \
     $(SRC_DIR)/ApolloSubredditIndexPolish.xm \
+    $(SRC_DIR)/ApolloSubredditListLaunchSettle.xm \
     $(SRC_DIR)/ApolloQuickActions.xm \
     $(SRC_DIR)/ApolloHideModSubreddits.xm \
     $(SRC_DIR)/ApolloMultiredditEdit.xm \
+    $(SRC_DIR)/ApolloFollowingSection.xm \
     $(SRC_DIR)/ApolloSubredditSidebar.xm \
     $(SRC_DIR)/ApolloTagFilters.xm \
     $(SRC_DIR)/ApolloThemeTokens.m \
@@ -190,6 +208,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloThemeShareImage.m \
     $(SRC_DIR)/ApolloThemeQRScanViewController.m \
     $(SRC_DIR)/ApolloSearchInPlace.xm \
+    $(SRC_DIR)/ApolloSearchNativeBar.xm \
+    $(SRC_DIR)/ApolloJumpBarSuggestionTint.xm \
     $(SRC_DIR)/ApolloSearchHeaderOverlapFix.xm \
     $(SRC_DIR)/ApolloSearchTabFixes.xm \
     $(SRC_DIR)/ApolloImageChestResolver.m \
@@ -226,6 +246,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
     $(SRC_DIR)/settings/CustomAPIViewController.m \
     $(SRC_DIR)/settings/ApolloSubredditLayoutViewController.m \
+    $(SRC_DIR)/settings/ApolloSubredditSectionsViewController.m \
     $(SRC_DIR)/settings/ApolloAISettingsViewController.m \
     $(SRC_DIR)/settings/ApolloDeletedCommentsSettingsViewController.m \
     $(SRC_DIR)/settings/ApolloProfileLayoutViewController.m \
@@ -309,6 +330,9 @@ ApolloReborn_CFLAGS += \
 ApolloReborn_LIBRARIES += c++
 
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
+ApolloReborn_BUNDLE_RESOURCES = \
+    assets/bark-icons/low-battery.png \
+    assets/bark-icons/palette.png
 
 # Temporary theme-RE instrumentation (theme builder spike). Opt-in only:
 #   APOLLO_THEME_RE=1 scripts/run-in-sim.sh

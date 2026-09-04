@@ -1,6 +1,6 @@
 # iPad Pane Layout PR #886 — Implementation and Verification Tracker
 
-Reviewed branch: `je/ipad-pane-layout`  
+Reviewed branch: `je/ipad-pane-layout`
 Review baseline: `5f6ea269d14904d02817d4335ef2535e708b0d70`
 
 This tracked file is the source of truth for taking the experimental iPad pane layout
@@ -519,27 +519,50 @@ not by the numbering in the review report.
     `git diff --check`, and the pinned iOS 26 device build passed; package:
     `com.apollo.reborn_3.5.1-15+debug_iphoneos-arm.deb`.
 
-- [ ] **24 — Correct pre-iOS 18 feature copy and fallback behavior.**
+- [x] **24 — Correct pre-iOS 18 feature copy and fallback behavior.**
   Use availability-specific copy or gate the experiment if the retained tab-bar
   layout cannot meet the feature promise.
   - Simulator coverage: current runtime copy/gating.
   - Device/runtime gate: iPadOS 15 and 17.
+  - Evidence: production support is now explicitly gated to iPadOS 18+, where
+    the system tab sidebar exists. The Settings row uses the same support
+    predicate, calls the feature experimental in both title and detail copy,
+    and is absent on unsupported runtimes. Older iPads retain Apollo's native
+    hierarchy instead of receiving a layout that does not match the promise.
 
-- [ ] **25 — Make PiP bounds respect actual tab-bar/sidebar visibility.**
+- [!] **25 — Make PiP bounds respect actual tab-bar/sidebar visibility.**
   Use visible intersection/presentation mode instead of `tabBar.window` alone.
   - Focused simulator test: visible and hidden tab bar, sidebar, compact mode,
     and videos intersecting the lower edge; real PiP remains a device gate.
+  - Evidence: the midpoint test now intersects the tab bar with the active
+    window and requires it to be visible, opaque, attached to that window, and
+    covering the bottom edge at the video's horizontal midpoint. Hidden,
+    translated, top-positioned, and side-only tab chrome no longer subtracts a
+    phantom full-width bottom inset. The simulator build passed; real PiP and a
+    playing-video lower-edge matrix remain device coverage.
 
-- [ ] **26 — Route actions to the correct foreground scene.**
+- [!] **26 — Route actions to the correct foreground scene.**
   Prefer the originating scene and foreground-active key scene over unordered
   `connectedScenes` enumeration.
   - Focused simulator test: two simulated windows/scenes with distinct selected
     tabs and stacks; route from each and verify isolation.
+  - Evidence: common tab discovery now accepts an originating UIWindowScene and
+    otherwise deterministically prefers a foreground-active key scene. Scene
+    URL callbacks preserve that scene through delayed retries and Settings or
+    mailbox routing. A warm Settings route selected tab 4 and placed Theme
+    Manager in its detail column with no hierarchy warning. Apollo's iPad build
+    exposes one scene here, so two-window isolation remains a visionOS/external-
+    display gate.
 
-- [ ] **27 — Redact full Reddit destinations from diagnostics.**
+- [!] **27 — Redact full Reddit destinations from diagnostics.**
   Log route type and privacy-safe identifiers rather than full URLs.
   - Focused simulator test: exercise every VisionOS/multiwindow route and inspect
     exported `apollofix` logs for subreddit/post/comment URL leakage.
+  - Evidence: multiwindow delivery and timeout logs now record only a coarse
+    destination kind (`reddit-post`, `reddit-community`, `reddit-profile`,
+    `reddit-root`, `apollo-route`, or `external-web`). A static scan found no
+    remaining full-URL log in the pane or multiwindow implementation. End-to-end
+    visionOS window creation is still platform-gated.
 
 ## Additional release gates
 
@@ -944,3 +967,37 @@ entry if a later regression requires reopening and re-verifying a task.
   iPad simulator, `git diff --check` passed, and `make package` passed against
   the pinned iOS 26 device SDK / iOS 14 deployment target. Package:
   `com.apollo.reborn_3.5.1-15+debug_iphoneos-arm.deb`.
+
+### Tasks 24–27 and main integration — 2026-09-03 — baseline `d4c0f70` + task working tree
+
+- Main integration: merged current `main`, retained both the pane simulator
+  harness and all newer main-only diagnostics, and reconciled the Settings
+  information-architecture changes. Main's current native search/header work
+  also removed the stale top-inset overlap seen on the unmerged branch.
+- Compatibility/privacy hardening: limited the opt-in to iPadOS 18+, made its
+  experimental status explicit, changed PiP bottom-occlusion detection to use
+  real visible geometry, made custom URL/mailbox/Settings routes scene-scoped,
+  and replaced multiwindow URL logging with coarse destination kinds.
+- Simulator matrix: loaded the credential-bearing backup on iPad mini, 11-inch,
+  and 13-inch iPadOS 27 simulators. Portrait and landscape rendered aligned
+  primary/detail navigation and search chrome. A real Home post stayed selected
+  in primary while Comments opened in detail. Two populated compact/regular
+  cycles retained both columns and ended with `PaneLayoutPassTest pass=1`; the
+  lazy-load probe reported `loadedPaneCount=1 attachedPaneCount=1 pass=1`, while
+  the all-tabs run reported five loaded panes and one attached pane.
+- Integration probes: the pane-only `loadstatus`, `panestatus`, and compact
+  commands still worked, as did main's `floattab` command. A warm
+  `apollo://reborn/settings/theme-manager` route selected Settings and opened
+  Theme Manager in detail. That route exposed a UIKit visibleCells-during-update
+  assertion in the newly merged Settings surface propagation; deferring the
+  propagation until the table committed removed the assertion on rerun.
+- Visual evidence: `.sim/pr886-merged-mini-settings.png`,
+  `.sim/pr886-merged-11-final.png`, `.sim/pr886-merged-13-portrait.png`,
+  `.sim/pr886-merged-13-landscape.png`,
+  `.sim/pr886-merged-13-after-compact-cycles.png`, and
+  `.sim/pr886-merged-13-scene-route-fixed.png`.
+- Remaining gates: real PiP, two simultaneous scenes, visionOS window creation,
+  notification/Handoff/Siri device delivery, Stage Manager continuous resizing,
+  external display, full accessibility/pointer coverage, and the performance
+  soak remain explicit experimental-release follow-ups rather than claims made
+  by this simulator pass.

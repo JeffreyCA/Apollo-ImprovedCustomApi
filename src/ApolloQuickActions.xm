@@ -137,15 +137,16 @@ static BOOL ApolloQuickActionsOpenHomeFeed(id tabBarController) {
     }
 }
 
-static BOOL ApolloQuickActionsPerformNow(NSString *action) {
-    id tabBarController = ApolloMainTabBarController();
+static BOOL ApolloQuickActionsPerformNow(NSString *action, UIWindowScene *originatingScene) {
+    id tabBarController = ApolloMainTabBarControllerForScene(originatingScene);
     if (!tabBarController) {
         return NO;
     }
 
     // "settings/<route-id>" pushes a Reborn settings screen (deep link).
     if ([action hasPrefix:@"settings/"]) {
-        return ApolloSettingsRouteOpenNow([action substringFromIndex:@"settings/".length]);
+        return ApolloSettingsRouteOpenNowInScene([action substringFromIndex:@"settings/".length],
+                                                  originatingScene);
     }
 
     // "home" opens the actual front-page feed (posts), not the picker list.
@@ -181,8 +182,9 @@ static BOOL ApolloQuickActionsPerformNow(NSString *action) {
     return YES;
 }
 
-static BOOL ApolloQuickActionsOpenModernMailboxNow(NSDictionary<NSString *, NSString *> *route) {
-    id tabBarController = ApolloMainTabBarController();
+static BOOL ApolloQuickActionsOpenModernMailboxNow(NSDictionary<NSString *, NSString *> *route,
+                                                    UIWindowScene *originatingScene) {
+    id tabBarController = ApolloMainTabBarControllerForScene(originatingScene);
     if (!tabBarController) return NO;
 
     if ([tabBarController respondsToSelector:@selector(goToInboxTab)]) {
@@ -217,36 +219,38 @@ static BOOL ApolloQuickActionsOpenModernMailboxNow(NSDictionary<NSString *, NSSt
     return YES;
 }
 
-static void ApolloQuickActionsPerformWithRetry(NSString *action, NSUInteger attempt) {
-    if (ApolloQuickActionsPerformNow(action)) return;
+static void ApolloQuickActionsPerformWithRetry(NSString *action, UIWindowScene *originatingScene,
+                                               NSUInteger attempt) {
+    if (ApolloQuickActionsPerformNow(action, originatingScene)) return;
     if (attempt >= 8) {
         ApolloLog(@"[QuickActions] Gave up performing %@", action);
         return;
     }
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        ApolloQuickActionsPerformWithRetry(action, attempt + 1);
+        ApolloQuickActionsPerformWithRetry(action, originatingScene, attempt + 1);
     });
 }
 
 static void ApolloQuickActionsOpenModernMailboxWithRetry(NSDictionary<NSString *, NSString *> *route,
+                                                         UIWindowScene *originatingScene,
                                                          NSUInteger attempt) {
-    if (ApolloQuickActionsOpenModernMailboxNow(route)) return;
+    if (ApolloQuickActionsOpenModernMailboxNow(route, originatingScene)) return;
     if (attempt >= 8) {
         ApolloLog(@"[QuickActions] Gave up opening modern mailbox notification destination");
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        ApolloQuickActionsOpenModernMailboxWithRetry(route, attempt + 1);
+        ApolloQuickActionsOpenModernMailboxWithRetry(route, originatingScene, attempt + 1);
     });
 }
 
-static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
+static BOOL ApolloQuickActionsHandleURL(NSURL *url, UIWindowScene *originatingScene) {
     NSDictionary<NSString *, NSString *> *mailboxRoute = ApolloModernMailboxRouteFromURL(url);
     if (mailboxRoute) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            ApolloQuickActionsOpenModernMailboxWithRetry(mailboxRoute, 0);
+            ApolloQuickActionsOpenModernMailboxWithRetry(mailboxRoute, originatingScene, 0);
         });
         return YES;
     }
@@ -255,7 +259,7 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
     if (!action) return NO;
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloQuickActionsPerformWithRetry(action, 0);
+        ApolloQuickActionsPerformWithRetry(action, originatingScene, 0);
     });
     return YES;
 }
@@ -263,7 +267,7 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
 %hook _TtC6Apollo11AppDelegate
 
 - (BOOL)application:(UIApplication *)application openURL:(NSURL *)url options:(NSDictionary *)options {
-    if (ApolloQuickActionsHandleURL(url)) {
+    if (ApolloQuickActionsHandleURL(url, nil)) {
         return YES;
     }
     return %orig(application, url, options);
@@ -280,7 +284,7 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
     }
 
     NSURL *url = rawURL.length > 0 ? [NSURL URLWithString:rawURL] : nil;
-    if (ApolloQuickActionsHandleURL(url)) {
+    if (ApolloQuickActionsHandleURL(url, nil)) {
         ApolloLog(@"[QuickActions] Handled modern mailbox APNs destination");
         if (completionHandler) completionHandler();
         return;
@@ -303,7 +307,7 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
     // The async hop makes this independent of Logos hook ordering: pane
     // installation will have completed before the first attempt runs.
     for (UIOpenURLContext *context in connectionOptions.URLContexts) {
-        if (ApolloQuickActionsHandleURL(context.URL)) {
+        if (ApolloQuickActionsHandleURL(context.URL, (UIWindowScene *)scene)) {
             ApolloLog(@"[QuickActions] Queued Reborn cold URL route");
         }
     }
@@ -315,7 +319,8 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
     if (!rawURL.length && [userInfo[@"url"] isKindOfClass:[NSString class]]) {
         rawURL = userInfo[@"url"];
     }
-    if (rawURL.length > 0 && ApolloQuickActionsHandleURL([NSURL URLWithString:rawURL])) {
+    if (rawURL.length > 0 && ApolloQuickActionsHandleURL([NSURL URLWithString:rawURL],
+                                                          (UIWindowScene *)scene)) {
         ApolloLog(@"[QuickActions] Queued Reborn cold notification route");
     }
 
@@ -323,7 +328,7 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
     NSString *injectedURL =
         NSProcessInfo.processInfo.environment[@"APOLLO_SIM_COLD_REBORN_URL"];
     if (injectedURL.length > 0 &&
-        ApolloQuickActionsHandleURL([NSURL URLWithString:injectedURL])) {
+        ApolloQuickActionsHandleURL([NSURL URLWithString:injectedURL], (UIWindowScene *)scene)) {
         ApolloLog(@"[QuickActions] Queued simulator-injected Reborn cold route");
     }
 #endif
@@ -343,7 +348,7 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
             ApolloLog(@"[QuickActions] Failed reading URL context: %@", exception);
         }
 
-        if (ApolloQuickActionsHandleURL(url)) {
+        if (ApolloQuickActionsHandleURL(url, (UIWindowScene *)scene)) {
             handledAny = YES;
         } else if (context) {
             [unhandledContexts addObject:context];
