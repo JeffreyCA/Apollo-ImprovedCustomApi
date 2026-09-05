@@ -23,6 +23,14 @@ extern NSString *const ApolloDevvitFeedOwnershipChangedNotification;
 // for a custom post. Feature-flag agnostic — callers apply their own gate.
 BOOL ApolloDevvitSelfTextIsInteractive(NSString *selfText);
 
+// Same test, additionally requiring the fallback's sh.reddit.com link to point
+// at `postID` (the post's own base36 id, no t3_ prefix). This is what separates
+// a real devvit post from a text post that merely APPENDS the fallback sentence
+// linking to some other interactive post — Global Scoreboard's post-match
+// threads do exactly that. Prefer this whenever the post id is available;
+// passing nil postID degrades to the adjacency-only test above.
+BOOL ApolloDevvitSelfTextIsInteractiveForPostID(NSString *selfText, NSString *postID);
+
 // Same test against a t3 post's `data` dictionary (JSON API shape).
 BOOL ApolloDevvitPostDataIsInteractive(NSDictionary *postData);
 

@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixes
 
+- Stop **Autoplay Inline GIFs** treating Low Power Mode as Tap to Play — Always and WiFi Only now keep GIFs animating in Low Power Mode, and Tap to Play or Never remain the battery-saving choices (#634, #1004: @icpryde)
 - Give **Show/Hide Deleted Comments** in the comments ⋯ menu custom icons that match Apollo's own artwork instead of the SF Symbol eye (#962: @AcornElf, @icpryde)
 - Restore Apollo's original icon weight across the ⋯ menus — the Liquid Glass menu was downscaling every icon to 18pt, and rows added by the tweak (Gallery View, View Hidden/Deleted Content, Show/Hide Deleted Comments) rendered smaller than Apollo's own rows on the legacy sheet (#985: @AcornElf, @icpryde)
 

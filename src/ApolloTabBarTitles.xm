@@ -21,7 +21,7 @@
 
 // Apollo's native "Hide Username on Tab Bar" key + change notification are
 // shared definitions in UserDefaultConstants.h (UDKeyNativeHideUsernameOnTabBar)
-// — the Profiles settings screen mirrors the same key.
+// — the Interface settings screen mirrors the same key.
 
 static char kApolloTabBarTitleStateCapturedKey;
 static char kApolloTabBarOriginalTitleKey;
@@ -60,22 +60,58 @@ static void ApolloTabBarConfigureNativeUsernameCell(UITableViewCell *cell) {
     cell.contentView.alpha = enabled ? 1.0 : 0.5;
 }
 
-void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void) {
-    if (!sHideTabBarTitles) return;
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    if (![defaults boolForKey:UDKeyNativeHideUsernameOnTabBar]) return;
+static NSNumber *ApolloRememberedHideUsernamePreference(void) {
+    id value = [NSUserDefaults.standardUserDefaults
+        objectForKey:UDKeyIconOnlySavedHideUsernameOnTabBar];
+    return [value isKindOfClass:NSNumber.class] ? (NSNumber *)value : nil;
+}
 
-    [defaults setBool:NO forKey:UDKeyNativeHideUsernameOnTabBar];
+static void ApolloSetNativeHideUsernamePreference(BOOL enabled) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if ([defaults boolForKey:UDKeyNativeHideUsernameOnTabBar] == enabled) return;
+    [defaults setBool:enabled forKey:UDKeyNativeHideUsernameOnTabBar];
     [[NSNotificationCenter defaultCenter]
         postNotificationName:ApolloNativeHideUsernameOnTabBarChangedNotification
                       object:nil];
-    ApolloLog(@"[TabBarTitles] Cleared redundant native Hide Username on Tab Bar setting");
+}
+
+void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void) {
+    if (!sHideTabBarTitles) return;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (!ApolloRememberedHideUsernamePreference()) {
+        [defaults setBool:[defaults boolForKey:UDKeyNativeHideUsernameOnTabBar]
+                   forKey:UDKeyIconOnlySavedHideUsernameOnTabBar];
+    }
+    if (![defaults boolForKey:UDKeyNativeHideUsernameOnTabBar]) return;
+
+    ApolloSetNativeHideUsernamePreference(NO);
+    ApolloLog(@"[TabBarTitles] Suspended native Hide Username while Icon-Only is active");
 }
 
 void ApolloSetHideTabBarTitlesEnabled(BOOL enabled) {
+    BOOL wasEnabled = sHideTabBarTitles;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (enabled && !wasEnabled) {
+        [defaults setBool:[defaults boolForKey:UDKeyNativeHideUsernameOnTabBar]
+                   forKey:UDKeyIconOnlySavedHideUsernameOnTabBar];
+    }
+
     sHideTabBarTitles = enabled;
-    [NSUserDefaults.standardUserDefaults setBool:enabled forKey:UDKeyHideTabBarTitles];
-    if (enabled) ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
+    [defaults setBool:enabled forKey:UDKeyHideTabBarTitles];
+    if (enabled) {
+        ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
+    } else {
+        NSNumber *remembered = ApolloRememberedHideUsernamePreference();
+        if (wasEnabled && remembered) {
+            BOOL restore = remembered.boolValue;
+            [defaults removeObjectForKey:UDKeyIconOnlySavedHideUsernameOnTabBar];
+            ApolloSetNativeHideUsernamePreference(restore);
+            ApolloLog(@"[TabBarTitles] Restored native Hide Username preference=%d", restore);
+        } else if (!wasEnabled) {
+            // Clean up a stale snapshot without changing the live native value.
+            [defaults removeObjectForKey:UDKeyIconOnlySavedHideUsernameOnTabBar];
+        }
+    }
     [[NSNotificationCenter defaultCenter]
         postNotificationName:ApolloTabBarTitlesChangedNotification
                       object:nil];
@@ -275,6 +311,9 @@ static void ApolloTabBarRefreshVisibleBars(NSString *reason) {
 %end
 
 %ctor {
+    // Fail-soft fallback: the native row is normally hidden after being moved
+    // to Interface. If Apollo's table shape changes and the hide matcher stops
+    // finding it, keep the duplicate coherent while Icon-Only is active.
     ApolloGeneralTableConfigureNativeRow(@"Hide Username on Tab Bar",
         ^(__unused UIViewController *vc, UITableViewCell *cell) {
             ApolloTabBarConfigureNativeUsernameCell(cell);
@@ -291,8 +330,8 @@ static void ApolloTabBarRefreshVisibleBars(NSString *reason) {
     }];
 
     // A settings restore or another native caller can try to re-enable the
-    // narrower username option. Icon-only mode wins while active, and the row
-    // is refreshed so its switch remains visibly off and disabled.
+    // narrower username option. Icon-only mode wins while active; refresh the
+    // fail-soft native row too in case it could not be hidden.
     [[NSNotificationCenter defaultCenter]
         addObserverForName:ApolloNativeHideUsernameOnTabBarChangedNotification
                     object:nil
