@@ -343,6 +343,11 @@ static NSString *const UDKeyAutoplayInlineGIFs = @"AutoplayInlineGIFs";
 // percentage of the row width: 50, 75, or 100 (default).
 static NSString *const UDKeyInlineMediaSizePercent = @"InlineMediaSizePercent";
 
+// Inline Media settings screen: whether the live preview (title + card) stays
+// pinned below the nav bar while the list scrolls (default) or scrolls with it.
+// Toggled by tapping the preview card.
+static NSString *const UDKeyInlineMediaPreviewPinned = @"InlineMediaPreviewPinned";
+
 // Bulk translation feature
 static NSString *const UDKeyEnableBulkTranslation = @"EnableBulkTranslation";
 static NSString *const UDKeyAutoTranslateOnAppear = @"AutoTranslateOnAppear";
@@ -657,6 +662,11 @@ static NSString *const UDKeyLinkPreviewCardColor = @"LinkPreviewCardColor";
 // means "Default" (no custom fill — the standard neutral card). A non-empty
 // hex paints the whole card that exact color, with auto-contrasted text.
 static NSString *const UDKeyLinkPreviewCardColorHex = @"LinkPreviewCardColorHex";
+// Whether the Rich Link Previews screen's live preview stays pinned while the
+// rows scroll beneath it (default) or scrolls away with them. Tap the card to
+// toggle (ApolloSettingsPinnedPreview); one key per screen, like
+// UDKeyInlineMediaPreviewPinned.
+static NSString *const UDKeyLinkPreviewPreviewPinned = @"LinkPreviewPreviewPinned";
 static NSString *const ApolloLinkPreviewModeDidChangeNotification = @"ApolloLinkPreviewModeDidChangeNotification";
 // Posted by the Inline Media settings screen when size/alignment changes so
 // visible comments re-measure their inline media immediately.
