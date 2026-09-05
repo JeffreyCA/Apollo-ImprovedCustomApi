@@ -38,6 +38,8 @@ static NSInteger (*sEditingStyleOrig)(id, SEL, UITableView *, NSIndexPath *);
 static NSInteger (*sIndentOrig)(id, SEL, UITableView *, NSIndexPath *);
 static UISwipeActionsConfiguration *(*sLeadingSwipeOrig)(id, SEL, UITableView *, NSIndexPath *);
 static UISwipeActionsConfiguration *(*sTrailingSwipeOrig)(id, SEL, UITableView *, NSIndexPath *);
+static CGFloat (*sHeightForHeaderOrig)(id, SEL, UITableView *, NSInteger);
+static void (*sWillDisplayHeaderOrig)(id, SEL, UITableView *, UIView *, NSInteger);
 
 static inline BOOL IsThemesRow(NSIndexPath *ip) { return ip.section == 0 && ip.row == 0; }
 
@@ -431,6 +433,54 @@ static UISwipeActionsConfiguration *TrailingSwipe(id self, SEL _cmd, UITableView
     return sTrailingSwipeOrig ? sTrailingSwipeOrig(self, _cmd, tv, ip) : nil;
 }
 
+// ---------------------------------------------------------------------------
+// Keep the first section header ("Themes") the height it first displayed at.
+//
+// Eureka answers heightForHeaderInSection: with UITableViewAutomaticDimension,
+// so UIKit self-sizes the header view — and for the FIRST section that
+// measurement includes an extra ~17pt of top padding whenever UIKit considers
+// the header the table's "top header". That decision isn't stable: UIKit ties
+// it to the navigation controller's scroll-view observation state
+// (UIScrollView._shouldAdjustLayoutToCollapseTopSpacing — the iOS 26 name; the
+// same flip reproduces on iOS 17), which is on while the bar is observing this
+// table (first display → unpadded, 38pt at default size) and off after any
+// UIAlertController has been presented over it. The next reload then measures
+// the reused header WITH the padding (55.33pt) and the whole table jumps down
+// by 17pt: change Post Size, toggle Use System Text Size. Stock Apollo does
+// this too (verified against main), it just went unnoticed until the label fix
+// had people watching this exact row.
+//
+// Rather than chase UIKit's private flag, pin the section 0 header to the
+// height UIKit gave it the first time it was displayed, per screen instance and
+// per content size category (the only input that legitimately changes it —
+// Apollo restyles the header font in willDisplayHeaderView, AFTER UIKit has
+// measured, so Apollo's own text-size slider never affected the height). The
+// label sits identically inside the pinned frame whether or not UIKit later
+// flags the header as "top", so nothing visible moves.
+// ---------------------------------------------------------------------------
+static const void *kThemesHeaderPinKey = &kThemesHeaderPinKey;   // @{@"category": NSString, @"height": NSNumber}
+
+static CGFloat HeightForHeader(id self, SEL _cmd, UITableView *tv, NSInteger section) {
+    if (section == 0) {
+        NSDictionary *pin = objc_getAssociatedObject(self, kThemesHeaderPinKey);
+        NSString *category = tv.traitCollection.preferredContentSizeCategory ?: @"";
+        if (pin && [pin[@"category"] isEqualToString:category]) return [pin[@"height"] doubleValue];
+    }
+    return sHeightForHeaderOrig ? sHeightForHeaderOrig(self, _cmd, tv, section) : UITableViewAutomaticDimension;
+}
+
+static void WillDisplayHeader(id self, SEL _cmd, UITableView *tv, UIView *view, NSInteger section) {
+    if (sWillDisplayHeaderOrig) sWillDisplayHeaderOrig(self, _cmd, tv, view, section);
+    if (section != 0 || view.bounds.size.height <= 0) return;
+    NSString *category = tv.traitCollection.preferredContentSizeCategory ?: @"";
+    NSDictionary *pin = objc_getAssociatedObject(self, kThemesHeaderPinKey);
+    if (!pin || ![pin[@"category"] isEqualToString:category]) {
+        objc_setAssociatedObject(self, kThemesHeaderPinKey,
+                                 @{@"category": category, @"height": @(view.bounds.size.height)},
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
 #define SAVE_AND_REPLACE(sel, var, fn, sig) do { \
     Method m = class_getInstanceMethod(cls, sel); \
     var = m ? (typeof(var))class_getMethodImplementation(cls, sel) : NULL; \
@@ -443,6 +493,8 @@ static void InstallAppearanceHooks(void) {
     Class cls = objc_getClass("_TtC6Apollo32SettingsAppearanceViewController");
     if (!cls) { ApolloLog(@"ThemeManager: SettingsAppearanceViewController missing"); return; }
 
+    SAVE_AND_REPLACE(@selector(tableView:heightForHeaderInSection:), sHeightForHeaderOrig, HeightForHeader, "d@:@q");
+    SAVE_AND_REPLACE(@selector(tableView:willDisplayHeaderView:forSection:), sWillDisplayHeaderOrig, WillDisplayHeader, "v@:@@q");
     SAVE_AND_REPLACE(@selector(tableView:numberOfRowsInSection:), sRowsOrig, Rows, "q@:@q");
     SAVE_AND_REPLACE(@selector(tableView:cellForRowAtIndexPath:), sCellOrig, Cell, "@@:@@");
     SAVE_AND_REPLACE(@selector(tableView:heightForRowAtIndexPath:), sHeightOrig, Height, "d@:@@");
