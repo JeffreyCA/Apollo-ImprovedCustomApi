@@ -7110,6 +7110,14 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     if (ApolloDeferGlobeGeometry(globe, container, ^{
         ApolloApplyGlobeMergeForNavItem(weakItem);
     })) return;
+    // Host changes must update tint too: standalone glass uses native chrome,
+    // while a merged globe keeps the action group's accent and translated state.
+    id target = globe.allTargets.anyObject;
+    UIViewController *controller = [target isKindOfClass:UIViewController.class] ? target : nil;
+    BOOL visibleTranslationApplied = [objc_getAssociatedObject(controller, kApolloVisibleTranslationAppliedKey) boolValue];
+    UIColor *normalTint = IsLiquidGlass() && !container ? ApolloNavigationChromeColor()
+        : (ApolloThemeAccentColor() ?: controller.viewIfLoaded.tintColor ?: UIColor.systemBlueColor);
+    globe.tintColor = visibleTranslationApplied ? UIColor.systemGreenColor : normalTint;
     UIBarButtonItem *standalone = objc_getAssociatedObject(navItem, kApolloGlobeStandaloneItemKey);
 
     if (container) {
@@ -7253,7 +7261,11 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     if (standalone && standalone.customView == globe && [navItem.rightBarButtonItems containsObject:standalone]) {
         return;  // already hosted as its own item — leave UIKit's wrapper alone
     }
-    globe.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
+    // A standalone glass item has its own circular surface, with no neighboring
+    // moderator slot to nudge toward. Preserve legacy edge alignment outside glass.
+    globe.contentHorizontalAlignment = IsLiquidGlass()
+        ? UIControlContentHorizontalAlignmentCenter : UIControlContentHorizontalAlignmentRight;
+    globe.imageEdgeInsets = UIEdgeInsetsZero;
     globe.frame = CGRectMake(0.0, 0.0, kApolloGlobeMergeSlotWidth, 32.0);
     if (!standalone) {
         standalone = [[UIBarButtonItem alloc] initWithCustomView:globe];
@@ -7443,7 +7455,6 @@ static void ApolloUpdateTranslationUIForController(id controller) {
     }
 
     BOOL translatedMode = ApolloControllerIsInTranslatedMode(vc);
-    BOOL visibleTranslationApplied = [objc_getAssociatedObject(vc, kApolloVisibleTranslationAppliedKey) boolValue];
     NSString *targetName = ApolloLocalizedTargetLanguageName();
 
     UIImage *globeImage = [[UIImage systemImageNamed:@"globe"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
@@ -7452,16 +7463,10 @@ static void ApolloUpdateTranslationUIForController(id controller) {
     if (!globeButton) {
         globeButton = [UIButton buttonWithType:UIButtonTypeSystem];
         globeButton.frame = CGRectMake(0.0, 0.0, 36.0, 32.0);
-        // The standalone fallback right-aligns; a native action container
-        // supplies the final globe slot and centering when one is available.
-        globeButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
         [globeButton addTarget:controller action:@selector(apollo_translationGlobeTapped) forControlEvents:UIControlEventTouchUpInside];
     }
     [globeButton setImage:globeImage forState:UIControlStateNormal];
 
-    UIColor *themeTintColor = ApolloThemeAccentColor() ?: vc.view.tintColor ?: [UIColor systemBlueColor];
-    UIColor *resolvedTint = visibleTranslationApplied ? [UIColor systemGreenColor] : themeTintColor;
-    globeButton.tintColor = resolvedTint;
     globeButton.accessibilityLabel = translatedMode
         ? @"Translation: showing translated. Tap to show original."
         : [NSString stringWithFormat:@"Translation: showing original. Tap to translate to %@.", targetName];

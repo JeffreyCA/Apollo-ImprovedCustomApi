@@ -1183,7 +1183,16 @@ static BOOL ApolloRecenterTitleControl(ApolloNavigationTitleGlassController *con
         // UINavigationBar title controls are often only as wide as their label.
         // Permit overhang so the capsule retains real padding instead of
         // collapsing to a plain title label's intrinsic width and height.
-        frame = CGRectInset(contentFrame, -kApolloTitleCapsuleHorizontalPadding, -kVerticalPadding);
+        // Two title lines already fill most of the 44pt navigation row. Keep
+        // their glass padding inside it, including Apollo's push/pop clip.
+        CGFloat verticalPadding = MIN(kVerticalPadding,
+            MAX(0.0, (44.0 - CGRectGetHeight(contentFrame)) / 2.0));
+        frame = CGRectInset(contentFrame, -kApolloTitleCapsuleHorizontalPadding, -verticalPadding);
+        if (ApolloNavigationTitlePresentationOwnsControl(hostView)) {
+            // Fractional label baselines must not move a full-height capsule
+            // above the navigation row while UIKit clips the incoming title.
+            frame.origin.y = CGRectGetMidY(hostView.bounds) - CGRectGetHeight(frame) / 2.0;
+        }
     }
 
     CGFloat scale = hostView.window.screen.scale ?: UIScreen.mainScreen.scale;
@@ -2142,8 +2151,36 @@ void ApolloNavigationTitlesRefresh(void) {
 
 %end
 
+static CGSize ApolloDualTitleNavigationSize(UIButton *button, CGSize size) {
+    if (!isfinite(size.height) || size.height <= 44.0 || !isfinite(size.width) || size.width <= 0) return size;
+    // UIKit may not have populated its label yet. Measure the current native
+    // attributed title without forcing lazy layout from an intrinsic-size read.
+    NSAttributedString *title = button.currentAttributedTitle;
+    if (!title.length) return size;
+    CGFloat textHeight = ceil([title boundingRectWithSize:CGSizeMake(size.width, CGFLOAT_MAX)
+        options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading context:nil].size.height);
+    if (isfinite(textHeight) && textHeight > 0 && textHeight <= 44.0) size.height = 44.0;
+    return size;
+}
+
+%group ApolloLGDualTitleSizing
+%hook ApolloDualLabelNavigationTitleButton
+- (CGSize)intrinsicContentSize {
+    return ApolloDualTitleNavigationSize((UIButton *)self, %orig);
+}
+- (CGSize)sizeThatFits:(CGSize)size {
+    return ApolloDualTitleNavigationSize((UIButton *)self, %orig(size));
+}
+%end
+%end
+
 %ctor {
     %init;
+    Class dualTitleButton = NSClassFromString(@"Apollo.DualLabelTitleButton");
+    if (IsLiquidGlass() && NSClassFromString(@"UIGlassEffect") && dualTitleButton) {
+        // Set the native allocation before push animation or title adoption.
+        %init(ApolloLGDualTitleSizing, ApolloDualLabelNavigationTitleButton = dualTitleButton);
+    }
     // Also cover programmatic JumpBar entry, which doesn't pass through touch
     // tracking. The native opening helper has set the field frame by this point.
     [[NSNotificationCenter defaultCenter] addObserverForName:UITextFieldTextDidBeginEditingNotification

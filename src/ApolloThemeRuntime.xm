@@ -798,9 +798,12 @@ static UIView *NavigationTitleControlForDescendant(UIView *view) {
 }
 
 static BOOL NavigationTitleOwnsButtonLabel(UIView *view) {
-    if (![view isKindOfClass:UILabel.class]) return NO;
+    // Asking UIButton for titleLabel from a label setter re-enters its lazy
+    // title update. Identify the existing generated label without that getter.
+    Class buttonLabelClass = objc_getClass("UIButtonLabel");
+    if (!buttonLabelClass || ![view isKindOfClass:buttonLabelClass]) return NO;
     for (UIView *ancestor = view.superview; ancestor; ancestor = ancestor.superview) {
-        if ([ancestor isKindOfClass:UIButton.class] && ((UIButton *)ancestor).titleLabel == view) {
+        if ([ancestor isKindOfClass:UIButton.class]) {
             // Retain ownership while UIKit moves the title between adaptors.
             return NavigationTitleControlForDescendant(ancestor) != nil ||
                 (!ancestor.window && objc_getAssociatedObject(ancestor, kApolloThemeNavigationButtonTitlesKey) != nil);
@@ -824,7 +827,17 @@ static NSMutableDictionary<NSNumber *, id> *NavigationButtonTitleSources(UIButto
     return sources;
 }
 
+static __thread NSUInteger sNavigationChromeColorReadDepth;
+
+UIColor *ApolloNavigationChromeColor(void) {
+    sNavigationChromeColorReadDepth++;
+    UIColor *color = UIColor.labelColor;
+    sNavigationChromeColorReadDepth--;
+    return color;
+}
+
 static UIColor *NavigationTitlePrimaryColor(void) {
+    if (IsLiquidGlass()) return ApolloNavigationChromeColor();
     return ApolloThemeCurrentSnapshot()->enabled
         ? ApolloThemeRuntimeColor(ApolloThemeTokenLabel) : UIColor.labelColor;
 }
@@ -1744,6 +1757,7 @@ void ApolloThemeRuntimeInvalidate(void) {
 }
 
 + (UIColor *)labelColor {
+    if (sNavigationChromeColorReadDepth) return %orig;
     UIColor *c = SemColor(ApolloThemeTokenLabel, (uintptr_t)__builtin_return_address(0));
     if (c) return c;
     return %orig;
@@ -1965,12 +1979,19 @@ void ApolloThemeRuntimeInvalidate(void) {
 }
 
 - (void)setTextColor:(UIColor *)textColor {
+    if (ApolloThemeCurrentSnapshot()->enabled && NavigationTitleOwnsButtonLabel(self)) {
+        %orig(textColor);
+        return;
+    }
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     %orig(ThemedTextColorForSourceColor(textColor, (id)self, caller));
 }
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-    if (sAttributedTextAssignmentBypass) {
+    // Navigation buttons already theme their state table. Do not recolor the
+    // generated label again, undoing its native chrome color.
+    if (sAttributedTextAssignmentBypass ||
+        (ApolloThemeCurrentSnapshot()->enabled && NavigationTitleOwnsButtonLabel(self))) {
         %orig(attributedText);
         return;
     }
@@ -2306,6 +2327,26 @@ static void ApolloThemeRestoreOverlayPillText(id node) {
 
 %end // ApolloThemeRuntimeHooks
 
+static char kApolloNavigationDualTitleTintPinnedKey;
+
+%group ApolloNavigationDualTitleChrome
+%hook ApolloDualLabelTitleButton
+
+- (void)setTintColor:(UIColor *)color {
+    // System-button vibrancy uses tint even when attributed text is neutral.
+    UIColor *chrome = ApolloNavigationChromeColor();
+    // Install an explicit tint once; later native nil resets must not restart
+    // UIKit's title transition or return the button to its inherited accent.
+    if (objc_getAssociatedObject(self, &kApolloNavigationDualTitleTintPinnedKey) &&
+        [((UIView *)self).tintColor isEqual:chrome]) return;
+    objc_setAssociatedObject(self, &kApolloNavigationDualTitleTintPinnedKey,
+        @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(chrome);
+}
+
+%end
+%end
+
 // ===========================================================================
 // Constructor
 // ===========================================================================
@@ -2315,6 +2356,12 @@ static void ApolloThemeRestoreOverlayPillText(id node) {
         FindRuntimeImages();
         BuildByteFilter();
         %init(ApolloThemeRuntimeHooks);
+        if (IsLiquidGlass() && NSClassFromString(@"UIGlassEffect")) {
+            Class dualTitleButton = NSClassFromString(@"Apollo.DualLabelTitleButton");
+            if (dualTitleButton) {
+                %init(ApolloNavigationDualTitleChrome, ApolloDualLabelTitleButton = dualTitleButton);
+            }
+        }
         BOOL haveTM = objc_getClass("_TtC6Apollo12ThemeManager") != nil;
         if (haveTM) %init(ApolloThemeRuntimeManagerHook);
         ApolloLog(@"ThemeRuntime: ctor — UIColor hooks installed, ThemeManager hook=%d", haveTM);
