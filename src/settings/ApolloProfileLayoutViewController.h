@@ -1,6 +1,6 @@
-#import "ApolloSettingsForm.h"
+#import "settings/ApolloSettingsForm.h"
 
-// Dedicated "Profile Layout" screen: Density + Avatar pickers and the per-band
-// show switches (Banner, Stat Cards, Social Links, Follow & Message).
+// Full-width inline preview followed by the declarative profile controls.
+// The preview scrolls normally unless the user pins it beside the heading.
 @interface ApolloProfileLayoutViewController : ApolloSettingsFormViewController
 @end

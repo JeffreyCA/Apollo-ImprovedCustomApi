@@ -219,6 +219,9 @@ static NSString *const UDKeyProfileShowStatCards = @"ProfileShowStatCards";
 static NSString *const UDKeyProfileShowSocialLinks = @"ProfileShowSocialLinks";
 static NSString *const UDKeyProfileShowActions = @"ProfileShowActions";
 static NSString *const UDKeyProfileAvatarStyle = @"ProfileAvatarStyle";
+// UI-only preference: keep the Profile Layout preview visible while scrolling.
+// Default NO; independent of the subreddit preview and actual profile layout.
+static NSString *const UDKeyProfileLayoutPreviewPinned = @"ProfileLayoutPreviewPinned";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
 // New (Immersive, with the melt/ambient backdrop) vs Classic (same content,
 // flat) — mirrors UDKeyProfileHeaderImmersive's semantics for subreddits.

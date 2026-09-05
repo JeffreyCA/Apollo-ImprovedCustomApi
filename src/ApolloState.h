@@ -126,9 +126,11 @@ void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void);
 // large avatar/snoovatar, display name, bio, and the Social Links band (Buy Me a
 // Coffee, Instagram, X, …). When OFF, profiles revert to Apollo's compact stock
 // layout — the detailed header is not installed and any existing one is torn down.
-// Independent of sShowUserAvatars (inline avatars). The Social Links band lives
-// inside this header, so it is gated on this same flag. Default ON via
-// registerDefaults. See ApolloUserAvatars.xm and ApolloProfileSocialLinks.{h,m}.
+// Profile Layout exposes three densities with the same two-boolean encoding as
+// Subreddit Layout: Immersive = master + immersive, Compact = master + flat,
+// Native = !master. Independent of sShowUserAvatars (inline avatars). The Social
+// Links band lives inside this header, so it is gated on this same flag. Default
+// ON via registerDefaults. See ApolloUserAvatars.xm and ApolloProfileSocialLinks.
 extern BOOL sShowDetailedProfiles;
 extern BOOL sBadgeBookEnabled;
 extern BOOL sProfileHeaderImmersive;

@@ -472,12 +472,18 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
     self.contentContainer.frame = self.bounds;
     self.contentContainer.transform = transform;
 
-    BOOL hasBanner = self.sharpView.image != nil && regionHeight > 0.0;
-    self.backdropView.hidden = !hasBanner;
-    self.sharpClip.hidden = !hasBanner;
-    self.veilLayer.hidden = !hasBanner;
-    self.chromeScrimLayer.hidden = !hasBanner;
-    if (!hasBanner) return;
+    // Keep ambient artwork when Banner is off: regionHeight == topInset hides
+    // the sharp band without removing its blurred continuation. Chrome-cropped
+    // settings previews express this with both values set to zero.
+    CGFloat bannerTop = MIN(regionHeight, MAX(0.0, self.topInset));
+    BOOL hasArtwork = self.sharpView.image != nil && extendedHeight > 0.0;
+    BOOL hasSharpBanner = hasArtwork && regionHeight > bannerTop;
+    self.backdropView.hidden = !hasArtwork;
+    self.sharpClip.hidden = !hasSharpBanner;
+    self.veilLayer.hidden = !hasArtwork;
+    // No top inset means no chrome to protect; a scrim would falsely fade the banner.
+    self.chromeScrimLayer.hidden = !hasArtwork || self.topInset <= 0.0;
+    if (!hasArtwork) return;
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -485,7 +491,6 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
     self.backdropView.frame = CGRectMake(0.0, 0.0, width, extendedHeight);
 
     self.sharpClip.frame = CGRectMake(0.0, 0.0, width, regionHeight);
-    CGFloat bannerTop = MIN(regionHeight, MAX(0.0, self.topInset));
     CGFloat bannerHeight = MAX(1.0, regionHeight - bannerTop);
     self.sharpView.frame = CGRectMake(0.0, bannerTop, width, bannerHeight);
     CGFloat featherStart = MAX(0.0, 1.0 - ApolloImmersiveSharpFeatherHeight / MAX(1.0, regionHeight));

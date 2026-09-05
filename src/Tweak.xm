@@ -3765,6 +3765,7 @@ static BOOL ApolloDefaultsKeyChangesNativeFavorites(NSString *key) {
                                     UDKeyProfileShowSocialLinks: @YES,
                                     UDKeyProfileShowActions: @YES,
                                     UDKeyProfileAvatarStyle: @0,
+                                    UDKeyProfileLayoutPreviewPinned: @NO,
                                     UDKeyShowSubredditHeaders: @NO,
                                     UDKeySubredditHeaderImmersive: @YES,
                                     UDKeySubredditShowBanner: @YES,
@@ -4003,14 +4004,10 @@ static BOOL ApolloDefaultsKeyChangesNativeFavorites(NSString *key) {
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
     sHideTabBarTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles];
     ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
-    // The old master switch was retired in favour of the Profile Layout screen.
-    // Migrate existing installs that had it off so the visible per-band controls
-    // cannot appear to do nothing behind an unreachable legacy preference.
-    if (![standardDefaults boolForKey:UDKeyShowDetailedProfiles]) {
-        [standardDefaults setBool:YES forKey:UDKeyShowDetailedProfiles];
-        ApolloLog(@"[ProfileLayout] migrated retired detailed-profile master switch to enabled");
-    }
-    sShowDetailedProfiles = YES;
+    // Profile Layout exposes this master again as its Native density. The
+    // registered default remains ON for new installs; an explicit OFF now
+    // persists and restores Apollo's original profile page across launches.
+    sShowDetailedProfiles = [standardDefaults boolForKey:UDKeyShowDetailedProfiles];
     sBadgeBookEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBadgeBookEnabled];
     // No launch-time icon prewarm: sessions that never open a profile shouldn't
     // pay for decoded badge bitmaps. The strip (on first preview data) and the
