@@ -27,11 +27,11 @@
 // whole thing smoothly. This module puts Apollo's transition on that path.
 //
 // WHAT IT DOES
-// Registers interruptibleAnimatorForTransition: (and animationEnded:) on Apollo's animator
-// class, Liquid Glass only (the methods are added by %init of a gated group, so pre-26 builds
-// keep Apollo's class untouched). animateTransition: then just starts that animator. The
-// animator reproduces Apollo's own geometry, recovered from the binary and confirmed with a
-// live capture (sub_100683738 pop / sub_100682b04 push / sub_1006845bc shadow):
+// Registers interruptibleAnimatorForTransition: on Apollo's animator class, Liquid Glass only
+// (the method is added by %init of a gated group, so pre-26 builds keep Apollo's class
+// untouched). animateTransition: then just starts that animator. The animator reproduces
+// Apollo's own geometry, recovered from the binary and confirmed with a live capture
+// (sub_100683738 pop / sub_100682b04 push / sub_1006845bc shadow):
 //   pop:  incoming view starts at x = -width/3 and slides to 0 under a black 15% dim that
 //         fades out; outgoing view slides to x = width with a shadow view (black, alpha 0.25
 //         light / 0.05 dark, offset (-5,0), radius 4, opacity 0.3) that fades out with it.
@@ -40,6 +40,23 @@
 //   0.225s linear when interactive, 0.5s spring (damping 1.0, initial velocity 4.0) otherwise.
 // Apollo's search-mode special cases (hiding the bar while a search is presented) are not
 // reproduced: on Liquid Glass the native search bar module keeps the bar in place anyway.
+//
+// ONE ANIMATOR PER TRANSITION, FOUND BY ITS CONTEXT
+// ApolloNavigationController keeps a single ApolloNavigationAnimator and reuses it for every
+// push and pop (it only flips isPresenting), so "the animator cached on that object" cannot
+// tell transitions apart. UIKit asks interruptibleAnimatorForTransition: several times per
+// transition (the bar's alongside animations, the percent-driven scrub, and our own
+// animateTransition:) and every ask for one context must get the same UIViewPropertyAnimator,
+// while a different context must always get a fresh one. Transitions also overlap on the
+// stack: completeTransition: runs the navigation controller's completion synchronously, and a
+// push or pop issued from there (didShowViewController: and friends) is built and started
+// before the finishing transition's completion block even returns, with UIKit's own
+// animationEnded: arriving last of all. So the cache is keyed on the context: the latest
+// animator is kept on Apollo's animator object, each animator remembers (weakly) the context
+// it was built for, and a lookup only hits when that context is the one asking. Nothing is
+// ever cleared. A finished animator simply sits there until the next transition replaces it,
+// and because the context reference is weak, a context that has been freed reads as nil, so a
+// new context recycled at the same address can never be handed a finished animator.
 //
 // TWO THINGS THE INTERRUPTIBLE PATH CHANGES, HANDLED HERE
 // - UIKit only disables user interaction on the transitioning views for NON-interruptible
@@ -59,8 +76,29 @@
 #import <objc/runtime.h>
 #import "ApolloCommon.h"
 
+// Apollo's animator object -> the most recently built UIViewPropertyAnimator.
 static const void *kApolloNavAnimatorKey = &kApolloNavAnimatorKey;
+// UIViewPropertyAnimator -> ApolloNavContextRef naming the transition context it was built for.
+static const void *kApolloNavAnimatorContextKey = &kApolloNavAnimatorContextKey;
 static NSUInteger sApolloNavTransitionsInFlight;
+
+// Weak on purpose: the context must not outlive UIKit's own interest in it (a popped controller
+// deallocates with its transition, not at the next one), and a freed context reads as nil here
+// rather than aliasing whatever gets allocated at its address next.
+@interface ApolloNavContextRef : NSObject
+@property (nonatomic, weak) id<UIViewControllerContextTransitioning> context;
+@end
+@implementation ApolloNavContextRef
+@end
+
+static UIViewPropertyAnimator *ApolloNavAnimatorForContext(id animatorObject,
+                                                            id<UIViewControllerContextTransitioning> ctx) {
+    UIViewPropertyAnimator *animator = objc_getAssociatedObject(animatorObject, kApolloNavAnimatorKey);
+    if (!animator || !ctx) return nil;
+    ApolloNavContextRef *ref = objc_getAssociatedObject(animator, kApolloNavAnimatorContextKey);
+    id<UIViewControllerContextTransitioning> owner = ref.context;
+    return (owner && owner == ctx) ? animator : nil;
+}
 
 BOOL ApolloNavTransitionInFlight(void) {
     return sApolloNavTransitionsInFlight > 0;
@@ -108,12 +146,14 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
     UIView *shadow = nil;
     UIView *dim = [[UIView alloc] initWithFrame:container.bounds];
     dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:kApolloNavDimAlpha];
+    dim.accessibilityIdentifier = @"ApolloNavTransitionDim";
 
     if (push) {
         [container addSubview:toView];
         toView.frame = CGRectOffset(toRest, width, 0.0);
         fromView.frame = fromRest;
         shadow = ApolloNavMakeShadowView(toView.frame, container.traitCollection);
+        shadow.accessibilityIdentifier = @"ApolloNavTransitionShadow";
         [container insertSubview:shadow belowSubview:toView];
         dim.alpha = 0.0;
         [container insertSubview:dim belowSubview:shadow];
@@ -122,6 +162,7 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
         fromView.frame = fromRest;
         toView.frame = CGRectOffset(toRest, -parallax, 0.0);
         shadow = ApolloNavMakeShadowView(fromRest, container.traitCollection);
+        shadow.accessibilityIdentifier = @"ApolloNavTransitionShadow";
         [container insertSubview:shadow belowSubview:fromView];
         dim.alpha = 1.0;
         [container insertSubview:dim belowSubview:shadow];
@@ -137,6 +178,9 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
         ?: fromVC.navigationController.navigationBar;
 
     BOOL interactive = ctx.isInteractive;
+    ApolloLog(@"[InterruptibleNav] built %s animator for ctx %p (interactive=%d, %@ -> %@)",
+              push ? "push" : "pop", (void *)ctx, interactive,
+              NSStringFromClass(fromVC.class), NSStringFromClass(toVC.class));
     // Only an interactive transition holds the title capsules back: a finger-driven cross-fade
     // can sit at partial alpha indefinitely and then reverse, which is where a capsule on the
     // incoming title reads as a stray bubble. A timed push/pop cross-fades capsule and title
@@ -168,7 +212,6 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
             dim.alpha = 0.0;
         }
     }];
-    __weak id weakAnimatorObject = animatorObject;
     [animator addCompletion:^(UIViewAnimatingPosition position) {
         [shadow removeFromSuperview];
         [dim removeFromSuperview];
@@ -180,13 +223,18 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
         fromView.userInteractionEnabled = fromWasInteractive;
         toView.userInteractionEnabled = toWasInteractive;
         if (interactive && sApolloNavTransitionsInFlight > 0) sApolloNavTransitionsInFlight--;
+        ApolloLog(@"[InterruptibleNav] %s animator for ctx %p finished (cancelled=%d)",
+                  push ? "push" : "pop", (void *)ctx, cancelled);
+        // No cache bookkeeping here: this may synchronously start the next transition (a push or
+        // pop issued from didShowViewController:), whose animator must survive untouched. The
+        // per-context lookup in interruptibleAnimatorForTransition: keeps the two apart.
         [ctx completeTransition:!cancelled];
         // The bar has settled on whichever item won; give the title capsules that were held
         // back during the cross-fade their chance now (they fade in rather than pop).
         if (interactive) ApolloNavigationTitleGlassRefreshNavigationBar(navigationBar);
-        id strong = weakAnimatorObject;
-        if (strong) objc_setAssociatedObject(strong, kApolloNavAnimatorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }];
+    // The animator's blocks hold ctx, the views and the dim/shadow until it finishes;
+    // UIViewPropertyAnimator drops them then, so nothing here outlives the transition.
     return animator;
 }
 
@@ -196,9 +244,13 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
 
 %new
 - (id<UIViewImplicitlyAnimating>)interruptibleAnimatorForTransition:(id<UIViewControllerContextTransitioning>)ctx {
-    UIViewPropertyAnimator *animator = objc_getAssociatedObject(self, kApolloNavAnimatorKey);
+    if (!ctx) return nil;
+    UIViewPropertyAnimator *animator = ApolloNavAnimatorForContext(self, ctx);
     if (animator) return animator;
     animator = ApolloNavBuildAnimator(self, ctx);
+    ApolloNavContextRef *ref = [ApolloNavContextRef new];
+    ref.context = ctx;
+    objc_setAssociatedObject(animator, kApolloNavAnimatorContextKey, ref, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(self, kApolloNavAnimatorKey, animator, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return animator;
 }
@@ -210,10 +262,10 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
     [animator startAnimation];
 }
 
-%new
-- (void)animationEnded:(BOOL)transitionCompleted {
-    objc_setAssociatedObject(self, kApolloNavAnimatorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
+// No animationEnded: on purpose. UIKit sends it from completeTransition: after the navigation
+// controller's completion handler has run, so by then the next transition may already own the
+// cache slot, and with one shared animator object there is no way to tell which transition the
+// call is about. The per-context lookup above makes it unnecessary.
 
 %end
 
