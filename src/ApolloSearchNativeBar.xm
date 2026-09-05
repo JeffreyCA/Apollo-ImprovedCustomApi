@@ -1162,23 +1162,32 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
 // Apollo's native top check ignores the inset UIKit adds for native search.
 // Use adjustedContentInset for both the check and scroll destination,
 // preserving Apollo's one-level back navigation when already at the top.
+// A followed user's profile opened directly from the subreddit list needs the
+// same behavior in both appearances: Apollo only handles PostsViewController
+// and RedditListViewController here, so [RedditList, Profile] does nothing.
+// Deeper profile stacks keep Apollo's native return-to-feed behavior.
 %hook _TtC6Apollo13SceneDelegate
 
 - (BOOL)tabBarController:(UITabBarController *)tabBarController
  shouldSelectViewController:(UIViewController *)viewController {
-    if (ApolloNativeFeedSearchEnabled() && tabBarController.selectedIndex == 0 &&
+    if (tabBarController.selectedIndex == 0 &&
         viewController == tabBarController.selectedViewController &&
         [viewController isKindOfClass:objc_getClass("_TtC6Apollo26ApolloNavigationController")]) {
         UINavigationController *nav = (UINavigationController *)viewController;
         UIViewController *feed = nav.topViewController;
-        if ([feed isKindOfClass:objc_getClass("_TtC6Apollo19PostsViewController")]) {
+        BOOL managedPostsFeed = ApolloNativeFeedSearchEnabled() &&
+            [feed isKindOfClass:objc_getClass("_TtC6Apollo19PostsViewController")];
+        BOOL profileFromSubredditList = nav.viewControllers.count == 2 &&
+            [nav.viewControllers.firstObject isKindOfClass:objc_getClass("_TtC6Apollo24RedditListViewController")] &&
+            [feed isKindOfClass:objc_getClass("_TtC6Apollo21ProfileViewController")];
+        if (managedPostsFeed || profileFromSubredditList) {
             UIScrollView *table = NSBTableForVC(feed);
-            if (table && objc_getAssociatedObject(table, kNSBFeedTableKey) != nil) {
+            if (table && (profileFromSubredditList || objc_getAssociatedObject(table, kNSBFeedTableKey) != nil)) {
                 CGFloat topInset = table.adjustedContentInset.top;
                 BOOL atTop = round(table.contentOffset.y) == -round(topInset);
                 if (NSBTraceEnabled()) {
-                    ApolloLog(@"[NSBTrace] Posts re-tap -> %@ (y=%.1f inTop=%.1f adjTop=%.1f)",
-                              atTop ? @"pop" : @"scroll", table.contentOffset.y,
+                    ApolloLog(@"[NSBTrace] Posts re-tap (%@) -> %@ (y=%.1f inTop=%.1f adjTop=%.1f)",
+                              NSStringFromClass(feed.class), atTop ? @"pop" : @"scroll", table.contentOffset.y,
                               table.contentInset.top, topInset);
                 }
                 if (atTop) {
