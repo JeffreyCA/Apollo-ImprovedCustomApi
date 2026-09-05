@@ -1705,7 +1705,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     devvitFeedPosts.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDevvitInteractivePosts]; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:@"Small tweaks for the post list.\n\nFeed Video Scrubber: drag the bar under a video to scrub it without opening it.\n\nForget Forward Swipe After Scrolling: Apollo's forward swipe re-opens the post you last swiped back from, however long ago that was. This forgets it once you've scrolled a few posts on, so a stray swipe can't jump to an old post.\n\nLive Interactive Posts: shows Reddit Developer Platform posts as their real widget — live scores, market tickers, predictions, brackets, polls, games — instead of placeholder text. Always on in comments; Show in Feed adds them to large feed cards and keeps a pinned one in the feed instead of Community Highlights."
+                                            footer:@"Feed Video Scrubber: drag the bar under a feed video to scrub it.\n\nForget Forward Swipe After Scrolling: once you've scrolled a few posts on, a forward swipe won't reopen the post you came back from.\n\nLive Interactive Posts: shows live scores, polls, brackets and other interactive posts instead of placeholder text. Show in Feed adds them to the feed as well as comments."
                                               rows:@[ textPostThumbnails, infoRow, feedScrubber, forwardSwipeForget, blockAnnouncements, devvitPosts, devvitFeedPosts ]];
 }
 
@@ -1733,7 +1733,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     preview.visible = ^BOOL { return sFloatingPostTabs; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Floating Tabs"
-                                            footer:@"Keep up to 5 posts open as floating bubbles, chat-heads style. In a post, open the top-right ••• menu and choose Keep in Floating Tab. Drag a bubble anywhere (it snaps to the screen edges), flick it past the edge to tuck it into a slim handle, and tap it to jump back to the post exactly where you left off. To close one, drag it onto the ✕ that appears while dragging. Hold to Preview shows a card of the post while you keep your finger down — release to open it, or slide away first to cancel. Magnetic Stacking snaps bubbles into a pile when you drop one on another — drag the pile to move it together, tap it to fan the bubbles out, and after a moment they spring back into the pile on their own (drag one away while fanned to keep it separate)."
+                                            footer:@"Keep up to 5 posts open as floating bubbles. In a post, choose Keep in Floating Tab from the ••• menu. Tap a bubble to jump back to the post, or drag it onto the ✕ to close it. Magnetic Stacking piles bubbles together when you drop one on another. Hold to Preview shows the post while you hold a bubble down, and opens it when you let go."
                                               rows:@[ floatingTabs, magnet, preview ]];
 }
 
@@ -2208,7 +2208,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     // -footerAttributedTextForSection: (matched by the "Uploads" title) — keep
     // the two in sync when editing either.
     return [ApolloSettingsSection sectionWithTitle:@"Uploads"
-                                            footer:@"Media Upload Host sets where images attached to posts and comments are uploaded. Comment Link Host uploads images in comments to Imgur or Image Chest and inserts a plain link, so they work even where images aren't allowed."
+                                            footer:@"Media Upload Host chooses where images you attach to posts and comments are uploaded.\n\nComment Link Host uploads comment images to Imgur or Image Chest and inserts a plain link, so they work in subreddits that don't allow image comments. Prefer Native Images uses Reddit's own image upload wherever the subreddit allows it, and the link host only where it doesn't.\n\nManage past uploads under Settings → General → Media → Manage Uploads."
                                               rows:@[ uploadHost, commentLinkHost, commentLinkAuto ]];
 }
 
@@ -2229,7 +2229,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     albumFallback.visible = ^BOOL { return sProxyImgurDDG; };
 
     return [ApolloSettingsSection sectionWithTitle:@"Network"
-                                            footer:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still appear where Imgur is blocked (e.g. the UK).\n\nDuckDuckGo can only carry images. Multi-image albums also need a small text file listing the album's contents, which DuckDuckGo refuses to fetch. With Album Fallback Proxies on, Apollo gets that file through public text proxies (r.jina.ai, allorigins.win, codetabs.com) whenever Imgur can't be reached directly. Only the album's Imgur address is sent to them — nothing about you or your Reddit account. Turn it off to use DuckDuckGo strictly; albums will then fail while Imgur is blocked.\n\nVideos and uploads can't be proxied at all."
+                                            footer:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still show where Imgur is blocked (like the UK).\n\nDuckDuckGo can't fetch an album's list of images, so Album Fallback Proxies gets it through public text proxies (r.jina.ai, allorigins.win, codetabs.com) instead. Only the album's Imgur address is sent to them. Turn it off and albums won't load while Imgur is blocked.\n\nVideos and uploads can't be proxied."
                                               rows:@[ proxyImgur, albumFallback ]];
 }
 
@@ -3240,11 +3240,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             attributes:plainAttrs]];
     } else if ([sectionTitle isEqualToString:@"Uploads"]) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Image Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nWith Prefer Native Images on, comment images upload to Reddit and display inline wherever the subreddit allows image comments — the link host is used only where it doesn't, or when Apollo doesn't know yet.\n\nManage past uploads from Settings → General → Media → Manage Uploads."
+            initWithString:@"Media Upload Host chooses where images you attach to posts and comments are uploaded.\n\nComment Link Host uploads comment images to Imgur or Image Chest and inserts a plain link, so they work in subreddits that don't allow image comments. Prefer Native Images uses Reddit's own image upload wherever the subreddit allows it, and the link host only where it doesn't.\n\nManage past uploads under Settings → General → Media → Manage Uploads."
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Network"]) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still appear where Imgur is blocked (e.g. the UK).\n\nDuckDuckGo can only carry images. Multi-image albums also need a small text file listing the album's contents, which DuckDuckGo refuses to fetch. With Album Fallback Proxies on, Apollo gets that file through public text proxies (r.jina.ai, allorigins.win, codetabs.com) whenever Imgur can't be reached directly. Only the album's Imgur address is sent to them — nothing about you or your Reddit account. Turn it off to use DuckDuckGo strictly; albums will then fail while Imgur is blocked.\n\nVideos and uploads can't be proxied at all."
+            initWithString:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still show where Imgur is blocked (like the UK).\n\nDuckDuckGo can't fetch an album's list of images, so Album Fallback Proxies gets it through public text proxies (r.jina.ai, allorigins.win, codetabs.com) instead. Only the album's Imgur address is sent to them. Turn it off and albums won't load while Imgur is blocked.\n\nVideos and uploads can't be proxied."
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Notification Backend"]) {
         text = [[NSMutableAttributedString alloc]
