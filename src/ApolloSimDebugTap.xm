@@ -26,6 +26,8 @@
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "UIWindow+Apollo.h"
+
+void ApolloSubredditIndexDebugDescribeTables(void); // ApolloSubredditIndexPolish.xm (sim-only)
 #import <objc/message.h>
 #import <mach/mach.h>
 
@@ -161,7 +163,10 @@ static void ApolloSimDebugPerformHold(CGPoint point) {
 // "swipe x1 y1 x2 y2" command: a real drag (began → moved steps → ended) so a
 // scroll view actually scrolls, unlike the single tap above. Reuses the same
 // synthesized-touch delivery path.
-static void ApolloSimDebugPerformSwipe(CGPoint start, CGPoint end) {
+// steps/interval control the drag speed: the default 12 x 12 ms is a flick that
+// commits an interactive pop; a slow, short drag (e.g. 30 x 20 ms to x=45) ends
+// below UIKit's commit threshold and cancels it instead.
+static void ApolloSimDebugPerformSwipeTimed(CGPoint start, CGPoint end, int steps, NSTimeInterval interval) {
     UIWindow *window = nil;
     for (UIWindow *candidate in ApolloAllWindows()) {
         if (candidate.isKeyWindow) { window = candidate; break; }
@@ -183,9 +188,8 @@ static void ApolloSimDebugPerformSwipe(CGPoint start, CGPoint end) {
     [touch setPhase:UITouchPhaseBegan];
     ApolloSimDebugSendTouch(touch);
 
-    const int steps = 12;
     for (int i = 1; i <= steps; i++) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.012 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * interval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             CGFloat t = (CGFloat)i / steps;
             CGPoint p = CGPointMake(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t);
             [touch _setLocationInWindow:p resetPrevious:NO];
@@ -193,11 +197,12 @@ static void ApolloSimDebugPerformSwipe(CGPoint start, CGPoint end) {
             ApolloSimDebugSendTouch(touch);
         });
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((steps * 0.012 + 0.02) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((steps * interval + 0.02) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [touch _setLocationInWindow:end resetPrevious:NO];
         [touch setPhase:UITouchPhaseEnded];
         ApolloSimDebugSendTouch(touch);
-        ApolloLog(@"[SimDebugTap] swipe delivered (%.0f,%.0f)->(%.0f,%.0f)", start.x, start.y, end.x, end.y);
+        ApolloLog(@"[SimDebugTap] swipe delivered (%.0f,%.0f)->(%.0f,%.0f) over %d x %.0f ms",
+                  start.x, start.y, end.x, end.y, steps, interval * 1000.0);
     });
 }
 
@@ -470,6 +475,100 @@ static void ApolloSimDebugMeasureGIFMemory(NSString *source) {
     }
 }
 
+// "navchurn" command: pop the top controller and push it straight back in the
+// same turn. UIKit queues the push and starts it synchronously from inside the
+// pop's completeTransition: (the same shape as a push issued from
+// didShowViewController:, which nickclyde raised on #1018), so two transitions
+// overlap on the stack and ApolloInterruptibleNavTransition must hand each its
+// own animator. 1.5 s later this logs what the pair left behind: the stack, the
+// interaction flags UIKit/our completion should have restored, the interactive
+// in-flight counter, and every sibling of the top view in the transition
+// container (a leftover dim/shadow view shows up there as a plain UIView).
+static UINavigationController *ApolloSimDebugNavChurnNavigationController(void) {
+    UIViewController *vc = nil;
+    for (UIWindow *window in ApolloAllWindows()) {
+        if (window.isKeyWindow) { vc = window.rootViewController; break; }
+    }
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    if ([vc isKindOfClass:UITabBarController.class]) vc = ((UITabBarController *)vc).selectedViewController;
+    if ([vc isKindOfClass:UINavigationController.class]) return (UINavigationController *)vc;
+    return vc.navigationController;
+}
+
+static void ApolloSimDebugNavChurnReport(UINavigationController *nav, NSString *phase) {
+    UIViewController *top = nav.topViewController;
+    UIViewController *below = nav.viewControllers.count >= 2
+        ? nav.viewControllers[nav.viewControllers.count - 2] : nil;
+    NSMutableArray<NSString *> *siblings = [NSMutableArray array];
+    for (UIView *view in top.view.superview.subviews) {
+        [siblings addObject:[NSString stringWithFormat:@"%@%@%@", NSStringFromClass(view.class),
+            view.accessibilityIdentifier ? [@"#" stringByAppendingString:view.accessibilityIdentifier] : @"",
+            view == top.view ? @"(top)" : @""]];
+    }
+    ApolloLog(@"[SimDebugTap] navchurn %@: stack=%lu top=%@ topInteractive=%d belowInteractive=%d "
+              "inFlight=%d containerSubviews=[%@]",
+              phase, (unsigned long)nav.viewControllers.count, NSStringFromClass(top.class),
+              top.view.userInteractionEnabled, below.view.userInteractionEnabled,
+              ApolloNavTransitionInFlight(), [siblings componentsJoinedByString:@", "]);
+}
+
+// "navchurn appear" variant: the push is issued from the revealed controller's
+// viewDidAppear:, which UIKit runs inside the pop's completeTransition:, so the
+// pop's completion block is still on the stack when the push is requested.
+static __weak UIViewController *sApolloSimNavChurnRevealed;
+static __weak UIViewController *sApolloSimNavChurnPopped;
+
+static void ApolloSimDebugNavChurn(NSString *mode) {
+    UINavigationController *nav = ApolloSimDebugNavChurnNavigationController();
+    if ([mode isEqualToString:@"report"] && nav) {
+        ApolloSimDebugNavChurnReport(nav, @"report");
+        return;
+    }
+    if (!nav || nav.viewControllers.count < 2) {
+        ApolloLog(@"[SimDebugTap] navchurn: needs a pushed controller (nav=%@ depth=%lu)",
+                  nav, (unsigned long)nav.viewControllers.count);
+        return;
+    }
+    ApolloSimDebugNavChurnReport(nav, @"before");
+    UIViewController *top = nav.topViewController;
+    if ([mode isEqualToString:@"appear"]) {
+        sApolloSimNavChurnRevealed = nav.viewControllers[nav.viewControllers.count - 2];
+        sApolloSimNavChurnPopped = top;
+        ApolloLog(@"[SimDebugTap] navchurn appear: pop %@, push it back from %@'s viewDidAppear:",
+                  NSStringFromClass(top.class), NSStringFromClass(sApolloSimNavChurnRevealed.class));
+        [nav popViewControllerAnimated:YES];
+    } else {
+        ApolloLog(@"[SimDebugTap] navchurn: pop %@ and push it back in the same turn",
+                  NSStringFromClass(top.class));
+        [nav popViewControllerAnimated:YES];
+        [nav pushViewController:top animated:YES];
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ApolloSimDebugNavChurnReport(nav, @"after");
+    });
+}
+
+// Grouped on purpose: an ungrouped %hook makes Logos append its registration
+// after the closing #endif, where the device build (no APOLLO_SIM_BUILD) has
+// none of these declarations. %init(ApolloSimNavChurn) lives in the %ctor below.
+%group ApolloSimNavChurn
+%hook UIViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    UIViewController *popped = sApolloSimNavChurnPopped;
+    if (!popped || self != sApolloSimNavChurnRevealed) return;
+    sApolloSimNavChurnRevealed = nil;
+    sApolloSimNavChurnPopped = nil;
+    UINavigationController *nav = self.navigationController;
+    [nav pushViewController:popped animated:YES];
+    ApolloLog(@"[SimDebugTap] navchurn appear: pushed %@ from viewDidAppear:; coordinator now %@ "
+              "(non-nil means the push started synchronously, inside the pop's completeTransition:)",
+              NSStringFromClass(popped.class), nav.transitionCoordinator);
+}
+%end
+%end
+
 // "scrollto Y" command support: pin the tallest on-screen scroll view (the
 // comments table on a thread) to a content offset, so a test can land on the
 // same comments every run — a synthesized flick's inertia varies run to run.
@@ -560,6 +659,13 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             ApolloSubredditListDiagRearm();
             return;
         }
+        // "indexdiag" command: log every known subreddit table's section-index
+        // state (native index color, captured native state, overlay) — see
+        // ApolloSubredditIndexDebugDescribeTables in ApolloSubredditIndexPolish.
+        if ([contents hasPrefix:@"indexdiag"]) {
+            ApolloSubredditIndexDebugDescribeTables();
+            return;
+        }
         // "headerstyle N" command: switch the Header Style setting through the
         // same path as the settings picker (global + persisted default +
         // change notification), so mode switches — including the live
@@ -600,6 +706,12 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             NSString *payload = [[contents substringFromIndex:6] stringByTrimmingCharactersInSet:
                 NSCharacterSet.whitespaceAndNewlineCharacterSet];
             ApolloSimDebugPerformCrash(payload);
+            return;
+        }
+        if ([contents hasPrefix:@"navchurn"]) {
+            NSString *mode = [[contents substringFromIndex:8] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            ApolloSimDebugNavChurn(mode);
             return;
         }
         // "devvitjs <js>" command: evaluate JS in the live interactive-post
@@ -718,8 +830,12 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         for (NSString *part in parts) if (part.length > 0) [numbers addObject:part];
         if (isSwipe) {
             if (numbers.count < 4) { ApolloLog(@"[SimDebugTap] malformed swipe: %@", contents); return; }
-            ApolloSimDebugPerformSwipe(CGPointMake(numbers[0].doubleValue, numbers[1].doubleValue),
-                                       CGPointMake(numbers[2].doubleValue, numbers[3].doubleValue));
+            // Optional 5th/6th numbers: step count and per-step interval in seconds.
+            int steps = numbers.count >= 5 ? MAX(1, numbers[4].intValue) : 12;
+            NSTimeInterval interval = numbers.count >= 6 ? MAX(0.001, numbers[5].doubleValue) : 0.012;
+            ApolloSimDebugPerformSwipeTimed(CGPointMake(numbers[0].doubleValue, numbers[1].doubleValue),
+                                            CGPointMake(numbers[2].doubleValue, numbers[3].doubleValue),
+                                            steps, interval);
             return;
         }
         if (isHold) {
@@ -743,6 +859,7 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
 }
 
 %ctor {
+    %init(ApolloSimNavChurn);
     ApolloSimInstallLowPowerModeOverride();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
         ApolloSimDebugTapNotification, CFSTR("apollofix.debugtap"), NULL,

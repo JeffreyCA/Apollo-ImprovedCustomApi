@@ -908,6 +908,9 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
 @property (nonatomic, strong) UIVisualEffectView *glassView;
 @property (nonatomic) BOOL refreshScheduled;
 @property (nonatomic) BOOL observationValid;
+// Set by ApolloNavigationTitleGlassRefreshNavigationBar: the next capsule install fades in
+// instead of appearing, because it lands right as an interactive transition settles.
+@property (nonatomic) BOOL fadeNextInstall;
 @property (nonatomic) CGRect observedTitleFrame;
 @property (nonatomic) CGRect observedTitleBounds;
 @property (nonatomic) NSUInteger observedTitleSubviewCount;
@@ -1054,12 +1057,25 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
         self.glassHostView = hostView;
     }
     if (!self.glassView) {
+        // A title control that first shows up mid push/pop is the incoming item's, cross-fading
+        // at partial alpha and not yet at its settled position. A capsule installed now reads
+        // as a translucent bubble floating beside the current title (cancelled swipe on the
+        // feed). Skip it; the transition's completion refreshes the bar and installs it then.
+        if (ApolloNavTransitionInFlight()) return;
         self.glassView = [self newRegularGlassView];
         if (!self.glassView) return;
         self.glassView.frame = targetFrame;
         UILabel *profileTitleLabel = ApolloProfileNavigationTitleLabel(self.titleControl);
-        self.glassView.alpha = profileTitleLabel ? profileTitleLabel.alpha : 1.0;
+        CGFloat targetAlpha = profileTitleLabel ? profileTitleLabel.alpha : 1.0;
+        self.glassView.alpha = targetAlpha;
         [hostView insertSubview:self.glassView atIndex:0];
+        if (self.fadeNextInstall) {
+            self.fadeNextInstall = NO;
+            UIVisualEffectView *installed = self.glassView;
+            installed.alpha = 0.0;
+            [UIView animateWithDuration:0.2 delay:0.0 options:UIViewAnimationOptionBeginFromCurrentState
+                             animations:^{ installed.alpha = targetAlpha; } completion:nil];
+        }
         ApolloLog(@"[NavigationTitleGlass] installed %@ capsule frame=%@",
                   NSStringFromClass(hostView.class), NSStringFromCGRect(self.glassView.frame));
         return;
@@ -1214,6 +1230,22 @@ static void ApolloUpdateNavigationTitleGlass(UIView *titleControl) {
     [controller scheduleTargetRefresh];
 }
 
+void ApolloNavigationTitleGlassRefreshNavigationBar(UINavigationBar *bar) {
+    if (!IsLiquidGlass() || !bar) return;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:(UIView *)bar];
+    for (NSUInteger index = 0; index < queue.count && index < 400; index++) {
+        UIView *view = queue[index];
+        if ([NSStringFromClass(view.class) isEqualToString:@"_UINavigationBarTitleControl"]) {
+            ApolloUpdateNavigationTitleGlass(view);
+            ApolloNavigationTitleGlassController *controller =
+                objc_getAssociatedObject(view, &kApolloNavigationTitleGlassControllerKey);
+            if (controller && !controller.glassView) controller.fadeNextInstall = YES;
+            continue;
+        }
+        for (UIView *child in view.subviews) [queue addObject:child];
+    }
+}
+
 void ApolloNavigationTitleGlassSetContentAlpha(UIView *contentView, CGFloat alpha) {
     if (!IsLiquidGlass() || !contentView) return;
     UIView *titleControl = contentView;
@@ -1248,8 +1280,10 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     }
     if (!bar) return NO;
 
-    // Skip during push/pop so we don't fight UIKit's transition animations.
-    if (bar.layer.animationKeys.count > 0) return NO;
+    // Skip during push/pop so we don't fight UIKit's transition animations. The interruptible
+    // animator on Liquid Glass drives the bar without animation keys on the bar's own layer,
+    // so ask it directly as well.
+    if (bar.layer.animationKeys.count > 0 || ApolloNavTransitionInFlight()) return NO;
 
     // Measure pre-transform position by subtracting our own previous tx.
     CGFloat existingTx = titleControl.transform.tx;
