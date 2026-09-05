@@ -77,8 +77,14 @@ BOOL IsLiquidGlass(void);
 // title position identical whether the buttons are up or stripped. The
 // recenter itself records the live inset via
 // ApolloNavItemNoteTrailingContentInset on every pass that sees real trailing
-// content; holders only toggle the hold. All four are no-ops off-glass (the
-// recenter never runs there and nothing else reads the values).
+// content; holders only toggle the hold. The hold also covers a trailing side
+// that carries a STAND-IN rather than nothing (the comments find navigator
+// swaps Apollo's sort/more/globe group for its count + chevrons for the length
+// of a search): the recorded edge keeps standing in for the live one, the
+// stand-in's own edge is never recorded, and the recenter only defers to the
+// live edge if the parked title would otherwise touch the stand-in. All four
+// are no-ops off-glass (the recenter never runs there and nothing else reads
+// the values).
 void ApolloNavItemSetTrailingReservationHold(UINavigationItem *item, BOOL hold);
 BOOL ApolloNavItemTrailingReservationHold(UINavigationItem *item);
 void ApolloNavItemNoteTrailingContentInset(UINavigationItem *item, CGFloat inset);

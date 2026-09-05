@@ -1442,11 +1442,23 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     // geometry they computed with the buttons up — gap midpoint and overlap
     // clamp alike — which is what keeps the title still in either
     // Balance-Title mode.
+    //
+    // The hold also covers a trailing side that is NOT empty but carries a
+    // stand-in the hold was set for: the comments find navigator
+    // (ApolloFindInCommentsGlass.xm) swaps Apollo's sort/more/globe group for
+    // its count + chevrons for the length of a search, and re-balancing the
+    // title against that narrower group made "43 Comments" slide sideways the
+    // moment the field was tapped. Held, the recorded edge stands in for the
+    // live one and the stand-in never overwrites the recording — the live
+    // edge is kept aside for the overlap check after the centering.
     UINavigationItem *navItem = topVC.navigationItem;
+    CGFloat liveRightLimit = rightLimit;
+    BOOL liveFoundRight = foundRight;
     if (navItem) {
-        if (foundRight) {
+        BOOL hold = ApolloNavItemTrailingReservationHold(navItem);
+        if (foundRight && !hold) {
             ApolloNavItemNoteTrailingContentInset(navItem, CGRectGetWidth(bar.bounds) - rightLimit);
-        } else if (ApolloNavItemTrailingReservationHold(navItem)) {
+        } else if (hold) {
             CGFloat reservedInset = ApolloNavItemTrailingContentInset(navItem);
             if (reservedInset > 0) {
                 rightLimit = CGRectGetWidth(bar.bounds) - reservedInset;
@@ -1510,18 +1522,19 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     }
 
     CGFloat halfWidth = width / 2.0;
-    CGFloat targetCenter;
-    if (sLGTitleGapCentering && foundLeft && foundRight) {
-        // Content on BOTH sides: park the title at the midpoint of the visual
-        // gap between them. Equal margins by construction — no overlap possible
-        // — and the position no longer depends on which of UIKit's three layout
-        // arms fired or how wide the trailing pill is. This is the case (e.g. a
-        // single back button facing a 3-icon moderator capsule) where a wider
-        // trailing cluster pulls the visual balance point away from true center.
-        targetCenter = (rightLimit - leftLimit >= width + 4.0)
-            ? (leftLimit + rightLimit) / 2.0
-            : unadjustedCenter;  // gap narrower than the title — leave UIKit's layout alone
-    } else {
+    CGFloat barCenter = CGRectGetMidX(bar.bounds);
+    CGFloat (^centerAgainst)(CGFloat, BOOL) = ^CGFloat(CGFloat rightEdge, BOOL haveRight) {
+        if (sLGTitleGapCentering && foundLeft && haveRight) {
+            // Content on BOTH sides: park the title at the midpoint of the visual
+            // gap between them. Equal margins by construction — no overlap possible
+            // — and the position no longer depends on which of UIKit's three layout
+            // arms fired or how wide the trailing pill is. This is the case (e.g. a
+            // single back button facing a 3-icon moderator capsule) where a wider
+            // trailing cluster pulls the visual balance point away from true center.
+            return (rightEdge - leftLimit >= width + 4.0)
+                ? (leftLimit + rightEdge) / 2.0
+                : unadjustedCenter;  // gap narrower than the title — leave UIKit's layout alone
+        }
         // Screen centering (the toggle's OFF mode, and always the rule when
         // content sits on at most one side, e.g. root screens): prefer the
         // bar's absolute midpoint, nudged just enough off a pill it would
@@ -1530,12 +1543,21 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
         // doesn't need to be "balanced against". The nudge is what keeps long
         // titles from sliding under the trailing pill (#178) without needing
         // the old bulk-translation bail.
-        CGFloat barCenter = CGRectGetMidX(bar.bounds);
         CGFloat minCenter = leftLimit + halfWidth + kEdgePadding;
-        CGFloat maxCenter = rightLimit - halfWidth - kEdgePadding;
-        targetCenter = (minCenter > maxCenter)
+        CGFloat maxCenter = rightEdge - halfWidth - kEdgePadding;
+        return (minCenter > maxCenter)
             ? unadjustedCenter   // bar too cramped — leave UIKit's layout alone
             : MIN(MAX(barCenter, minCenter), maxCenter);
+    };
+    CGFloat targetCenter = centerAgainst(rightLimit, foundRight);
+    // A held trailing edge is a promise not to move the title, not a licence to
+    // run it under whatever really sits there: when the live trailing content
+    // reaches further in than the recorded edge and the parked title would touch
+    // it, centre against the live edge after all (a long title facing a wide
+    // match count) — a shift beats an overlap.
+    if (liveFoundRight && liveRightLimit < rightLimit - 0.5 &&
+        targetCenter + halfWidth + kEdgePadding > liveRightLimit) {
+        targetCenter = centerAgainst(liveRightLimit, YES);
     }
 
     CGFloat newTx = targetCenter - unadjustedCenter;

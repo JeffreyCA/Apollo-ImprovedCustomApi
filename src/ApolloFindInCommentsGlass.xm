@@ -31,12 +31,15 @@
 //     becomes first responder, so its dock-to-keyboard presentation never runs
 //     (nor its refresh-control stash or the isSearching layout branch);
 //   - a match navigator in the nav bar's trailing glass group while a search
-//     is live — "n/m" + chevron.up + chevron.down as plain bar button items,
-//     replacing Apollo's sort/more (+ our translate globe) items for the length
-//     of the search and restoring them after. The chevrons call Apollo's own
+//     is live — one compact capsule, [n/m ^ v], sized like Apollo's own
+//     sort/more/globe group and standing in for it for the length of the
+//     search (restored after). The chevrons call Apollo's own
 //     previous/nextResultButtonTappedWithSender:, so the wrap-around, the
 //     highlight move and the scroll stay native (and ApolloFindInComments.xm's
-//     scroll watchdog + comma multi-term search keep wrapping those calls);
+//     scroll watchdog + comma multi-term search keep wrapping those calls).
+//     The title does not re-balance against the swapped group: the search
+//     holds the nav item's trailing-edge reservation (ApolloCommon.h), so the
+//     gap-centred title stays exactly where it was while the group changes;
 //   - Apollo's own session side effects that still make sense: the floating
 //     comment-jump button hides while a search is live, the keyboard dismisses
 //     on drag (Apollo resigned its field once a drag reached 200pt/s), the
@@ -214,11 +217,103 @@ static const void *kFGNavItemOwnerKey = &kFGNavItemOwnerKey; // UINavigationItem
 @implementation ApolloFindGlassWeakBox
 @end
 
+// MARK: - Navigator capsule
+//
+// [n/m ^ v] as ONE custom bar button item. UIKit wraps a custom view in its own
+// glass platter, so this reads as a single capsule where Apollo's
+// sort/more/globe capsule sat — and it is sized to that capsule on purpose:
+// Apollo packs three 34-38pt icon slots (~106pt of content), this packs a count
+// slot plus two 34pt chevrons. The title's gap-centring is held against the
+// recorded edge of Apollo's group during the search (see installNavigator), so
+// a stand-in of the same width keeps the title, the capsule and the balance
+// looking untouched; the count slot is always present so the capsule does not
+// pop wider on the first keystroke.
+
+static const CGFloat kFGNavigatorHeight        = 36.0;  // Apollo's trailing icon slot height
+static const CGFloat kFGNavigatorButtonWidth   = 34.0;  // Apollo's icon slot width
+static const CGFloat kFGNavigatorCountMinWidth = 36.0;  // fits "9/99" in the monospaced 15pt; wider counts grow the slot
+static const CGFloat kFGNavigatorInset         = 4.0;   // breathing room inside the capsule (UIKit's platter adds its own)
+
+@interface ApolloFindGlassNavigatorView : UIView
+@property (nonatomic, strong) UILabel *countLabel;
+@property (nonatomic, strong) UIButton *previousButton;
+@property (nonatomic, strong) UIButton *nextButton;
+@end
+
+@implementation ApolloFindGlassNavigatorView
+
+- (instancetype)init {
+    self = [super initWithFrame:CGRectZero];
+    if (!self) return nil;
+    UIImageSymbolConfiguration *cfg =
+        [UIImageSymbolConfiguration configurationWithPointSize:15.0 weight:UIImageSymbolWeightSemibold];
+
+    _countLabel = [[UILabel alloc] init];
+    _countLabel.font = [UIFont monospacedDigitSystemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    _countLabel.textColor = [UIColor.labelColor colorWithAlphaComponent:0.85];
+    _countLabel.textAlignment = NSTextAlignmentCenter;
+    _countLabel.adjustsFontSizeToFitWidth = NO;
+    _countLabel.accessibilityTraits = UIAccessibilityTraitStaticText;
+    [self addSubview:_countLabel];
+
+    _previousButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_previousButton setImage:[UIImage systemImageNamed:@"chevron.up" withConfiguration:cfg]
+                     forState:UIControlStateNormal];
+    _previousButton.accessibilityLabel = @"Previous match";
+    [self addSubview:_previousButton];
+
+    _nextButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_nextButton setImage:[UIImage systemImageNamed:@"chevron.down" withConfiguration:cfg]
+                 forState:UIControlStateNormal];
+    _nextButton.accessibilityLabel = @"Next match";
+    [self addSubview:_nextButton];
+    return self;
+}
+
+- (CGFloat)countSlotWidth {
+    CGFloat natural = ceil([self.countLabel sizeThatFits:CGSizeMake(CGFLOAT_MAX, kFGNavigatorHeight)].width) + 4.0;
+    return MAX(kFGNavigatorCountMinWidth, natural);
+}
+
+- (CGSize)intrinsicContentSize {
+    return CGSizeMake(kFGNavigatorInset * 2.0 + [self countSlotWidth] + 2.0 * kFGNavigatorButtonWidth,
+                      kFGNavigatorHeight);
+}
+
+- (CGSize)sizeThatFits:(CGSize)size {
+    return [self intrinsicContentSize];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat height = CGRectGetHeight(self.bounds);
+    CGFloat x = CGRectGetWidth(self.bounds) - kFGNavigatorInset - kFGNavigatorButtonWidth;
+    self.nextButton.frame = CGRectMake(x, 0.0, kFGNavigatorButtonWidth, height);
+    x -= kFGNavigatorButtonWidth;
+    self.previousButton.frame = CGRectMake(x, 0.0, kFGNavigatorButtonWidth, height);
+    self.countLabel.frame = CGRectMake(kFGNavigatorInset, 0.0, MAX(0.0, x - kFGNavigatorInset), height);
+}
+
+// Returns YES when the capsule needs a new width for this count.
+- (BOOL)setCountText:(NSString *)text {
+    if ([self.countLabel.text ?: @"" isEqualToString:text ?: @""]) return NO;
+    self.countLabel.text = text;
+    CGSize size = [self intrinsicContentSize];
+    BOOL resized = fabs(size.width - CGRectGetWidth(self.bounds)) > 0.5;
+    if (resized) {
+        [self invalidateIntrinsicContentSize];
+        self.bounds = CGRectMake(0.0, 0.0, size.width, size.height);
+    }
+    [self setNeedsLayout];
+    return resized;
+}
+
+@end
+
 @interface ApolloFindInCommentsGlassBridge : NSObject <UISearchBarDelegate, UISearchControllerDelegate>
 @property (nonatomic, weak) UIViewController *commentsVC;
-@property (nonatomic, strong) UIBarButtonItem *nextItem;
-@property (nonatomic, strong) UIBarButtonItem *previousItem;
-@property (nonatomic, strong) UIBarButtonItem *counterItem;
+@property (nonatomic, strong) UIBarButtonItem *navigatorItem;          // the one trailing item: [n/m ^ v]
+@property (nonatomic, strong) ApolloFindGlassNavigatorView *navigatorView;
 @property (nonatomic, copy) NSArray<UIBarButtonItem *> *savedRightItems; // Apollo's items, restored after the search
 @property (nonatomic, assign) BOOL navigatorInstalled;
 @property (nonatomic, assign) BOOL applyingItems;   // our own rightBarButtonItems writes pass the hook below
@@ -273,69 +368,50 @@ static UIColor *FGAccent(UIViewController *vc) {
 // MARK: navigator items
 
 - (void)buildItemsIfNeeded {
-    if (self.nextItem) return;
-    UIImageSymbolConfiguration *cfg =
-        [UIImageSymbolConfiguration configurationWithPointSize:15.0 weight:UIImageSymbolWeightSemibold];
-    UIImage *up = [UIImage systemImageNamed:@"chevron.up" withConfiguration:cfg];
-    UIImage *down = [UIImage systemImageNamed:@"chevron.down" withConfiguration:cfg];
-
-    self.previousItem = [[UIBarButtonItem alloc] initWithImage:up style:UIBarButtonItemStylePlain
-                                                        target:self action:@selector(previousTapped:)];
-    self.previousItem.accessibilityLabel = @"Previous match";
-    self.nextItem = [[UIBarButtonItem alloc] initWithImage:down style:UIBarButtonItemStylePlain
-                                                    target:self action:@selector(nextTapped:)];
-    self.nextItem.accessibilityLabel = @"Next match";
-
-    // "n/m" as a plain title item: UIKit gives it its own small glass capsule
-    // beside the chevrons' one (image items group together, a title item sits
-    // apart), with the system's title metrics; monospaced digits keep it from
-    // shifting as the numbers change. No target: it is a readout, not a button.
-    self.counterItem = [[UIBarButtonItem alloc] initWithTitle:@"" style:UIBarButtonItemStylePlain
-                                                       target:nil action:nil];
-    self.counterItem.accessibilityTraits = UIAccessibilityTraitStaticText;
-    UIFont *font = [UIFont monospacedDigitSystemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    NSDictionary *attrs = @{NSFontAttributeName: font,
-                            NSForegroundColorAttributeName: [UIColor.labelColor colorWithAlphaComponent:0.85]};
-    [self.counterItem setTitleTextAttributes:attrs forState:UIControlStateNormal];
-    [self.counterItem setTitleTextAttributes:attrs forState:UIControlStateHighlighted];
-    [self.counterItem setTitleTextAttributes:attrs forState:UIControlStateDisabled];
+    if (self.navigatorItem) return;
+    ApolloFindGlassNavigatorView *view = [[ApolloFindGlassNavigatorView alloc] init];
+    [view.previousButton addTarget:self action:@selector(previousTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [view.nextButton addTarget:self action:@selector(nextTapped:) forControlEvents:UIControlEventTouchUpInside];
+    CGSize size = [view intrinsicContentSize];
+    view.frame = CGRectMake(0.0, 0.0, size.width, size.height);
+    self.navigatorView = view;
+    self.navigatorItem = [[UIBarButtonItem alloc] initWithCustomView:view];
 }
 
-// Right-to-left order in rightBarButtonItems: chevron.down at the trailing
-// edge, chevron.up beside it, the count leading the group — [n/m ^ v].
 - (NSArray<UIBarButtonItem *> *)navigatorItems {
     [self buildItemsIfNeeded];
-    return @[self.nextItem, self.previousItem, self.counterItem];
+    return @[self.navigatorItem];
 }
 
 - (BOOL)itemsAreOurs:(NSArray<UIBarButtonItem *> *)items {
-    return self.nextItem && items.count == 3 && items[0] == self.nextItem &&
-           items[1] == self.previousItem && items[2] == self.counterItem;
+    return self.navigatorItem && items.count == 1 && items[0] == self.navigatorItem;
 }
 
 // Reflect Apollo's match state into the navigator: "n/m" (Apollo's own label
-// format, "0/0" for a query with no hits, nothing while no search is active)
-// and chevrons enabled only when there is something to step through.
+// format, "0/0" for a query with no hits, an empty slot while no search is
+// active) and chevrons enabled only when there is something to step through.
 - (void)updateNavigator {
     UIViewController *vc = self.commentsVC;
-    if (!vc || !self.nextItem) return;
+    if (!vc || !self.navigatorView) return;
     NSInteger index = 0, count = 0;
     BOOL active = FGReadMatchState(vc, &index, &count);
     NSString *text = @"";
     if (active) text = count > 0 ? [NSString stringWithFormat:@"%ld/%ld", (long)(index + 1), (long)count] : @"0/0";
-    if (![self.counterItem.title isEqualToString:text]) self.counterItem.title = text;
-    // An empty title still gets its own glass capsule; drop the item out of the
-    // group until there is a count to show.
-    if (@available(iOS 16.0, *)) {
-        BOOL hide = text.length == 0;
-        if (self.counterItem.hidden != hide) self.counterItem.hidden = hide;
-    }
+    BOOL resized = [self.navigatorView setCountText:text];
     BOOL enable = active && count > 0;
-    if (self.nextItem.enabled != enable) self.nextItem.enabled = enable;
-    if (self.previousItem.enabled != enable) self.previousItem.enabled = enable;
+    if (self.navigatorView.nextButton.enabled != enable) self.navigatorView.nextButton.enabled = enable;
+    if (self.navigatorView.previousButton.enabled != enable) self.navigatorView.previousButton.enabled = enable;
     UIColor *accent = FGAccent(vc);
-    self.nextItem.tintColor = accent;
-    self.previousItem.tintColor = accent;
+    self.navigatorView.nextButton.tintColor = accent;
+    self.navigatorView.previousButton.tintColor = accent;
+    // A count wider than the slot ("12/345") grows the capsule; UIKit caches a
+    // custom view's measurement, so re-set the item to make it re-measure.
+    if (resized && self.navigatorInstalled) {
+        UINavigationItem *navItem = vc.navigationItem;
+        self.applyingItems = YES;
+        navItem.rightBarButtonItems = [self navigatorItems];
+        self.applyingItems = NO;
+    }
 }
 
 - (void)installNavigator {
@@ -356,6 +432,11 @@ static UIColor *FGAccent(UIViewController *vc) {
     // Ownership is flagged BEFORE the write so the globe merge in
     // ApolloTranslation.xm (which runs from the setter hook) stands down.
     self.navigatorInstalled = YES;
+    // Hold the title's trailing-edge reservation BEFORE the swap: the Liquid
+    // Glass gap-centring then keeps balancing the title against the edge
+    // Apollo's group had (recorded on every pass that saw it), so the title
+    // does not slide when the narrower navigator takes the group's place.
+    ApolloNavItemSetTrailingReservationHold(navItem, YES);
     self.applyingItems = YES;
     navItem.rightBarButtonItems = [self navigatorItems];
     self.applyingItems = NO;
@@ -388,6 +469,9 @@ static UIColor *FGAccent(UIViewController *vc) {
         self.applyingItems = YES;
         navItem.rightBarButtonItems = self.savedRightItems;
         self.applyingItems = NO;
+        // Apollo's group is back where the recorded edge says it is; release
+        // the hold after the write so the next centring pass measures live.
+        ApolloNavItemSetTrailingReservationHold(navItem, NO);
     }
     self.savedRightItems = nil;
     UIView *jump = FGJumpButton(vc);
