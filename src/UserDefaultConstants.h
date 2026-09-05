@@ -95,6 +95,10 @@ static NSString *const UDKeyFollowedUsersOrder = @"FollowedUsersOrder";
 static NSString *const ApolloSubredditSectionsChangedNotification = @"ApolloSubredditSectionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
+// Feed post titles in Semibold instead of Apollo's Regular (large + compact
+// posts, crossposts, comment post context). Appearance > Posts > Bold Post
+// Titles; default NO. See ApolloBoldPostTitles.xm.
+static NSString *const UDKeyBoldPostTitles = @"BoldPostTitles";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
 static NSString *const UDKeyReadPostMaxCount = @"ReadPostMaxCount";
 static NSString *const UDKeyShowRecentlyReadThumbnails = @"ShowRecentlyReadThumbnails";

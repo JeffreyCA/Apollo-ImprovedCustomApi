@@ -251,13 +251,20 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(UITr
 
     // Runtime-injected leaf rows do not exist in the generated native crawl.
     // Disclosure injections are already represented by router entries above;
-    // Color Flairs is the one injected switch with no dedicated screen/route.
+    // the switches appended to Apollo's Appearance sections (Color Flairs,
+    // Bold Post Titles) have no dedicated screen/route, so index them here.
     ApolloSettingsSearchEntry *colorFlairs = [[ApolloSettingsSearchEntry alloc] init];
     colorFlairs.title = @"Color Flairs";
     colorFlairs.breadcrumb = @"Appearance → Flair";
     colorFlairs.nativePath = @[ @"Appearance" ];
     colorFlairs.rowTitle = @"Color Flairs";
     [entries addObject:colorFlairs];
+    ApolloSettingsSearchEntry *boldPostTitles = [[ApolloSettingsSearchEntry alloc] init];
+    boldPostTitles.title = @"Bold Post Titles";
+    boldPostTitles.breadcrumb = @"Appearance → Posts";
+    boldPostTitles.nativePath = @[ @"Appearance" ];
+    boldPostTitles.rowTitle = @"Bold Post Titles";
+    [entries addObject:boldPostTitles];
 
     // Resolve a leading icon for every result so the list is visually uniform:
     //   own row icon (captured above) → the parent screen/section's icon (by
