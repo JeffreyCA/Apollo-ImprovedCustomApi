@@ -268,28 +268,69 @@ static NSInteger Rows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     return n;
 }
 
-// Apollo's Appearance screen builds this row with a UIListContentConfiguration
-// (iOS 14+ cell content API) — the cell renders from that, not from
-// .textLabel, so setting .textLabel.text alone silently no-ops on it and
-// only the legacy label (invisible) changes. Rewrite the content
-// configuration's text when present, and set .textLabel too for the
-// legacy-cell fallback case.
+// The Themes row is a Eureka LabelRow: its cell (Eureka.LabelCellOf<String>)
+// renders through the legacy .textLabel, and Eureka re-renders it FROM THE ROW
+// MODEL (textLabel.text = row.title, i.e. "Themes", then Apollo's cellUpdate
+// re-applies its medium-weight font) on every Cell.update(). Our rewrite runs
+// from cellForRow and willDisplay, which covers dequeues, reloads and the
+// scroll-back-into-view case — but Eureka also calls row.updateCell() from
+// Cell.tintColorDidChange(), and that path never touches the table view's
+// delegate. UIKit dims the presenting view's tint while a UIAlertController is
+// up, so presenting the Post Size action sheet reverted the label to "Themes"
+// and dismissing it (another tint change → another re-render) left it there;
+// only picking an option reloaded the table and healed it (#993). So the cell
+// is marked and its own runtime class gets a tintColorDidChange override that
+// re-asserts our label after Eureka's re-render. The class is taken from the
+// live cell rather than a hardcoded mangled generic name, so it follows
+// whatever Eureka hands us.
 //
-// Cell-time isn't the only place this needs to run: UIKit's cell state
-// machine (automaticallyUpdatesContentConfiguration, on by default) can
-// reapply the cell's ORIGINAL base configuration — Apollo's, not ours —
-// whenever the cell's configuration state changes, which fires again on
-// scroll, selection, or simply the row scrolling back into view after a
-// push/pop. Observed as the label reverting once you leave and return to
-// this screen. Re-assert from willDisplay too, which fires on every one of
-// those passes, not just the initial dequeue.
+// The content-configuration branch stays for the case where a future Apollo
+// build moves this row onto UIListContentConfiguration: there .textLabel is the
+// invisible legacy label and only the configuration's text renders.
+static const void *kThemesRowCellKey = &kThemesRowCellKey;
+
+// The cell class carrying our tintColorDidChange override, and the IMP it
+// displaced (Eureka.Cell's). Resolved from the first Themes cell we see.
+static Class sThemesCellClass = Nil;
+static void (*sThemesCellTintOrig)(id, SEL) = NULL;
+
+static void RewriteThemesRowLabel(UITableViewCell *cell);
+
+static void ThemesCellTintColorDidChange(UITableViewCell *self, SEL _cmd) {
+    if (sThemesCellTintOrig) sThemesCellTintOrig(self, _cmd);   // Eureka: row.updateCell() → "Themes" + medium font
+    if (objc_getAssociatedObject(self, kThemesRowCellKey)) RewriteThemesRowLabel(self);
+}
+
+static void InstallThemesCellTintHook(Class cls) {
+    if (!cls || sThemesCellClass) return;
+    // A KVO/isa-swizzled cell reports a dynamic subclass; hook the class that
+    // actually owns the Eureka override chain, not the ephemeral subclass.
+    while (cls && strncmp(class_getName(cls), "NSKVONotifying_", 15) == 0) cls = class_getSuperclass(cls);
+    SEL sel = @selector(tintColorDidChange);
+    Method m = class_getInstanceMethod(cls, sel);              // inherited Eureka.Cell override (or UIView's)
+    if (!m) return;
+    sThemesCellClass = cls;
+    sThemesCellTintOrig = (void (*)(id, SEL))method_getImplementation(m);
+    class_replaceMethod(cls, sel, (IMP)ThemesCellTintColorDidChange, "v@:");
+    ApolloLog(@"ThemeManager: Themes row tint hook installed on %@", NSStringFromClass(cls));
+}
+
 static void RewriteThemesRowLabel(UITableViewCell *cell) {
+    if (!objc_getAssociatedObject(cell, kThemesRowCellKey)) {
+        objc_setAssociatedObject(cell, kThemesRowCellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        InstallThemesCellTintHook(object_getClass(cell));
+    }
     if ([cell.contentConfiguration isKindOfClass:[UIListContentConfiguration class]]) {
         UIListContentConfiguration *config = [(UIListContentConfiguration *)cell.contentConfiguration copy];
         config.text = @"Theme Manager";
         cell.contentConfiguration = config;
     }
     cell.textLabel.text = @"Theme Manager";
+    // Apollo gives its Themes row a medium-weight face; every other row on this
+    // screen is regular. The row is ours now, so match its neighbours — same
+    // size (tracks Apollo's own text-size slider), regular weight (#993).
+    UIFont *font = cell.textLabel.font;
+    if (font.pointSize > 0) cell.textLabel.font = [UIFont systemFontOfSize:font.pointSize weight:UIFontWeightRegular];
 }
 
 static UITableViewCell *Cell(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
