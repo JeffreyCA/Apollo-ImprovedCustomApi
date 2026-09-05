@@ -93,6 +93,9 @@ static NSString *const UDKeySubredditSectionOrder = @"SubredditSectionOrder";
 // append in their natural alphabetical order.
 static NSString *const UDKeyFollowedUsersOrder = @"FollowedUsersOrder";
 static NSString *const ApolloSubredditSectionsChangedNotification = @"ApolloSubredditSectionsChangedNotification";
+// Whether the Subreddit Sections screen keeps its live preview pinned above
+// the options (YES, default) or lets it scroll away with them. Absent == YES.
+static NSString *const UDKeySubredditSectionsPreviewPinned = @"SubredditSectionsPreviewPinned";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
