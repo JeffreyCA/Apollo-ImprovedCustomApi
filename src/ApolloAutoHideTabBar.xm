@@ -3,9 +3,12 @@
 #import <math.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import "ApolloAutoHideTabBar.h"
 #import "ApolloCommon.h"
 #import "ApolloListLayoutSupport.h"
 #import "ApolloState.h"
+#import "ipad/ApolloPaneLayout.h"
+#import "ipad/ApolloPaneSplitViewController.h"
 #import "UserDefaultConstants.h"
 
 // MARK: - Tab Bar Auto-Hide Reveal Fix
@@ -278,19 +281,135 @@ static BOOL ApolloNavWantsNativeTabBarMinimize(UINavigationController *nav) {
     return nav.hidesBarsOnSwipe;
 }
 
+// This predicate sits directly in UIScrollView.setContentOffset: while Mode B
+// is enabled. The generic shared enumerator returns a newly-created NSArray for
+// every tab child, which previously meant at least one autoreleased allocation
+// per content-offset update on iPhone and several mutable/immutable arrays per
+// update on iPad. Keep the two real app topologies allocation-free and reserve
+// the generic enumerator for an unrelated UISplitViewController fallback.
+#if APOLLO_SIM_BUILD
+static NSUInteger sApolloAutoHideDirectTabScans = 0;
+static NSUInteger sApolloAutoHidePaneTabScans = 0;
+static NSUInteger sApolloAutoHideGenericFallbackScans = 0;
+#endif
+
+static BOOL ApolloTabChildWantsNativeMinimize(UIViewController *child) {
+    if (!child) return NO;
+
+    if ([child isKindOfClass:[UINavigationController class]]) {
+#if APOLLO_SIM_BUILD
+        sApolloAutoHideDirectTabScans++;
+#endif
+        return ApolloNavWantsNativeTabBarMinimize((UINavigationController *)child);
+    }
+
+    if (ApolloPaneLayoutActive() &&
+        [child isKindOfClass:[ApolloPaneSplitViewController class]]) {
+#if APOLLO_SIM_BUILD
+        sApolloAutoHidePaneTabScans++;
+#endif
+        ApolloPaneSplitViewController *pane = (ApolloPaneSplitViewController *)child;
+        UINavigationController *primary =
+            [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary];
+        if (ApolloNavWantsNativeTabBarMinimize(primary)) return YES;
+        UINavigationController *detail =
+            [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary];
+        return detail != primary && ApolloNavWantsNativeTabBarMinimize(detail);
+    }
+
+    if ([child isKindOfClass:[UISplitViewController class]]) {
+#if APOLLO_SIM_BUILD
+        sApolloAutoHideGenericFallbackScans++;
+#endif
+        for (UINavigationController *nav in ApolloAllNavigationControllersForTabChild(child)) {
+            if (ApolloNavWantsNativeTabBarMinimize(nav)) return YES;
+        }
+        return NO;
+    }
+
+    // Plain tab children are rare in Apollo, but this preserves the shared
+    // helper's stock fallback without creating a one-element array.
+    UINavigationController *nav = child.navigationController;
+#if APOLLO_SIM_BUILD
+    sApolloAutoHideDirectTabScans++;
+#endif
+    return ApolloNavWantsNativeTabBarMinimize(nav);
+}
+
 static BOOL ApolloTabBarControllerWantsNativeMinimize(UITabBarController *tbc) {
     if (!tbc) return NO;
     for (UIViewController *child in tbc.viewControllers) {
-        UINavigationController *nav = nil;
-        if ([child isKindOfClass:[UINavigationController class]]) {
-            nav = (UINavigationController *)child;
-        }
-        if (nav && ApolloNavWantsNativeTabBarMinimize(nav)) {
-            return YES;
-        }
+        if (ApolloTabChildWantsNativeMinimize(child)) return YES;
     }
     return NO;
 }
+
+#if APOLLO_SIM_BUILD
+NSString *ApolloAutoHideTabBarSimScanStatus(NSUInteger iterations) {
+    UIViewController *controller = ApolloMainTabBarController();
+    UITabBarController *tbc = [controller isKindOfClass:[UITabBarController class]]
+        ? (UITabBarController *)controller : nil;
+    if (!tbc) return @"no tab bar controller pass=0";
+
+    iterations = MIN(MAX(iterations, 1), 100000);
+    sApolloAutoHideDirectTabScans = 0;
+    sApolloAutoHidePaneTabScans = 0;
+    sApolloAutoHideGenericFallbackScans = 0;
+    CFTimeInterval started = CACurrentMediaTime();
+    BOOL wanted = NO;
+    for (NSUInteger index = 0; index < iterations; index++) {
+        wanted = ApolloTabBarControllerWantsNativeMinimize(tbc);
+    }
+    CFTimeInterval elapsed = CACurrentMediaTime() - started;
+    BOOL pane = ApolloPaneLayoutActive();
+    BOOL pass = sApolloAutoHideGenericFallbackScans == 0 &&
+        (pane ? sApolloAutoHidePaneTabScans > 0 : sApolloAutoHideDirectTabScans > 0);
+    return [NSString stringWithFormat:
+        @"iterations=%lu pane=%d directScans=%lu paneScans=%lu "
+         "genericFallbackArrayScans=%lu elapsedMs=%.3f checksum=%d pass=%d",
+        (unsigned long)iterations, pane,
+        (unsigned long)sApolloAutoHideDirectTabScans,
+        (unsigned long)sApolloAutoHidePaneTabScans,
+        (unsigned long)sApolloAutoHideGenericFallbackScans,
+        elapsed * 1000.0, wanted, pass];
+}
+
+NSString *ApolloAutoHideTabBarSimSetPolicy(BOOL enabled) {
+    UIViewController *controller = ApolloMainTabBarController();
+    UITabBarController *tbc = [controller isKindOfClass:[UITabBarController class]]
+        ? (UITabBarController *)controller : nil;
+    if (!tbc) return @"policy unavailable pass=0";
+    for (UIViewController *child in tbc.viewControllers) {
+        if ([child isKindOfClass:[UINavigationController class]]) {
+            ((UINavigationController *)child).hidesBarsOnSwipe = enabled;
+            continue;
+        }
+        if (ApolloPaneLayoutActive() &&
+            [child isKindOfClass:[ApolloPaneSplitViewController class]]) {
+            ApolloPaneSplitViewController *pane = (ApolloPaneSplitViewController *)child;
+            UINavigationController *primary =
+                [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary];
+            UINavigationController *detail =
+                [pane apollo_navigationControllerForColumn:ApolloPaneColumnSecondary];
+            primary.hidesBarsOnSwipe = enabled;
+            if (detail != primary) detail.hidesBarsOnSwipe = enabled;
+            continue;
+        }
+        for (UINavigationController *navigationController in
+                ApolloAllNavigationControllersForTabChild(child)) {
+            navigationController.hidesBarsOnSwipe = enabled;
+        }
+    }
+    BOOL wanted = ApolloTabBarControllerWantsNativeMinimize(tbc);
+    NSInteger behavior = ApolloCurrentMinimizeBehavior(tbc);
+    BOOL pass = wanted == enabled && behavior == (enabled
+        ? ApolloTabBarMinimizeBehaviorOnScrollDown
+        : ApolloTabBarMinimizeBehaviorNever);
+    return [NSString stringWithFormat:
+        @"enabled=%d wanted=%d behavior=%ld pane=%d pass=%d", enabled, wanted,
+        (long)behavior, ApolloPaneLayoutActive(), pass];
+}
+#endif
 
 BOOL ApolloTabBarIsHideOnScrollPresentationOwned(UITabBar *tabBar) {
     return [objc_getAssociatedObject(tabBar,

@@ -234,6 +234,25 @@ static void PiPClaimMixablePlaybackSession(void) {
     [session setActive:YES withOptions:0 error:nil];
 }
 
+// Return the top edge of a view only when it is actually visible and occludes
+// the bottom edge of the app window at the video's horizontal midpoint. A tab
+// bar can stay attached to a window while hidden, translated away, or
+// repurposed as iPadOS's top/side tab sidebar; testing `tabBar.window` alone
+// therefore subtracts phantom chrome. Testing the x coordinate also prevents a
+// vertical sidebar that reaches the bottom from shrinking the whole window.
+static BOOL PiPBottomOcclusionTopForView(UIView *view, UIWindow *window,
+                                         CGFloat horizontalPoint, CGFloat *topOut) {
+    if (!view || !window || view.window != window || view.hidden || view.alpha <= 0.01) return NO;
+    CGRect frame = [view convertRect:view.bounds toView:window];
+    CGRect visible = CGRectIntersection(frame, window.bounds);
+    if (CGRectIsNull(visible) || CGRectIsEmpty(visible)) return NO;
+    CGFloat windowBottom = CGRectGetMaxY(window.bounds);
+    if (CGRectGetMaxY(visible) < windowBottom - 1.0) return NO;
+    if (!CGRectContainsPoint(visible, CGPointMake(horizontalPoint, windowBottom - 0.5))) return NO;
+    if (topOut) *topOut = CGRectGetMinY(visible);
+    return YES;
+}
+
 // Did the user turn this player's sound on? player.muted alone can't answer:
 // Apollo's fresh comments/fullscreen players keep AVPlayer's default
 // muted == NO (silenced by the Ambient session), so a muted-sounding video can
@@ -269,15 +288,16 @@ static BOOL PiPIsVideoMidpointVisible(id videoNode, id cellNode) {
     UIViewController *rootVC = window.rootViewController;
     if ([rootVC isKindOfClass:[UITabBarController class]]) {
         UITabBarController *tab = (UITabBarController *)rootVC;
-        if (tab.tabBar.window) {
-            bottomY -= tab.tabBar.bounds.size.height;
-        }
-        UIViewController *selected = tab.selectedViewController;
-        if ([selected isKindOfClass:[UINavigationController class]]) {
-            UINavigationBar *navBar = ((UINavigationController *)selected).navigationBar;
-            if (navBar.window) {
-                topY = CGRectGetMaxY([navBar convertRect:navBar.bounds toView:nil]);
-            }
+        CGFloat tabBarTop = 0.0;
+        if (PiPBottomOcclusionTopForView(tab.tabBar, window, mid.x, &tabBarTop)) bottomY = tabBarTop;
+        // Unwraps the iPad pane layout's split view controller; identity
+        // otherwise. Any column's bar gives the same top inset — they are laid
+        // out at the same y — so the primary column's is enough.
+        UINavigationController *selectedNav =
+            ApolloNavigationControllerForTabChild(tab.selectedViewController);
+        UINavigationBar *navBar = selectedNav.navigationBar;
+        if (navBar.window) {
+            topY = CGRectGetMaxY([navBar convertRect:navBar.bounds toView:nil]);
         }
     }
 

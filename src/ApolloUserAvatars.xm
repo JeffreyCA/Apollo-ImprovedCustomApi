@@ -3452,8 +3452,9 @@ static NSString *ApolloProfileTabUsernameForController(UITabBarController *tabBa
     if (controllers.count <= ApolloProfileTabIndex) return nil;
 
     UIViewController *profileChild = controllers[ApolloProfileTabIndex];
-    if ([profileChild isKindOfClass:[UINavigationController class]]) {
-        UINavigationController *nav = (UINavigationController *)profileChild;
+    // Every column: with the iPad pane layout a profile can be open in the
+    // primary stack, the detail stack, or both.
+    for (UINavigationController *nav in ApolloAllNavigationControllersForTabChild(profileChild)) {
         for (UIViewController *candidate in nav.viewControllers) {
             if (!ApolloViewControllerLooksProfileRelated(candidate)) continue;
             NSString *username = ApolloUsernameFromProfileViewController(candidate);

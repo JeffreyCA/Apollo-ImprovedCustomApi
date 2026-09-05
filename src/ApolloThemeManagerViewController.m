@@ -417,28 +417,33 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
         return ApolloThemeUIColorFromRGB([compiled rgbForToken:token mode:CurrentAppearanceMode(self.traitCollection)]);
     }
 
-    // No Apollo-Reborn custom theme active. Instead of hard-coding system
-    // colours (which would leave this screen grey/black even when a *stock*
-    // Apollo theme like Solarized or Outrun is applied), inherit the ambient
-    // Apollo theme the same way ApolloSettingsTableViewController /
-    // CustomAPIViewController do: sample the presenting Appearance settings
-    // table (which Apollo itself themes). This makes the Theme Manager and
-    // Gallery match the rest of Apollo's settings under any theme, stock or
-    // custom. Surface tokens come from the sampled table; text tokens keep
-    // system-semantic fallbacks, which adapt correctly on top of the inherited
-    // background — exactly as CustomAPIViewController uses labelColor /
-    // secondaryLabelColor.
+    // No Apollo-Reborn custom theme active. Prefer the canonical stock-theme
+    // helpers before sampling the previous navigation controller. In the iPad
+    // pane layout Theme Manager is the ROOT of the detail stack, so its
+    // predecessor is the blank detail placeholder rather than Appearance's
+    // table; source-only inheritance therefore fell through to UIKit's dark
+    // systemGroupedBackgroundColor (pure black) while the cards correctly used
+    // Apollo's dark grey. The helpers work regardless of which column owns the
+    // controller. Keep the source lookup as a fallback for an unknown/future
+    // stock theme.
     switch (token) {
         case ApolloThemeTokenBackground: {
+            UIColor *effective = ApolloThemePageBackgroundColor();
+            if (effective) return effective;
             UITableView *source = ApolloInheritedSettingsThemeSourceTableView(self);
             return source.backgroundColor ?: fallback;
         }
         case ApolloThemeTokenSecondaryBackground:
         case ApolloThemeTokenTertiaryBackground:
-        case ApolloThemeTokenElevatedBackground:
+        case ApolloThemeTokenElevatedBackground: {
+            UIColor *effective = ApolloThemeCardBackgroundColor();
+            if (effective) return effective;
             return [self apollo_themeCellBackgroundColor];
+        }
         case ApolloThemeTokenSeparator:
         case ApolloThemeTokenOpaqueSeparator: {
+            UIColor *effective = ApolloThemeSeparatorColor();
+            if (effective) return effective;
             UITableView *source = ApolloInheritedSettingsThemeSourceTableView(self);
             return source.separatorColor ?: fallback;
         }

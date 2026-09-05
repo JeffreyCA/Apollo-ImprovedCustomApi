@@ -12,6 +12,7 @@
 #import "ApolloSettingsSearch.h"
 #import "ApolloReportViewController.h"
 #import "ApolloThemeRuntime.h"
+#import "ipad/ApolloPaneLayout.h"
 #import "ApolloWallpapersViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
@@ -66,6 +67,32 @@ static BOOL ApolloRootCellCopiesNativeSurface(NSIndexPath *indexPath) {
     // themed native donor rather than retaining a resolved surface from the
     // appearance in which they were first created.
     return indexPath.section == 0 || indexPath.section == 2;
+}
+
+// `cellForRowAtIndexPath:` runs inside UITableView's update transaction. UIKit
+// asserts if code asks for visibleCells from that callback, so propagate the
+// native donor surface only after the table has committed. Theme/appearance
+// transitions can span more than one run-loop turn; retry briefly instead of
+// racing the update or retaining a stale surface on the tweak-owned cards.
+static void ApolloApplyRootNativeSurfaceWhenStable(UITableView *tableView, UIColor *surface,
+                                                    NSUInteger retriesRemaining) {
+    __weak UITableView *weakTable = tableView;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UITableView *liveTable = weakTable;
+        if (!liveTable) return;
+        if (liveTable.hasUncommittedUpdates) {
+            if (retriesRemaining > 0) {
+                ApolloApplyRootNativeSurfaceWhenStable(liveTable, surface, retriesRemaining - 1);
+            }
+            return;
+        }
+        for (UITableViewCell *visibleCell in liveTable.visibleCells) {
+            NSIndexPath *visiblePath = [liveTable indexPathForCell:visibleCell];
+            if (ApolloRootCellCopiesNativeSurface(visiblePath)) {
+                ApolloApplyRootNativeSurface(visibleCell, surface);
+            }
+        }
+    });
 }
 
 // Apollo's root Settings screen adds an Export button for its legacy settings
@@ -312,25 +339,7 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     if (nativeSurface) {
         objc_setAssociatedObject(self, &kApolloRootNativeSurfaceKey, nativeSurface,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        for (UITableViewCell *visibleCell in tableView.visibleCells) {
-            NSIndexPath *visiblePath = [tableView indexPathForCell:visibleCell];
-            if (ApolloRootCellCopiesNativeSurface(visiblePath)) {
-                ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
-            }
-        }
-        // Apollo can finish its own cell theming later in this run-loop turn.
-        // Reassert once more after that pass so the custom cards match the
-        // final native surface during animated appearance transitions.
-        __weak UITableView *weakTable = tableView;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UITableView *liveTable = weakTable;
-            for (UITableViewCell *visibleCell in liveTable.visibleCells) {
-                NSIndexPath *visiblePath = [liveTable indexPathForCell:visibleCell];
-                if (ApolloRootCellCopiesNativeSurface(visiblePath)) {
-                    ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
-                }
-            }
-        });
+        ApolloApplyRootNativeSurfaceWhenStable(tableView, nativeSurface, 4);
     }
     UIImage *normalizedIcon = ApolloRootSettingsIconForTitle(cell.textLabel.text);
     if (normalizedIcon) cell.imageView.image = normalizedIcon;
@@ -350,6 +359,12 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
             %orig;
             return;
         }
+        // These two tweak-owned rows return before Apollo's native Settings
+        // selection handler. Hand their selection to the iPad pane router
+        // before the immediate deselect/push so the still-visible master list
+        // keeps the row corresponding to its new detail controller selected.
+        ApolloPaneStageMasterTableSelectionIfNeeded(
+            (UIViewController *)self, tableView, indexPath);
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
         if (indexPath.row == 0) {
             CustomAPIViewController *vc = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];

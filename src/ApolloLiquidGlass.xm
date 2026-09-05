@@ -293,8 +293,9 @@ static void OpenAccountManager(void) {
     UIViewController *profileVC = nil;
     if (tabBarController) {
         for (UIViewController *vc in tabBarController.viewControllers) {
-            if ([vc isKindOfClass:[UINavigationController class]]) {
-                UINavigationController *navController = (UINavigationController *)vc;
+            // Every column: with the iPad pane layout the profile screen can sit
+            // in either the primary or the detail stack.
+            for (UINavigationController *navController in ApolloAllNavigationControllersForTabChild(vc)) {
                 // Search through the entire navigation stack, not just topViewController
                 for (UIViewController *stackVC in navController.viewControllers) {
                     if ([stackVC isMemberOfClass:profileVCClass]) {
@@ -303,7 +304,9 @@ static void OpenAccountManager(void) {
                     }
                 }
                 if (profileVC) break;
-            } else if ([vc isMemberOfClass:profileVCClass]) {
+            }
+            if (profileVC) break;
+            if ([vc isMemberOfClass:profileVCClass]) {
                 profileVC = vc;
                 break;
             }

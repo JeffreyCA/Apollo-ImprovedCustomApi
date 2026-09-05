@@ -39,6 +39,10 @@ UIViewController *ApolloSettingsRouteInstantiate(NSString *routeId);
 // Main thread only.
 BOOL ApolloSettingsRouteOpenNow(NSString *routeId);
 
+// Scene-scoped variant for URL/shortcut callbacks. This prevents a route from
+// landing in another active window when more than one scene exists.
+BOOL ApolloSettingsRouteOpenNowInScene(NSString *routeId, UIWindowScene *scene);
+
 // Convenience for in-app callers: dispatches to main and retries briefly while
 // the tab controller comes up. Unknown ids are logged and dropped.
 void ApolloSettingsRouteOpen(NSString *routeId);

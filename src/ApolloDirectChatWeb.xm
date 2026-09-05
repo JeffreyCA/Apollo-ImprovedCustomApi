@@ -14,6 +14,7 @@
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "UserDefaultConstants.h"
+#import "ipad/ApolloPaneLayout.h"
 
 #import <WebKit/WebKit.h>
 #import <math.h>
@@ -904,7 +905,10 @@ static BOOL ApolloReturnToMailboxFromNavigationController(UINavigationController
 
     ApolloClearMailboxReturn(navigationController);
     [mailbox apollo_prepareForMailboxReturnAnimated:NO];
-    tabBarController.selectedViewController = mailboxNavigationController;
+    // Selects by containment: under the iPad pane layout the mailbox's
+    // navigation controller is a split view column, not a tab child, so a
+    // direct selectedViewController assignment would silently do nothing.
+    ApolloSelectTabContainingViewController(tabBarController, mailboxNavigationController);
     ApolloLog(@"[DirectChatWeb] Native Back returned to preserved %@ without mutating Inbox navigation",
               mailbox.mailboxKind == ApolloModernMailboxKindModmail ? @"Modmail" : @"Chat");
     return YES;
@@ -3166,10 +3170,11 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         UITabBarController *tabBarController = self.tabBarController;
         UINavigationController *routingNavigationController = nil;
         for (UIViewController *candidate in tabBarController.viewControllers) {
-            if (candidate == mailboxNavigationController ||
-                ![candidate isKindOfClass:[UINavigationController class]]) continue;
-            routingNavigationController = (UINavigationController *)candidate;
-            break;
+            // Skip the tab holding this mailbox, whether the child IS its
+            // navigation controller (stock) or merely contains it (pane layout).
+            if (ApolloViewControllerContains(candidate, mailboxNavigationController)) continue;
+            routingNavigationController = ApolloNavigationControllerForTabChild(candidate);
+            if (routingNavigationController) break;
         }
 
         if (routingNavigationController) {
@@ -3178,15 +3183,14 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
             // before selecting it; returning to this mailbox reapplies the
             // current room/list state through apollo_prepareForMailboxReturn.
             [self apollo_restoreTabBarVisibility];
-            tabBarController.selectedViewController = routingNavigationController;
+            ApolloSelectTabContainingViewController(tabBarController, routingNavigationController);
         }
 
         UIViewController *routingAnchorBeforeOpen = routingNavigationController.topViewController;
         if (routingNavigationController && ApolloRouteResolvedURLViaApolloScheme(url)) {
             UINavigationController *destinationNavigationController =
-                [tabBarController.selectedViewController isKindOfClass:[UINavigationController class]]
-                    ? (UINavigationController *)tabBarController.selectedViewController
-                    : routingNavigationController;
+                ApolloNavigationControllerForTabChild(tabBarController.selectedViewController)
+                    ?: routingNavigationController;
             UIViewController *destination = destinationNavigationController.topViewController;
             if (destinationNavigationController &&
                 destinationNavigationController != mailboxNavigationController && destination &&
@@ -3204,7 +3208,7 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         // available. Return to the still-intact mailbox before presenting
         // Apollo's browser.
         if (mailboxNavigationController && tabBarController) {
-            tabBarController.selectedViewController = mailboxNavigationController;
+            ApolloSelectTabContainingViewController(tabBarController, mailboxNavigationController);
         }
         [self apollo_prepareForMailboxReturnAnimated:NO];
         ApolloPresentWebURLFromViewController(self, url);
@@ -3910,10 +3914,24 @@ static void ApolloStandaloneChatBackPanForgetHost(ApolloDirectChatWebViewControl
 - (BOOL)tabBarController:(UITabBarController *)tabBarController
  shouldSelectViewController:(UIViewController *)viewController {
     for (UIViewController *candidate in tabBarController.viewControllers) {
-        if (![candidate isKindOfClass:[UINavigationController class]]) continue;
-        UINavigationController *navigationController = (UINavigationController *)candidate;
-        ApolloDirectChatWebViewController *mailbox = ApolloMailboxReturnController(navigationController);
-        if (mailbox && viewController == mailbox.navigationController) {
+        // PaneEntry's narrowly-scoped native compatibility adapter may expose
+        // synthetic primary navigation controllers while this hook is chained
+        // around Apollo's same delegate method. Recover the real pane before
+        // enumerating columns so hook/link order cannot hide a preserved
+        // mailbox in detail.
+        UIViewController *actualCandidate =
+            ApolloPaneSplitControllerFor(candidate) ?: candidate;
+        UIViewController *actualSelection =
+            ApolloPaneSplitControllerFor(viewController) ?: viewController;
+        // Every column: with the iPad pane layout a tab holds more than one
+        // navigation controller, and the return marker can be on any of them.
+        for (UINavigationController *navigationController in ApolloAllNavigationControllersForTabChild(actualCandidate)) {
+            ApolloDirectChatWebViewController *mailbox = ApolloMailboxReturnController(navigationController);
+            // `viewController` is the tab CHILD being selected — the split view
+            // controller under the pane layout — so compare by containment
+            // rather than identity against the mailbox's navigation controller.
+            if (!mailbox || !ApolloViewControllerContains(actualSelection, mailbox.navigationController)) continue;
+
             ApolloClearMailboxReturn(navigationController);
             [mailbox apollo_prepareForMailboxReturnAnimated:NO];
             ApolloLog(@"[DirectChatWeb] Inbox tab returned directly to preserved %@",

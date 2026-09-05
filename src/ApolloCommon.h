@@ -169,6 +169,58 @@ BOOL ApolloNavTransitionInFlight(void);
 // UI is still coming up (e.g. cold launch from a URL) — callers should retry.
 UIViewController *ApolloMainTabBarController(void);
 
+// Scene-scoped form for actions that originate from a UIScene callback or a
+// view already attached to a window. Passing nil uses the same deterministic
+// foreground/key-scene selection as ApolloMainTabBarController().
+UIViewController *ApolloMainTabBarControllerForScene(UIWindowScene *scene);
+
+// The navigation controller holding a tab's root stack.
+//
+// In the stock layout this is the identity function — a UITabBarController's
+// child IS the navigation controller. With the experimental iPad pane layout
+// active (src/ipad/), that child is a UISplitViewController instead, and this
+// unwraps it to the primary column's navigation controller.
+//
+// Use this anywhere you would have written `tabBarController.viewControllers[i]`
+// or `tabBarController.selectedViewController` and then cast to
+// UINavigationController. Returns nil when there is no navigation controller to
+// find. Safe on iPhone, where it can only ever take the identity path.
+UINavigationController *ApolloNavigationControllerForTabChild(UIViewController *child);
+
+// Every navigation controller inside a tab child, primary column first: one
+// element in the stock layout, up to two with the pane layout. For callers that
+// WALK stacks looking for a particular controller, rather than picking one to
+// push onto — those would otherwise miss whatever sits in the detail column.
+NSArray<UINavigationController *> *ApolloAllNavigationControllersForTabChild(UIViewController *child);
+
+// The column a "what is the user looking at" walk should descend into.
+//
+// Every recursive visible-controller finder in the tweak knows how to unwrap a
+// navigation controller and a tab bar controller; without this, a split view
+// controller falls through and the walk stops on the container itself, which is
+// never a content screen. Returns the detail column when it holds real content,
+// otherwise the primary column.
+//
+// ApolloCommon deliberately does not import src/ipad/: the pane controller
+// answers `apollo_preferredContentColumnController`, and this falls back to a
+// positional lookup for any other split view controller.
+UIViewController *ApolloContentColumnForSplitViewController(UISplitViewController *split);
+
+// YES when `ancestor` is `descendant`, or contains it anywhere in its view
+// controller containment tree.
+BOOL ApolloViewControllerContains(UIViewController *ancestor, UIViewController *descendant);
+
+// Selects the tab that contains `descendant`, and returns whether one was found.
+//
+// Use instead of assigning `tabBarController.selectedViewController` directly
+// whenever the controller you have is a navigation controller you found inside
+// a tab. In the stock layout the tab's child IS that navigation controller, so
+// the two are equivalent; under the iPad pane layout the child is a split view
+// controller and the direct assignment silently does nothing, because the
+// navigation controller is no longer in `viewControllers`.
+BOOL ApolloSelectTabContainingViewController(UITabBarController *tabBarController,
+                                             UIViewController *descendant);
+
 // Returns YES for Apple's out-of-process share/compose controllers that the
 // tweak must never traverse or mutate. Their class names end in
 // "ComposeViewController" (e.g. MFMessageComposeViewController), so loose
