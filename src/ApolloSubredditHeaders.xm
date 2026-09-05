@@ -134,6 +134,8 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 // followIntentDate/followIntentValue for the profile Follow button.
 @property(nonatomic, strong) NSDate *subscribeIntentDate;
 @property(nonatomic) BOOL subscribeIntentValue;
+@property(nonatomic, copy) NSString *communityTitle;
+@property(nonatomic) BOOL subredditInfoLoaded;
 @property(nonatomic, copy) NSString *memberCountText;
 @property(nonatomic, copy) void (^heightInvalidationBlock)(void);
 - (void)applyInfo:(ApolloSubredditInfo *)info fallbackSubredditName:(NSString *)subredditName;
@@ -208,6 +210,10 @@ static CGFloat const ApolloSubredditAboutMaxHeight = 220.0;
 static CGFloat const ApolloSubredditAboutToggleHeight = 22.0;
 static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
 @implementation ApolloSubredditHeaderView {
+    CGFloat _cachedSubtitleHeight;
+    CGFloat _cachedSubtitleWidth;
+    NSString *_cachedSubtitleText;
+    UIFont *_cachedSubtitleFont;
     // Memoized about-text NATURAL (unbounded) height; layoutSubviews fires often
     // while scrolling, so avoid re-measuring the about string every pass. Keyed
     // on text/font/width. Collapsed/expanded heights derive from this cheaply.
@@ -303,6 +309,8 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
         [self addSubview:_aboutLabel];
 
         ApolloIdentityHeaderApplyTextStyles(_displayNameLabel, _nameLabel, _aboutLabel);
+        _nameLabel.numberOfLines = 0;
+        _nameLabel.lineBreakMode = NSLineBreakByWordWrapping;
         _aboutLabel.numberOfLines = ApolloSubredditAboutCollapsedLines;
 
         _aboutToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -328,6 +336,12 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     self.nameLabel.textColor = [UIColor secondaryLabelColor];
     self.aboutLabel.textColor = [UIColor labelColor];
     [self apollo_applySubscriptionState:self.subscribed known:self.subscriptionStateKnown];
+    if (previousTraitCollection &&
+        ![previousTraitCollection.preferredContentSizeCategory
+            isEqualToString:self.traitCollection.preferredContentSizeCategory]) {
+        [self setNeedsLayout];
+        if (self.heightInvalidationBlock) self.heightInvalidationBlock();
+    }
 }
 
 // Full, unbounded natural height of the about text — memoized since
@@ -410,6 +424,18 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
 - (CGRect)apollo_subtitleFrameForLayout:(ApolloIdentityHeaderLayout)identity {
     CGRect frame = identity.subnameFrame;
     if (![self apollo_displayNameShown]) frame.origin.y = CGRectGetMinY(identity.nameFrame);
+    NSString *text = self.nameLabel.text;
+    UIFont *font = self.nameLabel.font;
+    CGFloat width = CGRectGetWidth(frame);
+    if (text.length > 0 && font && width > 0.0) {
+        if (_cachedSubtitleText != text || _cachedSubtitleFont != font || _cachedSubtitleWidth != width) {
+            _cachedSubtitleHeight = ceil([self.nameLabel sizeThatFits:CGSizeMake(width, CGFLOAT_MAX)].height);
+            _cachedSubtitleText = text;
+            _cachedSubtitleFont = font;
+            _cachedSubtitleWidth = width;
+        }
+        frame.size.height = MAX(CGRectGetHeight(frame), _cachedSubtitleHeight);
+    }
     return frame;
 }
 
@@ -423,7 +449,9 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
     BOOL displayNameShown = [self apollo_displayNameShown];
     BOOL subtitleShown = [self apollo_subtitleShown];
-    if (displayNameShown && subtitleShown) return identity.bodyY;
+    if (displayNameShown && subtitleShown) {
+        return CGRectGetMaxY([self apollo_subtitleFrameForLayout:identity]) + 10.0;
+    }
     if (displayNameShown) return CGRectGetMaxY(identity.nameFrame) + 10.0;
     if (subtitleShown) return CGRectGetMaxY([self apollo_subtitleFrameForLayout:identity]) + 10.0;
     return CGRectGetMaxY(identity.avatarFrame) + 8.0;
@@ -550,6 +578,8 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     NSString *navigationName = ApolloNormalizedSubredditName(self.hostViewController.navigationItem.title);
     if (ApolloSubredditNamesEqual(navigationName, displayName)) displayName = navigationName;
     self.displayNameLabel.text = displayName.length > 0 ? displayName : nil;
+    self.communityTitle = info.displayName.length > 0 ? info.displayName : nil;
+    self.subredditInfoLoaded = info != nil;
     self.aboutLabel.text = info.aboutText.length > 0 ? info.aboutText : nil;
     self.memberCountText = info && info.subscriberCount >= 0
         ? ApolloSubredditFormattedMemberCount(info.subscriberCount) : nil;
@@ -569,10 +599,14 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
 - (void)apollo_updateSubname {
     NSString *canonicalName = self.subredditName.length > 0
         ? [@"r/" stringByAppendingString:self.subredditName] : nil;
-    if (canonicalName.length > 0 && self.memberCountText.length > 0) {
-        self.nameLabel.text = [NSString stringWithFormat:@"%@  ·  %@", canonicalName, self.memberCountText];
+    NSString *subtitle = self.subredditInfoLoaded ? self.communityTitle : canonicalName;
+    if (ApolloSubredditNamesEqual(subtitle, self.subredditName)) subtitle = nil;
+    if (subtitle.length > 0 && self.memberCountText.length > 0) {
+        self.nameLabel.text = [NSString stringWithFormat:@"%@  ·  %@", subtitle, self.memberCountText];
+    } else if (subtitle.length > 0) {
+        self.nameLabel.text = subtitle;
     } else {
-        self.nameLabel.text = canonicalName;
+        self.nameLabel.text = self.memberCountText;
     }
     self.nameLabel.hidden = ![self apollo_subtitleShown];
 }

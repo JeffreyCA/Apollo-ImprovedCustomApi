@@ -127,11 +127,10 @@ extern BOOL sShowSubredditHeaders;
 extern BOOL sSubredditHeaderImmersive;
 extern BOOL sSubredditShowBanner;
 extern BOOL sSubredditShowJoinButton;
-// Whether the community's big bold title (e.g. "Reddit Science") shows above
-// the r/name line. Direct on/off choice rather than the old auto-hide-if-
-// similar-to-r/name heuristic, so behavior is predictable across subreddits.
+// Whether the short subreddit name (e.g. "science") appears as the bold title.
 extern BOOL sSubredditShowDisplayName;
-// Whether the r/name + member-count subtitle appears below the display name.
+// Whether the community title + member-count subtitle appears below it. Before
+// metadata arrives it falls back to r/name; a redundant title leaves only the count.
 extern BOOL sSubredditShowSubtitle;
 extern BOOL sSubredditShowDescription;
 // Backing booleans for the single Community Highlights mode picker:
