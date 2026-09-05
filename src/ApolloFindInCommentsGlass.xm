@@ -31,15 +31,20 @@
 //     becomes first responder, so its dock-to-keyboard presentation never runs
 //     (nor its refresh-control stash or the isSearching layout branch);
 //   - a match navigator in the nav bar's trailing glass group while a search
-//     is live — one compact capsule, [n/m ^ v], sized like Apollo's own
-//     sort/more/globe group and standing in for it for the length of the
-//     search (restored after). The chevrons call Apollo's own
-//     previous/nextResultButtonTappedWithSender:, so the wrap-around, the
-//     highlight move and the scroll stay native (and ApolloFindInComments.xm's
-//     scroll watchdog + comma multi-term search keep wrapping those calls).
-//     The title does not re-balance against the swapped group: the search
-//     holds the nav item's trailing-edge reservation (ApolloCommon.h), so the
-//     gap-centred title stays exactly where it was while the group changes;
+//     is live: Apollo's sort and more icons become chevron.up / chevron.down,
+//     and the translate globe (ApolloTranslation.xm, when bulk translation is
+//     on) stays in its slot — one capsule, [globe ^ v] or [^ v], with exactly
+//     the slots Apollo's own group had, so the group keeps its width and edge
+//     and nothing around it (the title above all) has a reason to move. The
+//     chevrons call Apollo's own previous/nextResultButtonTappedWithSender:,
+//     so the wrap-around, the highlight move and the scroll stay native (and
+//     ApolloFindInComments.xm's scroll watchdog + comma multi-term search keep
+//     wrapping those calls). The "n/m" count lives in the search field, at its
+//     trailing end beside the clear button, the way Safari's find shows its
+//     count — the group has no spare slot for it. As belt and braces the
+//     search also holds the nav item's trailing-edge reservation
+//     (ApolloCommon.h), so the gap-centred title is balanced against the edge
+//     Apollo's group had even if a platter rounds a point differently;
 //   - Apollo's own session side effects that still make sense: the floating
 //     comment-jump button hides while a search is live, the keyboard dismisses
 //     on drag (Apollo resigned its field once a drag reached 200pt/s), the
@@ -219,25 +224,39 @@ static const void *kFGNavItemOwnerKey = &kFGNavItemOwnerKey; // UINavigationItem
 
 // MARK: - Navigator capsule
 //
-// [n/m ^ v] as ONE custom bar button item. UIKit wraps a custom view in its own
-// glass platter, so this reads as a single capsule where Apollo's
-// sort/more/globe capsule sat — and it is sized to that capsule on purpose:
-// Apollo packs three 34-38pt icon slots (~106pt of content), this packs a count
-// slot plus two 34pt chevrons. The title's gap-centring is held against the
-// recorded edge of Apollo's group during the search (see installNavigator), so
-// a stand-in of the same width keeps the title, the capsule and the balance
-// looking untouched; the count slot is always present so the capsule does not
-// pop wider on the first keystroke.
+// [globe ^ v] (or [^ v] without translation) as ONE custom bar button item.
+// UIKit wraps a custom view in its own glass platter, so this reads as the same
+// capsule Apollo's sort/more/globe group sat in — and it keeps that group's
+// reach on purpose. UIKit's own title placement depends on how much room the
+// title has before the trailing group: a stand-in a few points closer flipped
+// UIKit from centring the title on the bar to centring it in the gap, and since
+// our recenter only corrects a frame later that showed as a one-frame flick of
+// the title sideways and back (a 38pt jump at the tap, on a recording). So the
+// slots are sized FROM the recorded edge of Apollo's group (the same trailing
+// inset the title hold uses): the group's content width split evenly over the
+// icons we show, floored, so the capsule is never wider than Apollo's.
+//
+// The globe is a mirror of ApolloTranslation's button, not the button itself:
+// that module packs its globe into Apollo's container with shift bookkeeping,
+// and lifting the real button out would leave that bookkeeping wrong when the
+// container comes back. The mirror copies image / tint / accessibility label
+// and forwards its tap to the real button's actions, re-syncing afterwards as
+// the (asynchronous) translation toggles.
 
-static const CGFloat kFGNavigatorHeight        = 36.0;  // Apollo's trailing icon slot height
-static const CGFloat kFGNavigatorButtonWidth   = 34.0;  // Apollo's icon slot width
-static const CGFloat kFGNavigatorCountMinWidth = 36.0;  // fits "9/99" in the monospaced 15pt; wider counts grow the slot
-static const CGFloat kFGNavigatorInset         = 4.0;   // breathing room inside the capsule (UIKit's platter adds its own)
+static const CGFloat kFGNavigatorHeight       = 36.0;  // Apollo's trailing icon slot height
+static const CGFloat kFGNavigatorSlotDefault  = 34.0;  // Apollo's icon slot width (used when no group edge was recorded)
+static const CGFloat kFGNavigatorSlotMin      = 28.0;
+static const CGFloat kFGNavigatorSlotMax      = 44.0;
+static const CGFloat kFGNavigatorInset        = 4.0;   // breathing room inside the capsule (UIKit's platter adds its own)
+static const CGFloat kFGNavigatorPlatterPad   = 4.0;   // what UIKit's glass platter adds on each side of a custom view
+static const CGFloat kFGNavigatorTrailingGap  = 16.0;  // bar edge -> trailing platter (UIKit's standard margin)
 
 @interface ApolloFindGlassNavigatorView : UIView
-@property (nonatomic, strong) UILabel *countLabel;
+@property (nonatomic, strong) UIButton *globeButton;     // mirror of the translate globe; hidden when there is none
 @property (nonatomic, strong) UIButton *previousButton;
 @property (nonatomic, strong) UIButton *nextButton;
+@property (nonatomic, weak) UIButton *mirroredGlobe;     // ApolloTranslation's real globe, inside Apollo's parked container
+@property (nonatomic, assign) CGFloat slotWidth;
 @end
 
 @implementation ApolloFindGlassNavigatorView
@@ -245,16 +264,14 @@ static const CGFloat kFGNavigatorInset         = 4.0;   // breathing room inside
 - (instancetype)init {
     self = [super initWithFrame:CGRectZero];
     if (!self) return nil;
+    _slotWidth = kFGNavigatorSlotDefault;
     UIImageSymbolConfiguration *cfg =
         [UIImageSymbolConfiguration configurationWithPointSize:15.0 weight:UIImageSymbolWeightSemibold];
 
-    _countLabel = [[UILabel alloc] init];
-    _countLabel.font = [UIFont monospacedDigitSystemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    _countLabel.textColor = [UIColor.labelColor colorWithAlphaComponent:0.85];
-    _countLabel.textAlignment = NSTextAlignmentCenter;
-    _countLabel.adjustsFontSizeToFitWidth = NO;
-    _countLabel.accessibilityTraits = UIAccessibilityTraitStaticText;
-    [self addSubview:_countLabel];
+    _globeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _globeButton.hidden = YES;
+    [_globeButton addTarget:self action:@selector(globeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:_globeButton];
 
     _previousButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [_previousButton setImage:[UIImage systemImageNamed:@"chevron.up" withConfiguration:cfg]
@@ -270,14 +287,32 @@ static const CGFloat kFGNavigatorInset         = 4.0;   // breathing room inside
     return self;
 }
 
-- (CGFloat)countSlotWidth {
-    CGFloat natural = ceil([self.countLabel sizeThatFits:CGSizeMake(CGFLOAT_MAX, kFGNavigatorHeight)].width) + 4.0;
-    return MAX(kFGNavigatorCountMinWidth, natural);
+- (NSUInteger)slotCount {
+    return self.globeButton.hidden ? 2 : 3;
+}
+
+// Size the capsule to the trailing group it stands in for. `trailingInset` is
+// the recorded distance from the bar's trailing edge to the leading edge of
+// Apollo's group platter (ApolloNavItemTrailingContentInset); the platter is
+// that minus UIKit's trailing margin, the custom view is the platter minus
+// UIKit's own padding, and the icons share what is left. 0 (never recorded)
+// keeps Apollo's own 34pt slots.
+- (void)fitTrailingInset:(CGFloat)trailingInset {
+    CGFloat slot = kFGNavigatorSlotDefault;
+    if (trailingInset > 1.0) {
+        CGFloat content = trailingInset - kFGNavigatorTrailingGap - 2.0 * kFGNavigatorPlatterPad;
+        slot = floor((content - 2.0 * kFGNavigatorInset) / (CGFloat)[self slotCount]);
+        slot = MIN(kFGNavigatorSlotMax, MAX(kFGNavigatorSlotMin, slot));
+    }
+    self.slotWidth = slot;
+    [self invalidateIntrinsicContentSize];
+    CGSize size = [self intrinsicContentSize];
+    self.bounds = CGRectMake(0.0, 0.0, size.width, size.height);
+    [self setNeedsLayout];
 }
 
 - (CGSize)intrinsicContentSize {
-    return CGSizeMake(kFGNavigatorInset * 2.0 + [self countSlotWidth] + 2.0 * kFGNavigatorButtonWidth,
-                      kFGNavigatorHeight);
+    return CGSizeMake(kFGNavigatorInset * 2.0 + self.slotWidth * (CGFloat)[self slotCount], kFGNavigatorHeight);
 }
 
 - (CGSize)sizeThatFits:(CGSize)size {
@@ -287,28 +322,161 @@ static const CGFloat kFGNavigatorInset         = 4.0;   // breathing room inside
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat height = CGRectGetHeight(self.bounds);
-    CGFloat x = CGRectGetWidth(self.bounds) - kFGNavigatorInset - kFGNavigatorButtonWidth;
-    self.nextButton.frame = CGRectMake(x, 0.0, kFGNavigatorButtonWidth, height);
-    x -= kFGNavigatorButtonWidth;
-    self.previousButton.frame = CGRectMake(x, 0.0, kFGNavigatorButtonWidth, height);
-    self.countLabel.frame = CGRectMake(kFGNavigatorInset, 0.0, MAX(0.0, x - kFGNavigatorInset), height);
+    CGFloat x = kFGNavigatorInset;
+    if (!self.globeButton.hidden) {
+        self.globeButton.frame = CGRectMake(x, 0.0, self.slotWidth, height);
+        x += self.slotWidth;
+    }
+    self.previousButton.frame = CGRectMake(x, 0.0, self.slotWidth, height);
+    x += self.slotWidth;
+    self.nextButton.frame = CGRectMake(x, 0.0, self.slotWidth, height);
 }
 
-// Returns YES when the capsule needs a new width for this count.
-- (BOOL)setCountText:(NSString *)text {
-    if ([self.countLabel.text ?: @"" isEqualToString:text ?: @""]) return NO;
-    self.countLabel.text = text;
-    CGSize size = [self intrinsicContentSize];
-    BOOL resized = fabs(size.width - CGRectGetWidth(self.bounds)) > 0.5;
-    if (resized) {
+// Copy the real globe's look (it carries the translation state: theme tint
+// while showing the original, green while translated) into the mirror.
+- (void)syncGlobe {
+    UIButton *real = self.mirroredGlobe;
+    BOOL show = real != nil && real.superview != nil;
+    if (self.globeButton.hidden == show) {
+        self.globeButton.hidden = !show;
         [self invalidateIntrinsicContentSize];
-        self.bounds = CGRectMake(0.0, 0.0, size.width, size.height);
+        [self setNeedsLayout];
     }
-    [self setNeedsLayout];
-    return resized;
+    if (!show) return;
+    UIImage *image = [real imageForState:UIControlStateNormal];
+    if (image && [self.globeButton imageForState:UIControlStateNormal] != image) {
+        [self.globeButton setImage:image forState:UIControlStateNormal];
+    }
+    if (real.tintColor && ![self.globeButton.tintColor isEqual:real.tintColor]) self.globeButton.tintColor = real.tintColor;
+    if (real.accessibilityLabel.length && ![self.globeButton.accessibilityLabel isEqualToString:real.accessibilityLabel]) {
+        self.globeButton.accessibilityLabel = real.accessibilityLabel;
+    }
+}
+
+- (void)globeTapped {
+    UIButton *real = self.mirroredGlobe;
+    if (!real) return;
+    // The real button's action is ApolloTranslation's toggle on the controller;
+    // fire it as a tap would, then follow the state change as it lands.
+    [real sendActionsForControlEvents:UIControlEventTouchUpInside];
+    __weak typeof(self) weakSelf = self;
+    for (NSNumber *delay in @[@0.3, @1.0, @2.0, @4.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [weakSelf syncGlobe]; });
+    }
 }
 
 @end
+
+// ApolloTranslation's globe, found by the accessibility label it always carries
+// ("Translation: showing …"), anywhere inside the items' custom views.
+static UIButton *FGFindTranslationGlobe(NSArray<UIBarButtonItem *> *items) {
+    for (UIBarButtonItem *item in items) {
+        NSMutableArray<UIView *> *queue = [NSMutableArray array];
+        if (item.customView) [queue addObject:item.customView];
+        for (NSUInteger i = 0; i < queue.count && i < 64; i++) {
+            UIView *view = queue[i];
+            if ([view isKindOfClass:[UIButton class]] &&
+                [view.accessibilityLabel hasPrefix:@"Translation:"]) {
+                return (UIButton *)view;
+            }
+            [queue addObjectsFromArray:view.subviews];
+        }
+    }
+    return nil;
+}
+
+// MARK: - Count in the search field
+//
+// "n/m" sits inside the search field, at its trailing end just before the
+// clear button (Safari's find puts its count there too). The label is a plain
+// subview of the UISearchTextField; the hooks below make room for it in the
+// text rect and place it against the clear button's rect, for tagged fields
+// only — every other search field pays one associated-object lookup.
+
+static const void *kFGCountLabelKey = &kFGCountLabelKey;   // UISearchTextField -> our count label
+static const CGFloat kFGCountGap = 6.0;
+
+static UILabel *FGCountLabelForField(UIView *field) {
+    return objc_getAssociatedObject(field, kFGCountLabelKey);
+}
+
+static UILabel *FGEnsureCountLabel(UITextField *field) {
+    if (!field) return nil;
+    UILabel *label = FGCountLabelForField(field);
+    if (!label) {
+        label = [[UILabel alloc] init];
+        label.font = [UIFont monospacedDigitSystemFontOfSize:15.0 weight:UIFontWeightRegular];
+        label.textColor = UIColor.secondaryLabelColor;
+        label.textAlignment = NSTextAlignmentRight;
+        label.userInteractionEnabled = NO;
+        label.hidden = YES;
+        label.accessibilityTraits = UIAccessibilityTraitStaticText;
+        objc_setAssociatedObject(field, kFGCountLabelKey, label, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (label.superview != field) [field addSubview:label];
+    return label;
+}
+
+static void FGRemoveCountLabel(UITextField *field) {
+    UILabel *label = FGCountLabelForField(field);
+    if (!label) return;
+    [label removeFromSuperview];
+    objc_setAssociatedObject(field, kFGCountLabelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [field setNeedsLayout];
+}
+
+static void FGSetCountText(UITextField *field, NSString *text) {
+    UILabel *label = FGEnsureCountLabel(field);
+    if (!label) return;
+    BOOL hide = text.length == 0;
+    BOOL changed = label.hidden != hide || ![label.text ?: @"" isEqualToString:text ?: @""];
+    if (!changed) return;
+    label.text = text;
+    [label sizeToFit];
+    label.hidden = hide;
+    [field setNeedsLayout];
+}
+
+// Width the count takes out of the text rect (0 when nothing is shown).
+static CGFloat FGCountReservedWidth(UIView *field) {
+    UILabel *label = FGCountLabelForField(field);
+    if (!label || label.hidden || label.superview != field) return 0.0;
+    return CGRectGetWidth(label.bounds) + kFGCountGap;
+}
+
+%hook UISearchTextField
+
+- (CGRect)textRectForBounds:(CGRect)bounds {
+    CGRect rect = %orig;
+    CGFloat reserved = FGCountReservedWidth(self);
+    if (reserved > 0.0 && reserved < CGRectGetWidth(rect)) rect.size.width -= reserved;
+    return rect;
+}
+
+- (CGRect)editingRectForBounds:(CGRect)bounds {
+    CGRect rect = %orig;
+    CGFloat reserved = FGCountReservedWidth(self);
+    if (reserved > 0.0 && reserved < CGRectGetWidth(rect)) rect.size.width -= reserved;
+    return rect;
+}
+
+- (void)layoutSubviews {
+    %orig;
+    UILabel *label = FGCountLabelForField(self);
+    if (!label || label.hidden || label.superview != self) return;
+    // Against the clear button's slot (present whenever the field has text,
+    // which it always does while a count shows), vertically on the text line.
+    CGRect clear = [self clearButtonRectForBounds:self.bounds];
+    CGFloat right = CGRectGetWidth(clear) > 0.0 ? CGRectGetMinX(clear) - kFGCountGap
+                                                : CGRectGetWidth(self.bounds) - 12.0;
+    CGSize size = label.bounds.size;
+    label.frame = CGRectMake(round(right - size.width),
+                             round((CGRectGetHeight(self.bounds) - size.height) / 2.0),
+                             size.width, size.height);
+}
+
+%end
 
 @interface ApolloFindInCommentsGlassBridge : NSObject <UISearchBarDelegate, UISearchControllerDelegate>
 @property (nonatomic, weak) UIViewController *commentsVC;
@@ -397,21 +565,14 @@ static UIColor *FGAccent(UIViewController *vc) {
     BOOL active = FGReadMatchState(vc, &index, &count);
     NSString *text = @"";
     if (active) text = count > 0 ? [NSString stringWithFormat:@"%ld/%ld", (long)(index + 1), (long)count] : @"0/0";
-    BOOL resized = [self.navigatorView setCountText:text];
+    FGSetCountText(vc.navigationItem.searchController.searchBar.searchTextField, text);
+    [self.navigatorView syncGlobe];
     BOOL enable = active && count > 0;
     if (self.navigatorView.nextButton.enabled != enable) self.navigatorView.nextButton.enabled = enable;
     if (self.navigatorView.previousButton.enabled != enable) self.navigatorView.previousButton.enabled = enable;
     UIColor *accent = FGAccent(vc);
     self.navigatorView.nextButton.tintColor = accent;
     self.navigatorView.previousButton.tintColor = accent;
-    // A count wider than the slot ("12/345") grows the capsule; UIKit caches a
-    // custom view's measurement, so re-set the item to make it re-measure.
-    if (resized && self.navigatorInstalled) {
-        UINavigationItem *navItem = vc.navigationItem;
-        self.applyingItems = YES;
-        navItem.rightBarButtonItems = [self navigatorItems];
-        self.applyingItems = NO;
-    }
 }
 
 - (void)installNavigator {
@@ -422,6 +583,10 @@ static UIColor *FGAccent(UIViewController *vc) {
 
     NSArray<UIBarButtonItem *> *current = navItem.rightBarButtonItems;
     if (![self itemsAreOurs:current]) self.savedRightItems = current;
+    // The translate globe (when bulk translation is on) keeps its slot; the
+    // capsule mirrors it and only the sort/more icons make way for the chevrons.
+    self.navigatorView.mirroredGlobe = FGFindTranslationGlobe(self.savedRightItems);
+    [self.navigatorView syncGlobe];
 
     ApolloFindGlassWeakBox *box = objc_getAssociatedObject(navItem, kFGNavItemOwnerKey);
     if (!box) {
@@ -435,8 +600,12 @@ static UIColor *FGAccent(UIViewController *vc) {
     // Hold the title's trailing-edge reservation BEFORE the swap: the Liquid
     // Glass gap-centring then keeps balancing the title against the edge
     // Apollo's group had (recorded on every pass that saw it), so the title
-    // does not slide when the narrower navigator takes the group's place.
+    // does not slide when the navigator takes the group's place — and size the
+    // navigator from that same recorded edge so UIKit's own title placement
+    // sees a trailing group of the same reach (see the navigator view's note).
     ApolloNavItemSetTrailingReservationHold(navItem, YES);
+    [self.navigatorView fitTrailingInset:ApolloNavItemTrailingContentInset(navItem)];
+    FGEnsureCountLabel(vc.navigationItem.searchController.searchBar.searchTextField);
     self.applyingItems = YES;
     navItem.rightBarButtonItems = [self navigatorItems];
     self.applyingItems = NO;
@@ -474,6 +643,8 @@ static UIColor *FGAccent(UIViewController *vc) {
         ApolloNavItemSetTrailingReservationHold(navItem, NO);
     }
     self.savedRightItems = nil;
+    self.navigatorView.mirroredGlobe = nil;
+    FGRemoveCountLabel(vc.navigationItem.searchController.searchBar.searchTextField);
     UIView *jump = FGJumpButton(vc);
     if (jump && self.savedJumpButtonAlpha) jump.alpha = self.savedJumpButtonAlpha.doubleValue;
     self.savedJumpButtonAlpha = nil;
