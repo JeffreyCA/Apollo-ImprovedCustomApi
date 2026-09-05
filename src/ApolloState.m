@@ -64,7 +64,6 @@ BOOL sClassicTabBarScrollBehavior = NO;
 ApolloTabBarHideStyle sTabBarHideStyle = ApolloTabBarHideStyleLeft;
 BOOL sIPadTabBarBottom = NO;   // opt-in (default OFF via registerDefaults, UDKeyIPadTabBarBottom); iPad-gated in the module
 BOOL sKeepSearchBarInPlace = NO;
-BOOL sLGTitleGapCentering = YES;   // effective default ON via registerDefaults (UDKeyLGTitleGapCentering)
 BOOL sIconRowMagnifier = YES;   // effective default ON via registerDefaults (UDKeyIconRowMagnifier)
 BOOL sInfoRowTapUpvote = YES;      // effective default ON via registerDefaults (UDKeyInfoRowTapUpvote)
 BOOL sInfoRowTapComments = YES;    // effective default ON via registerDefaults (UDKeyInfoRowTapComments)
