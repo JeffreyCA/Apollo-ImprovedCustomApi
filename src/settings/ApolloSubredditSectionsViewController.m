@@ -313,10 +313,12 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
 
 #pragma mark - Preview host
 
-// The pinned-area view. Touches pass through it to whatever is beneath —
-// the container (whose tap recognizer toggles the pin) or, unpinned, the
-// table it is mounted in (so drags on the card scroll the list) — except
-// for the pin button, which handles its own taps.
+// The pinned-area view. Unpinned it is the table's header, and touches pass
+// through it to the table (so drags on the card scroll the list); pinned it
+// is the container's subview above the table, and it absorbs them (a row
+// that has scrolled under the card must not take the tap). The container's
+// tap recognizer toggles the pin either way, since it lives on an ancestor.
+// The pin button handles its own taps in both modes.
 @interface ApolloSubredditSectionsPreviewHostView : UIView
 @property (nonatomic, weak) UIView *touchableView;
 @end
@@ -325,7 +327,11 @@ static ApolloSubredditSectionsPreviewState *ApolloSubredditSectionsCurrentPrevie
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     if (hit && self.touchableView && [hit isDescendantOfView:self.touchableView]) return hit;
-    return nil;
+    // Pass through only as the table's header (so drags on the card scroll
+    // the list). Pinned, the view beneath is the table too, and a row that
+    // has scrolled under the card would take the tap: absorb it instead.
+    // The container's tap recognizer still receives it from the ancestor.
+    return [self.superview isKindOfClass:[UIScrollView class]] ? nil : hit;
 }
 @end
 
