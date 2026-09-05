@@ -1035,9 +1035,19 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
     // otherwise put the policy back on the first layout of the transition.
     // Never while a search is active (its palette is UIKit's to run) or
     // inside a dismiss window (which pins the policy on its own schedule).
+    // The note is one-shot: written by viewWillDisappear for the very next
+    // appearance and consumed here whether or not the hold engages. Apollo's
+    // media viewer returns to the feed through viewWillAppear without having
+    // sent viewWillDisappear when it opened, so a note left over from the last
+    // navigation trip would otherwise engage the hold on a feed the user has
+    // since scrolled: UIKit lays the pinned bar out over the scrolled feed for
+    // the dismissal and viewDidAppear collapses it straight back — the bar
+    // that flashed on closing an image after a subreddit-list round trip.
+    BOOL leftAtTop = objc_getAssociatedObject(self, kNSBLeftAtTopKey) != nil;
+    objc_setAssociatedObject(self, kNSBLeftAtTopKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UISearchController *reappearSC = navItem.searchController;
     if (reappearSC && !reappearSC.active && navItem.hidesSearchBarWhenScrolling &&
-        objc_getAssociatedObject(self, kNSBLeftAtTopKey) != nil && !sNSBDismissWindow) {
+        leftAtTop && !sNSBDismissWindow) {
         navItem.hidesSearchBarWhenScrolling = NO;
         sNSBRevealHoldVC = (UIViewController *)self;
         ApolloLog(@"[NativeSearch] re-appearance at top rest: holding the bar revealed through the transition");
@@ -1104,7 +1114,15 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
         leavingTable.contentOffset.y <= -leavingTable.adjustedContentInset.top + 2.0;
     objc_setAssociatedObject(self, kNSBLeftAtTopKey, leavingAtTop ? @YES : nil,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (sNSBRevealHoldVC == (UIViewController *)self) sNSBRevealHoldVC = nil;
+    if (sNSBRevealHoldVC == (UIViewController *)self) {
+        // Still held here means viewDidAppear never ran (a cancelled
+        // interactive pop or forward swipe into this feed): put the scroll-away
+        // policy back so the next re-appearance can take the hold again
+        // instead of the layout-pass flip collapsing the bar mid-transition.
+        sNSBRevealHoldVC = nil;
+        [(UIViewController *)self navigationItem].hidesSearchBarWhenScrolling = YES;
+        ApolloLog(@"[NativeSearch] transition into the feed cancelled with the hold still set: scroll-away policy restored");
+    }
     // Leaving the feed (e.g. opening a result) with the search UI presented:
     // deactivate it cleanly. Keeping it active across a push leaves UIKit's
     // presentation half-restored after the pop (missing nav bar, collapsed
