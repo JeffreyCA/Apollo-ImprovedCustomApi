@@ -74,6 +74,34 @@ NSString *ApolloEffectiveRedirectURI(void);
 // ([[RDKClient sharedClient] currentUser].username), or nil if none/unavailable.
 NSString * _Nullable ApolloActiveAccountUsername(void);
 
+// A persisted active-account lookup that distinguishes a real signed-out state
+// from an unreadable/transient account archive. Per-account stores must not treat
+// an unknown decode as anonymous or they can install the wrong user's data.
+typedef NS_ENUM(NSInteger, ApolloPersistedAccountIdentityStatus) {
+    ApolloPersistedAccountIdentityUnknown = 0,
+    ApolloPersistedAccountIdentitySignedOut,
+    ApolloPersistedAccountIdentitySignedIn,
+};
+ApolloPersistedAccountIdentityStatus ApolloResolvePersistedActiveAccountIdentity(
+    NSString * _Nullable * _Nullable outNormalizedUsername);
+
+// Live equivalent used from AccountManager's synchronous account-change
+// notification. Its in-memory selection changes before the defaults mirror is
+// persisted, so quick-switch consumers must prefer this signal at that point.
+ApolloPersistedAccountIdentityStatus ApolloResolveLiveActiveAccountIdentity(
+    NSString * _Nullable * _Nullable outNormalizedUsername);
+
+// Every readable, normalized username in the persisted RedditAccounts2 array.
+// Used for non-destructive first-enable migrations of per-account data.
+NSSet<NSString *> *ApolloPersistedAccountUsernames(void);
+
+// Status-bearing variant. YES means the full persisted account array was
+// decoded and every entry had a usable username (an empty array is valid).
+// NO means callers must defer a migration instead of treating the account set
+// as empty and committing an incomplete store.
+BOOL ApolloResolvePersistedAccountUsernames(
+    NSSet<NSString *> * _Nullable * _Nullable outUsernames);
+
 // Invalidate the cached active username after either side of Apollo's persisted
 // account selection changes. Tweak.xm calls this from narrowly-scoped
 // NSUserDefaults write hooks for RedditAccounts2 / CurrentRedditAccountIndex.

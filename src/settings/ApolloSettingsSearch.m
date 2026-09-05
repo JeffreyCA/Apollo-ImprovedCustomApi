@@ -225,14 +225,15 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(UITr
         // in General → Other. Keeping the snapshot entry would return a result
         // that can no longer be found or flashed after navigation.
         if ([row[0] isEqualToString:@"Always Offer Translate"]) continue;
-        // Reborn hides these three native General → Other rows and relocates
-        // them onto its own screens (Open in App / Profiles) against the same
+        // Reborn hides these native General → Other rows and relocates them
+        // onto its own screens (Open in App / Interface) against the same
         // native keys — see ApolloSettingsNativeInjections.xm. The moved rows
         // are indexed from the live Reborn screen crawl above, so the snapshot
         // entries would navigate to a row that no longer exists.
         if ([row[0] isEqualToString:@"Open Links in"]) continue;
         if ([row[0] isEqualToString:@"Open Videos in YouTube App"]) continue;
         if ([row[0] isEqualToString:@"Hide Username on Tab Bar"]) continue;
+        if ([row[0] isEqualToString:@"Hide Bars on Scroll"]) continue;
         // Reborn owns the prominent Feature Requests entry (Apollo Reborn →
         // About → Fider board), already indexed from the live Reborn crawl.
         // The native About row now just opens a new-vs-archived chooser, so a

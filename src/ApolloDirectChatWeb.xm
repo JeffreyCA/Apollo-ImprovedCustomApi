@@ -433,7 +433,36 @@ static NSString *ApolloDirectChatEnhancementScript(NSDictionary *palette) {
         // entry (deep links) keep the full /chat navigation, which the native
         // side now covers until the fresh list stabilizes; the same
         // navigation doubles as the timeout net if the pane flip ever fails.
-        "const redirectEmbeddedRoomBack=event=>{if(mailRoute()||!window.__apolloEmbeddedInboxMessages)return;if((window.__apolloEmbeddedSection||'messages')!=='messages')return;if(!location.pathname.startsWith('/chat/room/'))return;for(const node of event.composedPath?.()||[]){if(!(node instanceof Element)||!node.matches?.('button,[role=button],a'))continue;const rect=node.getBoundingClientRect();if(rect.top>140||rect.left>120)continue;const marker=[node.getAttribute('aria-label'),node.getAttribute('title'),node.getAttribute('data-testid'),node.textContent].filter(Boolean).join(' ').replace(/\\s+/g,' ').trim().toLowerCase();const isBack=/(^|[\\s_-])back([\\s_-]|$)/.test(marker)||!!node.querySelector('[icon-name*=back i],[name*=back i],[aria-label*=back i]');if(!isBack)continue;"
+        // One definition of "Reddit's in-room Back control", shared by the
+        // click interception below and the native swipe-back driver: a
+        // VISIBLE button/link in the room header's top-left corner whose
+        // label, testid, or icon reads as Back. The visibility test matters
+        // only for the driver — it queries the whole document, where the
+        // still-hydrated list pane behind the room also has controls, and a
+        // hidden element reports an all-zero rect that would otherwise pass
+        // the top-left test.
+        "const isChatBackControl=node=>{if(!(node instanceof Element)||!node.matches?.('button,[role=button],a'))return false;const rect=node.getBoundingClientRect();if(rect.width<=0||rect.height<=0)return false;if(rect.top>140||rect.left>120)return false;const marker=[node.getAttribute('aria-label'),node.getAttribute('title'),node.getAttribute('data-testid'),node.textContent].filter(Boolean).join(' ').replace(/\\s+/g,' ').trim().toLowerCase();return /(^|[\\s_-])back([\\s_-]|$)/.test(marker)||!!node.querySelector('[icon-name*=back i],[name*=back i],[aria-label*=back i]');};"
+        // Native swipe-back driver. A back gesture inside a conversation must
+        // do exactly what tapping that control does — Reddit's own pane flip
+        // plus the interception below (a capture-phase click listener; a
+        // synthesized click propagates through the composed path like a real
+        // one) — so the whole return stays in the single code path a tap
+        // already used instead of growing a second, differently-behaving one.
+        // Picks the most top-left candidate so a header with several small
+        // controls resolves deterministically.
+        "window.__apolloChatTapRoomBack=()=>{let best=null,bestScore=Infinity;for(const r of roots())for(const node of r.querySelectorAll('button,[role=button],a')){if(!isChatBackControl(node))continue;const rect=node.getBoundingClientRect();const score=rect.top+rect.left;if(score<bestScore){bestScore=score;best=node;}}if(!best)return 'none';"
+        "const from=location.pathname,claimed=window.__apolloChatBackHandledAt||0;best.click();if((window.__apolloChatBackHandledAt||0)!==claimed)return 'clicked';"
+        // Nobody claimed the click — the standalone Chat screen, or a reply
+        // thread — so Reddit flips its pane but leaves the URL on the room,
+        // which is what every native route treatment reads. Repair it, but
+        // only once the flip is observable (the room's own Back control is
+        // gone): desyncing a list URL onto a still-open room would be worse
+        // than a slow return, and leaving the URL alone is exactly what lets
+        // the native net do a real navigation instead.
+        "window.__apolloChatBackHandledAt=Date.now();"
+        "setTimeout(()=>{if(location.pathname!==from)return;for(const r of roots())for(const node of r.querySelectorAll('button,[role=button],a'))if(isChatBackControl(node))return;history.back();},90);"
+        "return 'clicked';};"
+        "const redirectEmbeddedRoomBack=event=>{if(mailRoute()||!window.__apolloEmbeddedInboxMessages)return;if((window.__apolloEmbeddedSection||'messages')!=='messages')return;if(!location.pathname.startsWith('/chat/room/'))return;for(const node of event.composedPath?.()||[]){if(!isChatBackControl(node))continue;"
         "const from=location.pathname;"
         // The pass-through branch cannot stopImmediatePropagation (that would
         // also swallow Reddit's own pane-flip handler), so the same tap
@@ -684,6 +713,27 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
 // Previous main-document path seen by the URL observer, for detecting the
 // direction of same-document SPA route changes (list -> room, room -> list).
 @property (nonatomic, copy) NSString *lastObservedWebPath;
+// When the swipe driver last issued a "back to the conversation list".
+// Reddit flips its panes immediately but the URL is only repaired a beat
+// later (the interception's guarded history.back()), so the route still
+// reads as a conversation for ~100ms after a successful back — a second back
+// in that window would walk PAST the list. Reset on entering a conversation
+// so re-opening a room re-arms the gesture at once.
+@property (nonatomic, assign) NSTimeInterval conversationBackIssuedAt;
+// The conversation list exactly as it was rendered when the current
+// conversation was opened. A room is a web route inside this one web view,
+// so there is no second view to reveal behind it during an interactive back —
+// this still frame stands in for it while the drag runs, and is swapped for
+// the live (identical) list once the panes have actually flipped.
+@property (nonatomic, strong) UIView *conversationBackSnapshot;
+@property (nonatomic, strong) UIView *conversationBackDimView;
+@property (nonatomic, assign) BOOL conversationBackInteractive;
+@property (nonatomic, assign) CGFloat conversationBackDirection;
+// Bumped by every drag that takes the conversation. A settle animation from
+// an earlier drag carries its own value and leaves the shared state alone if a
+// newer drag has already claimed these views — the same guard the hub's
+// sInboxSwipeGeneration gives the tab-switch pages.
+@property (nonatomic, assign) NSUInteger conversationBackGeneration;
 // A fresh, isolated WKWebView can leave Reddit's Modmail bundle waiting
 // forever when /mail/all is its very first document. Prime the authenticated
 // reddit.com client through the known-good Chat route, then replace it with
@@ -730,6 +780,15 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
                                       stableSamples:(NSUInteger)stableSamples;
 - (void)apollo_finishModmailTransitionForGeneration:(NSUInteger)generation;
 - (BOOL)apollo_isChatConversationPath:(NSString *)path;
+- (NSString *)apollo_currentChatPath;
+- (BOOL)apollo_goBackToConversationList;
+- (void)apollo_captureConversationBackSnapshot;
+- (BOOL)apollo_beginInteractiveConversationBack;
+- (void)apollo_updateInteractiveConversationBack:(CGFloat)progress;
+- (void)apollo_finishInteractiveConversationBack:(BOOL)commit velocity:(CGFloat)velocity;
+- (void)apollo_waitForConversationBackSwap:(UIView *)snapshot attempt:(NSUInteger)attempt;
+- (void)apollo_endInteractiveConversationBack;
+- (void)apollo_standaloneConversationBackPanned:(UIPanGestureRecognizer *)pan;
 - (void)apollo_beginChatTransitionToURL:(NSURL *)url isList:(BOOL)isList;
 - (void)apollo_waitForChatTransitionStabilityAttempt:(NSUInteger)attempt
                                           generation:(NSUInteger)generation
@@ -854,6 +913,16 @@ static BOOL ApolloReturnToMailboxFromNavigationController(UINavigationController
               mailbox.mailboxKind == ApolloModernMailboxKindModmail ? @"Modmail" : @"Chat");
     return YES;
 }
+
+// The standalone Chat screen's back-pan — a process singleton, like the Inbox
+// hub's mode-pan. See the "Standalone conversation back-swipe" section below
+// the class for the rationale and the wiring.
+static UIPanGestureRecognizer *sStandaloneChatBackPan = nil;
+static __weak ApolloDirectChatWebViewController *sStandaloneChatBackPanHost = nil;
+static NSHashTable<UIGestureRecognizer *> *sStandaloneChatBackPanWired = nil;
+static BOOL sStandaloneChatBackInteractive = NO;   // NO = the release takes the instant step
+static void ApolloStandaloneChatBackPanInstall(ApolloDirectChatWebViewController *controller);
+static void ApolloStandaloneChatBackPanForgetHost(ApolloDirectChatWebViewController *controller);
 
 @implementation ApolloDirectChatWebViewController
 
@@ -1149,6 +1218,10 @@ static BOOL ApolloReturnToMailboxFromNavigationController(UINavigationController
 }
 
 - (void)dealloc {
+    // The standalone back-pan holds its action target unretained; strip this
+    // controller's pair so the immortal pan can never message a dead host
+    // (removeTarget: matches by pointer — a no-op for every other host).
+    ApolloStandaloneChatBackPanForgetHost(self);
     [self.chatStatusRefreshTimer invalidate];
     [self.webView removeObserver:self
                      forKeyPath:@"URL"
@@ -1199,6 +1272,20 @@ static BOOL ApolloReturnToMailboxFromNavigationController(UINavigationController
                     @"window.__apolloChatRoomFromList=%@;",
                     previousWasRootList ? @"true" : @"false"]
                                completionHandler:nil];
+                // A freshly entered conversation is also a fresh back target:
+                // whatever the swipe driver did on the way out of the last one
+                // must not swallow the first back gesture in this one.
+                self.conversationBackIssuedAt = 0.0;
+                // Grab the list while it is still the rendered frame — this
+                // observer runs in the same turn as Reddit's pane swap, before
+                // the room paints and before the transition cover blanks the
+                // document — so an interactive back has something to reveal.
+                [self apollo_captureConversationBackSnapshot];
+                // WebKit re-creates its content view (and the history edge
+                // recognizers on it) across navigations; entering a room is
+                // exactly when the standalone back-pan must already outrank
+                // them.
+                ApolloStandaloneChatBackPanInstall(self);
             }
             if (isConversation) {
                 // Same-document room switches sometimes deliver no policy
@@ -1290,6 +1377,11 @@ static BOOL ApolloReturnToMailboxFromNavigationController(UINavigationController
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    // Apollo's full-width back/forward pans live on the navigation
+    // controller's container view, which this view only reaches once it is on
+    // screen — so the standalone back-pan is claimed and wired here. (No-op
+    // for the embedded hub controller, whose gesture is the hub's mode-pan.)
+    ApolloStandaloneChatBackPanInstall(self);
     if (self.didRevealChat && self.mailboxKind == ApolloModernMailboxKindChat) {
         [self apollo_captureChatStatus];
         [self apollo_startChatStatusRefreshIfNeeded];
@@ -1683,9 +1775,9 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         // hide-on-scroll may have left behind before handing the bar back.
         [tabBar.layer removeAnimationForKey:ApolloTabBarSlideDownAnimationKey];
         [tabBar.layer removeAnimationForKey:ApolloTabBarSlideUpAnimationKey];
-        tabBar.transform = CGAffineTransformIdentity;
-        tabBar.alpha = 1.0;
         tabBar.hidden = NO;
+        ApolloRestoreHideOnScrollPresentation(tabBarController,
+                                              @"direct chat exit");
     }
 
     [tabBarController.view setNeedsLayout];
@@ -1913,6 +2005,324 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         return componentCount >= 3;
     }
     return NO;
+}
+
+// The path every route decision is made from: the URL observer's record (it
+// also covers same-document SPA transitions, which deliver no navigation
+// callback) with the live URL as the pre-observation fallback.
+- (NSString *)apollo_currentChatPath {
+    return self.lastObservedWebPath ?: (self.webView.URL.path ?: @"");
+}
+
+// One step UP Reddit's chat hierarchy: from a conversation (a room or a reply
+// thread) back to the list it was opened from, by clicking Reddit's own
+// in-room Back control. That is the same pane flip a tap performs — the list
+// pane underneath is still hydrated, so the return is instant — and it keeps
+// the whole return in the one code path a tap already used, including the
+// interception that repairs the URL so every native route treatment follows.
+// Returns YES when the caller's gesture was consumed here (a back was issued,
+// or one is still in flight), NO when this controller is not inside a
+// conversation and the caller should keep its stock behavior.
+- (BOOL)apollo_goBackToConversationList {
+    if (self.mailboxKind != ApolloModernMailboxKindChat) return NO;
+    if (![self apollo_isChatConversationPath:[self apollo_currentChatPath]]) return NO;
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    if (self.conversationBackIssuedAt > 0.0 &&
+        now - self.conversationBackIssuedAt < 1.5) {
+        ApolloLog(@"[DirectChatWeb] Conversation back already in flight; ignoring repeat");
+        return YES;
+    }
+    self.conversationBackIssuedAt = now;
+    NSString *listPath = @"/chat";
+    if (self.embeddedInboxSection == ApolloModernChatInboxSectionThreads) {
+        listPath = @"/chat/threads";
+    } else if (self.embeddedInboxSection == ApolloModernChatInboxSectionRequests) {
+        listPath = @"/chat/requests";
+    }
+    [self.webView evaluateJavaScript:@"window.__apolloChatTapRoomBack?.()||'unavailable'"
+                   completionHandler:^(id result, NSError *error) {
+        ApolloLog(@"[DirectChatWeb] Conversation back -> %@%@",
+                  [result isKindOfClass:[NSString class]] ? result : @"unknown",
+                  error ? [NSString stringWithFormat:@" (%@)", error.localizedDescription] : @"");
+    }];
+    // Reddit's own control is the fast path, not a guarantee: it flips the
+    // pane instantly where it applies (a room opened from the Messages list),
+    // but a reply thread's control can navigate — or do nothing this build
+    // understands. If the route has still not left the conversation, load the
+    // section's list outright rather than leaving a swipe that visibly did
+    // nothing; the native transition cover already owns that reload. A real
+    // navigation already in flight is that same escape happening on its own,
+    // so never stack a second load on top of it.
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || self.conversationBackIssuedAt != now) return;
+        if (![self apollo_isChatConversationPath:[self apollo_currentChatPath]]) return;
+        if (self.webView.loading) return;
+        ApolloLog(@"[DirectChatWeb] Conversation back did not leave the room; loading %@", listPath);
+        [self.webView evaluateJavaScript:
+            [NSString stringWithFormat:@"location.assign('%@');", listPath]
+                       completionHandler:nil];
+    });
+    return YES;
+}
+
+// MARK: - Interactive conversation back
+//
+// The gesture drivers (the Inbox hub's mode-pan) hand progress to these three
+// calls so the back reads like every other iOS back: the conversation tracks
+// the finger while the list slides in behind it at the usual parallax, and a
+// drag that is let go short of the commit point returns without touching the
+// web view at all. Only on commit does the web-level back run, hidden behind
+// the still frame that is already covering the same pixels.
+
+- (void)apollo_captureConversationBackSnapshot {
+    self.conversationBackSnapshot = nil;
+    if (self.mailboxKind != ApolloModernMailboxKindChat) return;
+    // A hidden hub renders nothing worth capturing, and an off-window view
+    // snapshots empty.
+    if (!self.view.window || CGRectIsEmpty(self.view.bounds)) return;
+    if (self.embeddedInInbox && !self.embeddedInboxVisible) return;
+    UIView *snapshot = [self.view snapshotViewAfterScreenUpdates:NO];
+    if (!snapshot) return;
+    snapshot.userInteractionEnabled = NO;
+    self.conversationBackSnapshot = snapshot;
+}
+
+- (BOOL)apollo_beginInteractiveConversationBack {
+    if (self.mailboxKind != ApolloModernMailboxKindChat) return NO;
+    if (![self apollo_isChatConversationPath:[self apollo_currentChatPath]]) return NO;
+    if (self.conversationBackInteractive) {
+        // Grabbed again mid-settle: hand the views straight back to the finger
+        // instead of letting the previous animation keep driving them. The
+        // settle's completion still fires — removing the animations does not
+        // cancel it, and the dim's fade (a sublayer, not covered by the two
+        // removals above) would keep it alive for its full duration — so the
+        // generation bump is what turns it into a no-op: it can no longer end
+        // the drag that has just begun, or issue a web-level back under it.
+        self.conversationBackGeneration += 1;
+        [self.view.layer removeAllAnimations];
+        [self.conversationBackSnapshot.layer removeAllAnimations];
+        [self.conversationBackDimView.layer removeAllAnimations];
+        [self apollo_updateInteractiveConversationBack:0.0];
+        return YES;
+    }
+    // A back already on its way owns these views until it settles.
+    if (self.conversationBackIssuedAt > 0.0 &&
+        [NSDate date].timeIntervalSince1970 - self.conversationBackIssuedAt < 1.5) return NO;
+    UIView *container = self.view.superview;
+    UIView *snapshot = self.conversationBackSnapshot;
+    if (!container || !snapshot || CGRectIsEmpty(self.view.bounds)) return NO;
+
+    self.view.transform = CGAffineTransformIdentity;
+    snapshot.transform = CGAffineTransformIdentity;
+    snapshot.alpha = 1.0;
+    snapshot.frame = self.view.frame;
+    [container insertSubview:snapshot belowSubview:self.view];
+
+    UIView *dim = [[UIView alloc] initWithFrame:snapshot.bounds];
+    dim.backgroundColor = UIColor.blackColor;
+    dim.alpha = 0.0;
+    dim.userInteractionEnabled = NO;
+    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [snapshot addSubview:dim];
+    self.conversationBackDimView = dim;
+
+    // The same leading-edge shadow UIKit draws under a screen being popped.
+    self.view.layer.shadowColor = UIColor.blackColor.CGColor;
+    self.view.layer.shadowOffset = CGSizeZero;
+    self.view.layer.shadowRadius = 10.0;
+    self.view.layer.shadowOpacity = 0.24;
+    self.view.layer.shadowPath = [UIBezierPath bezierPathWithRect:self.view.bounds].CGPath;
+
+    self.conversationBackDirection =
+        (self.view.effectiveUserInterfaceLayoutDirection ==
+         UIUserInterfaceLayoutDirectionRightToLeft) ? -1.0 : 1.0;
+    self.conversationBackGeneration += 1;
+    self.conversationBackInteractive = YES;
+    [self apollo_updateInteractiveConversationBack:0.0];
+    return YES;
+}
+
+- (void)apollo_updateInteractiveConversationBack:(CGFloat)progress {
+    if (!self.conversationBackInteractive) return;
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    if (width <= 0.0) return;
+    CGFloat clamped = MAX(0.0, MIN(1.0, progress));
+    CGFloat sign = self.conversationBackDirection;
+    self.view.transform = CGAffineTransformMakeTranslation(sign * clamped * width, 0.0);
+    // UIKit moves the screen underneath at 30% of the top screen's travel.
+    self.conversationBackSnapshot.transform =
+        CGAffineTransformMakeTranslation(sign * (clamped - 1.0) * width * 0.3, 0.0);
+    self.conversationBackDimView.alpha = (1.0 - clamped) * 0.12;
+}
+
+- (void)apollo_finishInteractiveConversationBack:(BOOL)commit velocity:(CGFloat)velocity {
+    if (!self.conversationBackInteractive) return;
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    CGFloat current = width > 0.0 ? fabs(self.view.transform.tx) / width : 0.0;
+    CGFloat remaining = MAX(0.05, commit ? (1.0 - current) : current);
+    // Carry the throw's speed into the settle instead of always spending the
+    // same time, the way a released interactive pop does.
+    NSTimeInterval duration = width > 0.0 && fabs(velocity) > 1.0
+        ? MIN(0.42, MAX(0.14, remaining * width / fabs(velocity)))
+        : 0.28;
+    UIView *snapshot = self.conversationBackSnapshot;
+    NSUInteger generation = self.conversationBackGeneration;
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:duration
+                          delay:0.0
+                        options:UIViewAnimationOptionCurveEaseOut |
+                                UIViewAnimationOptionBeginFromCurrentState |
+                                UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        [weakSelf apollo_updateInteractiveConversationBack:commit ? 1.0 : 0.0];
+    } completion:^(BOOL finished) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        // A newer drag grabbed these views mid-settle and owns them now; this
+        // settle's outcome — the web-level back included — is void.
+        if (generation != self.conversationBackGeneration) {
+            ApolloLog(@"[DirectChatWeb] Conversation back settle (%@) superseded by a newer drag",
+                      commit ? @"commit" : @"cancel");
+            return;
+        }
+        self.conversationBackInteractive = NO;
+        self.view.layer.shadowOpacity = 0.0;
+        if (!commit) {
+            [self apollo_endInteractiveConversationBack];
+            return;
+        }
+        // The still frame now covers exactly the pixels the live list will
+        // occupy. Lift it above the conversation, put that back in place, and
+        // flip the web panes underneath — the swap is one identical frame
+        // replacing another instead of a visible jump.
+        [snapshot.superview bringSubviewToFront:snapshot];
+        snapshot.transform = CGAffineTransformIdentity;
+        self.conversationBackDimView.alpha = 0.0;
+        self.view.transform = CGAffineTransformIdentity;
+        [self apollo_goBackToConversationList];
+        [self apollo_waitForConversationBackSwap:snapshot attempt:0];
+    }];
+}
+
+// Hold the still frame until the web view is actually showing the list, then
+// cross-fade it out. The cap covers the paths where the pane flip needs a real
+// navigation (a reply thread, a stale room) — the load runs behind this frame
+// and the transition cover picks it up from there.
+//
+// The frame is handed down explicitly rather than re-read from the property:
+// it is non-interactive, so a tap during the hold reaches the live list
+// underneath, and opening a room that way captures a FRESH frame into the
+// shared slot. This pass must tear down the exact view it showed and touch the
+// shared state only while that state is still its own — otherwise the old
+// frame stayed parked in the container at alpha 0 (one more per room opened
+// this way) and the new room lost the frame its own back swipe needs.
+- (void)apollo_waitForConversationBackSwap:(UIView *)snapshot attempt:(NSUInteger)attempt {
+    if (!snapshot.superview) return;
+    BOOL current = self.conversationBackSnapshot == snapshot;
+    BOOL leftConversation = ![self apollo_isChatConversationPath:[self apollo_currentChatPath]];
+    if (current && !leftConversation && attempt < 28) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [weakSelf apollo_waitForConversationBackSwap:snapshot attempt:attempt + 1];
+        });
+        return;
+    }
+    // Leaving the room route is not quite the same as the list being finished:
+    // the CSS that hides Reddit's own list chrome re-applies on the sweep after
+    // the URL repair, so an immediate hand-off flashed that chrome through the
+    // fade. The still frame is identical to the settled list, so holding it a
+    // beat longer costs nothing. A frame that has already been superseded (a
+    // room opened during the hold) is stale, not identical — drop it at once.
+    NSTimeInterval hold = current ? 0.18 : 0.0;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(hold * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        [UIView animateWithDuration:0.12
+                         animations:^{ snapshot.alpha = 0.0; }
+                         completion:^(BOOL finished) {
+            // Tear down the frame this pass actually showed. Only while it is
+            // still the shared one is the list on screen for real with no new
+            // room behind it — then the next room open captures its own frame.
+            UIView *container = snapshot.superview;
+            BOOL stillCurrent = self.conversationBackSnapshot == snapshot;
+            [snapshot removeFromSuperview];
+            if (self.conversationBackDimView.superview == snapshot) {
+                self.conversationBackDimView = nil;
+            }
+            if (stillCurrent) {
+                [self apollo_endInteractiveConversationBack];
+                self.conversationBackSnapshot = nil;
+            }
+            ApolloLog(@"[DirectChatWeb] Conversation back frame torn down (current=%d, container subviews=%lu)",
+                      stillCurrent, (unsigned long)container.subviews.count);
+        }];
+    });
+}
+
+- (void)apollo_endInteractiveConversationBack {
+    self.conversationBackInteractive = NO;
+    [self.conversationBackDimView removeFromSuperview];
+    self.conversationBackDimView = nil;
+    UIView *snapshot = self.conversationBackSnapshot;
+    [snapshot removeFromSuperview];
+    snapshot.transform = CGAffineTransformIdentity;
+    snapshot.alpha = 1.0;
+    self.view.transform = CGAffineTransformIdentity;
+    self.view.layer.shadowOpacity = 0.0;
+}
+
+// The gesture side of the standalone Reddit Chat screen's back (see the
+// "Standalone conversation back-swipe" section below the class for why this
+// screen owns the pan at all). The same state machine the Inbox hub's mode-pan
+// runs when it drives a conversation back: the room tracks the finger, and a
+// release past the commit point — or a decisive throw — completes the step.
+- (void)apollo_standaloneConversationBackPanned:(UIPanGestureRecognizer *)pan {
+    CGFloat width = CGRectGetWidth(self.view.bounds);
+    // Mirror under RTL, where back is a leftward drag.
+    CGFloat rtlSign = (pan.view.effectiveUserInterfaceLayoutDirection ==
+                       UIUserInterfaceLayoutDirectionRightToLeft) ? -1.0 : 1.0;
+    CGPoint translation = [pan translationInView:pan.view];
+    CGPoint velocity = [pan velocityInView:pan.view];
+    CGFloat progress = width > 0.0 ? (translation.x * rtlSign) / width : 0.0;
+    CGFloat commitVelocity = velocity.x * rtlSign;
+
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan:
+            // NO means there is nothing to reveal yet (no captured list frame,
+            // or a back already running); the release then takes the plain,
+            // instant step instead.
+            sStandaloneChatBackInteractive = [self apollo_beginInteractiveConversationBack];
+            ApolloLog(@"[DirectChatWeb] Standalone conversation back-pan began (interactive=%d)",
+                      sStandaloneChatBackInteractive);
+            break;
+        case UIGestureRecognizerStateChanged:
+            if (sStandaloneChatBackInteractive) {
+                [self apollo_updateInteractiveConversationBack:progress];
+            }
+            break;
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            BOOL interactive = sStandaloneChatBackInteractive;
+            sStandaloneChatBackInteractive = NO;
+            BOOL commit = ApolloModernChatBackSwipeCommits(pan.state, progress, commitVelocity, translation);
+            if (commit) ApolloLog(@"[DirectChatWeb] Standalone swipe: conversation -> chat list");
+            if (interactive) {
+                [self apollo_finishInteractiveConversationBack:commit velocity:commitVelocity];
+            } else if (commit) {
+                [self apollo_goBackToConversationList];
+            }
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 // Drops a pending lightweight transition cover when a full-cover pipeline
@@ -3201,10 +3611,29 @@ BOOL ApolloModernChatControllerIsOnConversationRoute(UIViewController *controlle
     if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return NO;
     ApolloDirectChatWebViewController *chatController =
         (ApolloDirectChatWebViewController *)controller;
-    // lastObservedWebPath tracks the URL KVO (covers same-document SPA
-    // transitions); fall back to the live URL before the first observation.
-    NSString *path = chatController.lastObservedWebPath ?: (chatController.webView.URL.path ?: @"");
-    return [chatController apollo_isChatConversationPath:path];
+    return [chatController apollo_isChatConversationPath:[chatController apollo_currentChatPath]];
+}
+
+BOOL ApolloModernChatControllerGoBackToConversationList(UIViewController *controller) {
+    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return NO;
+    return [(ApolloDirectChatWebViewController *)controller apollo_goBackToConversationList];
+}
+
+BOOL ApolloModernChatControllerBeginInteractiveBack(UIViewController *controller) {
+    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return NO;
+    return [(ApolloDirectChatWebViewController *)controller apollo_beginInteractiveConversationBack];
+}
+
+void ApolloModernChatControllerUpdateInteractiveBack(UIViewController *controller, CGFloat progress) {
+    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return;
+    [(ApolloDirectChatWebViewController *)controller apollo_updateInteractiveConversationBack:progress];
+}
+
+void ApolloModernChatControllerFinishInteractiveBack(UIViewController *controller,
+                                                     BOOL commit, CGFloat velocity) {
+    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return;
+    [(ApolloDirectChatWebViewController *)controller apollo_finishInteractiveConversationBack:commit
+                                                                                     velocity:velocity];
 }
 
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller) {
@@ -3241,6 +3670,204 @@ UIViewController *ApolloCreateModernModmailViewControllerForPath(NSString *desti
     // shared tab bar only if this controller opens an actual conversation.
     controller.hidesBottomBarWhenPushed = NO;
     return controller;
+}
+
+// MARK: - Shared swipe rules
+//
+// A drag that begins over horizontally scrollable web content belongs to that
+// content, not to a chat-hierarchy swipe (a media carousel inside a bubble, a
+// horizontal picker row). WebKit backs every CSS overflow scroller with a
+// real, private UIScrollView in the public view hierarchy, so one hit test
+// answers this. Measure in WINDOW coordinates: locationInView: reads a stale
+// view-local cache for synthesized touches (only _locationInWindow is
+// maintained), which would make the simulator's own driver probe the wrong
+// point.
+BOOL ApolloModernChatPanStartsOverHorizontalScroller(UIPanGestureRecognizer *pan, UIView *hostView) {
+    if (!pan || !hostView.window) return NO;
+    CGPoint point = [hostView convertPoint:[pan locationInView:nil] fromView:nil];
+    if (!CGRectContainsPoint(hostView.bounds, point)) return NO;
+    UIView *hit = [hostView hitTest:point withEvent:nil];
+    for (UIView *view = hit; view && view != hostView; view = view.superview) {
+        if (![view isKindOfClass:[UIScrollView class]]) continue;
+        UIScrollView *scrollView = (UIScrollView *)view;
+        if (scrollView.contentSize.width > CGRectGetWidth(scrollView.bounds) + 8.0) return YES;
+    }
+    return NO;
+}
+
+// Commit like an interactive pop: past the halfway point, or a decisive throw
+// in the same direction. The flick arm keeps its own axis-dominance check — a
+// begin gate only samples the FIRST velocity, so a drag that starts horizontal
+// and turns into a vertical scroll can still end with residual horizontal
+// velocity, and without the test that diagonal release committed.
+BOOL ApolloModernChatBackSwipeCommits(UIGestureRecognizerState state, CGFloat progress,
+                                      CGFloat velocity, CGPoint translation) {
+    BOOL flick = velocity > 350.0 && progress > 0.12 && fabs(translation.x) > fabs(translation.y);
+    return state == UIGestureRecognizerStateEnded && (progress >= 0.5 || flick);
+}
+
+// MARK: - Standalone conversation back-swipe
+//
+// The standalone Reddit Chat screen (Boxes -> Direct Chat) has the same three
+// levels the Inbox hub has, and its conversations are web routes rather than
+// pushed controllers — so a back swipe inside one used to run Apollo's stock
+// pop, which left Chat altogether and skipped the conversation list. The hub
+// keeps that pop out of the touch by owning the gesture (its mode-pan); this
+// pan does the same for the standalone screen. Every pan on the navigation
+// controller's container (Apollo's full-width back/forward swipes and the
+// interactive pop) and the web view's own history edge gestures are wired to
+// REQUIRE its failure: inside a conversation a horizontal back-direction drag
+// begins here and drives the interactive back; everywhere else the pan fails
+// on the spot and the stock gestures behave exactly as before.
+//
+// Rejecting the gesture up front is the point. An earlier build let Apollo's
+// pan run and swallowed the resulting pop at the UINavigationController level,
+// which is too late: ApolloNavigationController's own popViewControllerAnimated:
+// records `popping` / `viewControllerBeingPopped` (its forward-swipe
+// bookkeeping) and bumps TotalTimesPoppedNavigationStack BEFORE calling super,
+// and only navigationController:didShowViewController: clears them. With no
+// transition that state went stale, and the next navigation filed the
+// still-live Chat controller as a popped one — the forward swipe would then
+// try to push a controller already on the stack. (Hopper: sub_10015ccb8 sets
+// the fields, sub_10015fd98 consumes them, sub_10015e204 is the pan handler
+// that calls the pop without checking its result.)
+//
+// A process singleton, like the hub's mode-pan: the recognizers it is wired
+// against are shared by every screen on the stack, so each is wired at most
+// once ever (static weak set) and the pan migrates to whichever standalone
+// Chat controller is on screen. Detached or instantly failed, it satisfies
+// every requirement at once, so nothing stock is ever held up.
+
+@interface ApolloStandaloneChatBackGestureDelegate : NSObject <UIGestureRecognizerDelegate>
+@end
+
+@implementation ApolloStandaloneChatBackGestureDelegate
+
++ (instancetype)shared {
+    static ApolloStandaloneChatBackGestureDelegate *shared;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ shared = [ApolloStandaloneChatBackGestureDelegate new]; });
+    return shared;
+}
+
+// The web view's scroll pan begins on ANY drag, and UIKit's default
+// exclusivity would then block this pan for the rest of the touch. Recognizing
+// alongside it is what lets a horizontal drag over the room begin here at all;
+// the failure requirements set at wire time still outrank simultaneity, so the
+// stock pans stay out while this one runs.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
+// Fail INSTANTLY whenever the pan does not apply — every stock gesture on the
+// stack waits on its failure, so a lingering Possible state here would add
+// drag to them. NOTE: translationInView: is still zero inside this callback;
+// only the velocity direction is usable.
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer != sStandaloneChatBackPan) return YES;
+    // Zeroing-weak read: once the host deallocs this is nil and the pan simply
+    // never begins (it cannot serve a dead host).
+    ApolloDirectChatWebViewController *host = sStandaloneChatBackPanHost;
+    if (!host || host.embeddedInInbox || host.mailboxKind != ApolloModernMailboxKindChat) return NO;
+    // Only inside a conversation: on the list the stock pop is the right back.
+    if (![host apollo_isChatConversationPath:[host apollo_currentChatPath]]) return NO;
+    UIPanGestureRecognizer *pan = (UIPanGestureRecognizer *)gestureRecognizer;
+    CGPoint velocity = [pan velocityInView:pan.view];
+    if (fabs(velocity.x) <= fabs(velocity.y)) return NO;   // decisively horizontal only
+    CGFloat rtlSign = (pan.view.effectiveUserInterfaceLayoutDirection ==
+                       UIUserInterfaceLayoutDirectionRightToLeft) ? -1.0 : 1.0;
+    if (velocity.x * rtlSign <= 0.0) return NO;   // the forward direction stays with Apollo's forward pan
+    if (ApolloModernChatPanStartsOverHorizontalScroller(pan, host.viewIfLoaded)) return NO;
+    return YES;
+}
+
+@end
+
+// Claim the singleton for `controller` and wire every stock gesture that could
+// otherwise take a back swipe out from under it. Idempotent and cheap: re-run
+// on every appearance and every room entry to catch recognizers attached later
+// (pop/pan recognizers on the navigation container, WebKit's re-created edge
+// recognizers). No-op for the embedded hub controller.
+static void ApolloStandaloneChatBackPanInstall(ApolloDirectChatWebViewController *controller) {
+    if (controller.embeddedInInbox || controller.mailboxKind != ApolloModernMailboxKindChat) return;
+    UIView *hostView = controller.viewIfLoaded;
+    if (!hostView) return;
+    if (!sStandaloneChatBackPan) {
+        sStandaloneChatBackPan = [UIPanGestureRecognizer new];
+        sStandaloneChatBackPan.maximumNumberOfTouches = 1;
+        sStandaloneChatBackPan.delegate = [ApolloStandaloneChatBackGestureDelegate shared];
+    }
+    UIPanGestureRecognizer *pan = sStandaloneChatBackPan;
+    // Never migrate mid-touch — yanking a tracking recognizer off its view or
+    // swapping its target kills the gesture, or delivers the end action to the
+    // wrong host — and an off-window instance may not steal the pan from an
+    // on-window owner.
+    UIGestureRecognizerState panState = pan.state;
+    BOOL panTracking = (panState == UIGestureRecognizerStateBegan ||
+                        panState == UIGestureRecognizerStateChanged);
+    UIView *panOwnerView = pan.view;
+    BOOL mayClaim = !panTracking &&
+        (hostView.window != nil || !panOwnerView || panOwnerView.window == nil);
+    if (panOwnerView != hostView && mayClaim) {
+        [hostView addGestureRecognizer:pan];
+    }
+    if (pan.view != hostView) return;
+    if (!panTracking) {
+        // Targets are unretained: swap in the same pass that sets the host
+        // pointer so the two can never drift.
+        [pan removeTarget:nil action:NULL];
+        [pan addTarget:controller action:@selector(apollo_standaloneConversationBackPanned:)];
+        sStandaloneChatBackPanHost = controller;
+    }
+    if (!sStandaloneChatBackPanWired) sStandaloneChatBackPanWired = [NSHashTable weakObjectsHashTable];
+    NSHashTable *wired = sStandaloneChatBackPanWired;
+    UIGestureRecognizer *pop = controller.navigationController.interactivePopGestureRecognizer;
+    if (pop && ![wired containsObject:pop]) {
+        [pop requireGestureRecognizerToFail:pan];
+        [wired addObject:pop];
+    }
+    // Apollo's full-width back and forward pans (and its parallax pan) sit on
+    // the navigation controller's container view up this chain. Scroll views'
+    // own pans are spared — the delegate already recognizes alongside them.
+    for (UIView *view = hostView; view; view = view.superview) {
+        UIGestureRecognizer *scrollPan =
+            [view isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)view).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *recognizer in view.gestureRecognizers) {
+            if (recognizer == pan || recognizer == scrollPan || recognizer == pop) continue;
+            if ([wired containsObject:recognizer]) continue;
+            if (![recognizer isKindOfClass:[UIPanGestureRecognizer class]]) continue;
+            [recognizer requireGestureRecognizerToFail:pan];
+            [wired addObject:recognizer];
+        }
+    }
+    // The web view's history edge gestures (allowsBackForwardNavigationGestures)
+    // would otherwise take an edge grab in a room and walk web history — which
+    // Reddit's chat router ignores (the URL changes, the room pane stays), so
+    // an edge swipe desynced the route. They sit the touch out like every other
+    // stock gesture. Same trade-off as the hub's subtree walk; read both
+    // rationales before "harmonizing" with ApolloFeedGalleryCarousel's, which
+    // deliberately skips edge recognizers.
+    UIView *webView = controller.webView;
+    if (webView) {
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:webView];
+        for (NSUInteger index = 0; index < queue.count; index++) {
+            UIView *view = queue[index];
+            for (UIView *subview in view.subviews) [queue addObject:subview];
+            for (UIGestureRecognizer *recognizer in view.gestureRecognizers) {
+                if (![recognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) continue;
+                if ([wired containsObject:recognizer]) continue;
+                [recognizer requireGestureRecognizerToFail:pan];
+                [wired addObject:recognizer];
+            }
+        }
+    }
+}
+
+// Called from the controller's dealloc: recognizer targets are unretained.
+static void ApolloStandaloneChatBackPanForgetHost(ApolloDirectChatWebViewController *controller) {
+    [sStandaloneChatBackPan removeTarget:controller action:NULL];
+    if (sStandaloneChatBackPanHost == controller) sStandaloneChatBackPanHost = nil;
 }
 
 // Reddit content opened from a mailbox lives on another tab's native navigation

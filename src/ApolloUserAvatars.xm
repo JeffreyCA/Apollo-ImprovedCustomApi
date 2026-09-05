@@ -3745,9 +3745,14 @@ static void ApolloProfileApplyTabAvatarForVisibleWindows(void) {
 }
 
 static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason) {
-    if (!sUseProfileAvatarTabIcon) return;
-
     ApolloProfileApplyTabAvatarForVisibleWindows();
+    if (!sUseProfileAvatarTabIcon) {
+        if (reason.length > 0) {
+            ApolloLog(@"[UserAvatars] Restored profile tab icon after %@", reason);
+        }
+        return;
+    }
+
     NSArray<NSNumber *> *delays = @[@0.10, @0.50, @1.25];
     for (NSNumber *delayNumber in delays) {
         NSTimeInterval delay = delayNumber.doubleValue;
