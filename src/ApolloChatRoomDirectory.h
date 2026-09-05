@@ -38,13 +38,18 @@ BOOL ApolloChatSubjectIsRoomMarker(NSString * _Nullable subject);
 // keyed by that id. Safe from any thread.
 void ApolloChatRoomDirectoryNoteUserFullname(NSString * _Nullable username, NSString * _Nullable fullname);
 
-// Resolve the Chat path ("/chat/room/<id>") for a mirror. `subject` is the
-// message subject, `partner` the OTHER participant's username (nil when
-// unknown or deleted), `messageTimestamp` the mirror's creation time in seconds
-// since 1970 (0 = unknown; used to tell same-named rooms apart). The completion
-// runs on the main queue — with nil when no room could be matched, the
-// directory could not be fetched, or the lookup took longer than a tap should
-// wait — so the caller can fall back to Apollo's legacy thread.
+// Resolve the Chat path for a mirror: "/chat/room/<id>" for a room the account
+// has joined, or ApolloChatRequestsPath when the matched room is still a
+// pending invitation (someone the account never chatted with wrote first, so
+// Reddit files the conversation under Chat > Requests until it is accepted —
+// its room URL only bounces to the chat list). `subject` is the message
+// subject, `partner` the OTHER participant's username (nil when unknown or
+// deleted), `messageTimestamp` the mirror's creation time in seconds since
+// 1970 (0 = unknown; used to tell same-named rooms apart). The completion runs
+// on the main queue — with nil when no room could be matched, the directory
+// could not be fetched, or the lookup took longer than a tap should wait — so
+// the caller can fall back to Apollo's legacy thread.
+extern NSString * const ApolloChatRequestsPath;
 void ApolloChatRoomDirectoryResolve(NSString * _Nullable subject,
                                     NSString * _Nullable partner,
                                     NSTimeInterval messageTimestamp,

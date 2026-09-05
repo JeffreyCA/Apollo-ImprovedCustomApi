@@ -47,7 +47,8 @@ static NSString *const kRoomDirectoryBrowserUserAgent =
 @property (nonatomic, copy) NSString *name;          // m.room.name (titled rooms)
 @property (nonatomic, copy) NSString *chatType;      // com.reddit.chat.type.type
 @property (nonatomic, strong) NSMutableSet<NSString *> *participants;   // "@t2_…:reddit.com"
-@property (nonatomic, assign) BOOL joined;           // else invited (a pending request)
+@property (nonatomic, assign) BOOL joined;           // listed under rooms.join
+@property (nonatomic, assign) BOOL invited;          // listed under rooms.invite (a pending request)
 @property (nonatomic, assign) double lastMessageTs;  // origin_server_ts of the newest message, ms
 @end
 
@@ -58,6 +59,8 @@ static NSString *const kRoomDirectoryBrowserUserAgent =
     return self;
 }
 @end
+
+NSString * const ApolloChatRequestsPath = @"/chat/requests";
 
 // Main-queue state.
 static NSString *sDirectoryUsername = nil;    // lowercased owner of the maps below
@@ -154,11 +157,14 @@ static NSUInteger ApolloChatRoomDirectoryMergePage(NSDictionary *payload,
                 if (!ApolloChatRoomDirectoryRoomIdIsSafe(roomId)) continue;
                 entry = [ApolloChatRoomEntry new];
                 entry.roomId = roomId;
-                entry.joined = [section isEqualToString:@"join"];
                 rooms[roomId] = entry;
                 newRooms++;
-            } else if ([section isEqualToString:@"join"]) {
+            }
+            if ([section isEqualToString:@"join"]) {
                 entry.joined = YES;
+                entry.invited = NO;
+            } else if (!entry.joined) {
+                entry.invited = YES;
             }
             NSMutableArray *events = [NSMutableArray array];
             for (NSString *bucket in @[@"state", @"invite_state", @"timeline"]) {
@@ -430,6 +436,12 @@ static NSString *ApolloChatRoomDirectoryMatch(NSString *subject, NSString *partn
 
     ApolloChatRoomEntry *best = ApolloChatRoomDirectoryBest(candidates, partnerUserId, messageTimestamp);
     if (!best || !ApolloChatRoomDirectoryRoomIdIsSafe(best.roomId)) return nil;
+    // A pending invitation has no openable room yet — Reddit answers its room
+    // URL with the plain chat list. The Requests section is where it lives.
+    if (best.invited && !best.joined) {
+        ApolloLog(@"[ChatRooms] Mirror matched a pending chat request; routing to Requests");
+        return ApolloChatRequestsPath;
+    }
     return [@"/chat/room/" stringByAppendingString:best.roomId];
 }
 

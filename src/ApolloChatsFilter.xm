@@ -2678,11 +2678,19 @@ static void ApolloInboxMarkMessageRead(id message) {
 }
 
 static void ApolloInboxOpenChatPath(UIViewController *host, NSString *chatPath) {
+    // A mirror of a pending chat request has no room to open yet: show the
+    // Requests list, where Reddit keeps it until it is accepted.
+    BOOL requests = [chatPath isEqualToString:ApolloChatRequestsPath];
     if (ApolloInboxControllerIsAll(host)) {
         // Same transition as tapping the Chat switch, then straight into the
         // room; the hub's Messages section is where the room's Back leads.
         ApolloSetInboxChatHubVisible(host, YES, YES);
         ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(host, &kInboxAllChatHubKey);
+        if (hub && requests) {
+            [hub apollo_showSection:ApolloModernChatInboxSectionRequests animated:NO];
+            ChatsFilterLog(@"opened the Chat hub's Requests for a pending-request mirror");
+            return;
+        }
         if (hub) {
             [hub.sectionSwitcher apollo_setSelectedSection:ApolloModernChatInboxSectionMessages animated:NO];
             ApolloModernChatControllerOpenConversationPath(hub.chatController, chatPath);
@@ -2692,7 +2700,8 @@ static void ApolloInboxOpenChatPath(UIViewController *host, NSString *chatPath) 
     }
     UIViewController *controller = ApolloCreateModernChatViewControllerForPath(chatPath);
     [host.navigationController pushViewController:controller animated:YES];
-    ChatsFilterLog(@"opened a chat mirror's room in a pushed Chat controller");
+    ChatsFilterLog(@"opened a chat mirror's %@ in a pushed Chat controller",
+                   requests ? @"pending request list" : @"room");
 }
 
 static BOOL ApolloInboxOpenChatMirrorIfNeeded(id listAdapter, id tableNode, NSIndexPath *indexPath) {
