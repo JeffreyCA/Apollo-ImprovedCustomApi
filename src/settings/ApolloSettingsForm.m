@@ -399,14 +399,17 @@ static void ApolloSFAddPath(NSMutableDictionary<NSNumber *, NSMutableArray<NSInd
             static NSString *const reuseID = @"ApolloSFValue";
             cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
             if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:reuseID];
+            BOOL enabled = row.enabled ? row.enabled() : YES;
             cell.textLabel.text = row.title;
             cell.textLabel.numberOfLines = 0;
+            cell.textLabel.enabled = enabled;
             cell.detailTextLabel.text = row.detail ? row.detail() : nil;
-            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-            cell.accessoryType = (row.kind == ApolloSFRowKindDisclosure)
+            cell.detailTextLabel.textColor = enabled
+                ? [UIColor secondaryLabelColor] : [UIColor tertiaryLabelColor];
+            cell.accessoryType = (enabled && row.kind == ApolloSFRowKindDisclosure)
                 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
-            cell.selectionStyle = row.isSelectable ? UITableViewCellSelectionStyleDefault
-                                                   : UITableViewCellSelectionStyleNone;
+            cell.selectionStyle = (enabled && row.isSelectable)
+                ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
             break;
         }
         case ApolloSFRowKindButton: {
@@ -449,13 +452,15 @@ static void ApolloSFAddPath(NSMutableDictionary<NSNumber *, NSMutableArray<NSInd
 #pragma mark delegate
 
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
-    return [self apollo_sf_rowAtIndexPath:indexPath].isSelectable;
+    ApolloSettingsRow *row = [self apollo_sf_rowAtIndexPath:indexPath];
+    return row.isSelectable && (!row.enabled || row.enabled());
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     ApolloSettingsRow *row = [self apollo_sf_rowAtIndexPath:indexPath];
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (!row) return;
+    if (row.enabled && !row.enabled()) return;
     if (row.kind == ApolloSFRowKindDisclosure && row.push) {
         UIViewController *destination = row.push();
         if (destination) [self.navigationController pushViewController:destination animated:YES];

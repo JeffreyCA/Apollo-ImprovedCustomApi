@@ -108,7 +108,7 @@ Finally, **don't copy these examples verbatim**. If everyone adopts the same "sa
 - **Tag Filters**: Blur NSFW and/or Spoiler posts (including titles) in feeds, with per-subreddit overrides (Settings > Tag Filters)
 - **Inline Media Previews**: Render images, GIFs, videos, and Imgur albums inline within posts and comments (Settings > Custom API > Media > Inline Media Previews)
 - **Rich Link Previews**: Render metadata-rich link cards in post bodies and comments (Settings > Custom API > Media)
-- **User Profile Pictures**: Show Reddit user avatars next to usernames in feeds, comments, and user profiles (Settings > Custom API > Media > Show User Profile Pictures)
+- **User Profile Pictures**: Show Reddit user avatars next to usernames in posts, comments, messages, inbox rows, and moderator lists (Settings > Apollo Reborn > Interface > Show User Profile Pictures)
 - **Self-hosted Notifications** (advanced): Optionally route push registrations, watchers, and inbox checks through your own [apollo-backend](https://github.com/Apollo-Reborn/apollo-backend) instance instead of having those requests silently dropped — delivered over native APNs (paid Apple Developer account) or the free [Bark](https://apps.apple.com/us/app/bark-custom-notifications/id1403753865) app, which works even on free-Apple-ID sideloads (Settings > Custom API > Notification Backend)
 
 ### Not seeing thumbnails or inline previews?

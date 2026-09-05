@@ -59,8 +59,9 @@ BOOL sSubredditShowJoinButton = YES;
 BOOL sSubredditShowDisplayName = YES;
 BOOL sCommunityHighlights = NO;
 BOOL sCommunityHighlightsWeb = NO;
-BOOL sAutoHideTabBarShowOnIdle = NO;
-NSInteger sTabBarCollapseSide = 0;   // 0 = Left (system default), 1 = Right (UDKeyTabBarCollapseSide)
+NSString *const ApolloTabBarScrollBehaviorChangedNotification = @"ApolloTabBarScrollBehaviorChangedNotification";
+BOOL sClassicTabBarScrollBehavior = NO;
+ApolloTabBarHideStyle sTabBarHideStyle = ApolloTabBarHideStyleLeft;
 BOOL sIPadTabBarBottom = NO;   // opt-in (default OFF via registerDefaults, UDKeyIPadTabBarBottom); iPad-gated in the module
 BOOL sKeepSearchBarInPlace = NO;
 BOOL sLGTitleGapCentering = YES;   // effective default ON via registerDefaults (UDKeyLGTitleGapCentering)

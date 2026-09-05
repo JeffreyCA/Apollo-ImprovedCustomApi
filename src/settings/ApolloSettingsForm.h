@@ -70,7 +70,8 @@ typedef UITableViewCell *_Nonnull (^ApolloSettingsCellBlock)(UITableView *tableV
 // (the dataSource serves a snapshot). nil == always visible.
 @property (nonatomic, copy, nullable) BOOL (^visible)(void);
 
-// For switch rows: control enablement, re-read on every configure. nil == enabled.
+// Control enablement, re-read on every configure. Built-in selectable rows
+// dim and stop accepting selection while disabled. nil == enabled.
 @property (nonatomic, copy, nullable) BOOL (^enabled)(void);
 
 // Settings-app-style leading icon tile: a white SF symbol on a colored 29pt

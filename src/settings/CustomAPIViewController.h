@@ -34,9 +34,6 @@
 - (instancetype)initWithStyle:(UITableViewStyle)style;
 @end
 
-@interface ApolloProfilesSettingsViewController : CustomAPIViewController // Features → Profiles
-@end
-
 @interface ApolloInterfaceSettingsViewController : CustomAPIViewController // Features → Interface
 @end
 

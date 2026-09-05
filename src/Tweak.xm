@@ -3770,7 +3770,8 @@ static BOOL ApolloDefaultsKeyChangesNativeFavorites(NSString *key) {
                                     UDKeySubredditShowDisplayName: @YES,
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
-                                    UDKeyAutoHideTabBarShowOnIdle: @NO,
+                                    UDKeyAutoHideTabBarShowOnIdle: @YES,
+                                    UDKeyClassicTabBarScrollBehavior: @NO,
                                     UDKeyTabBarCollapseSide: @0,
                                     UDKeyKeepSearchBarInPlace: @NO,
                                     UDKeyLGTitleGapCentering: @YES,
@@ -4030,9 +4031,21 @@ static BOOL ApolloDefaultsKeyChangesNativeFavorites(NSString *key) {
     sSubredditShowDisplayName = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowDisplayName];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
-    sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
-    sTabBarCollapseSide = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyTabBarCollapseSide];
-    if (sTabBarCollapseSide != 0 && sTabBarCollapseSide != 1) sTabBarCollapseSide = 0;
+    sClassicTabBarScrollBehavior = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyClassicTabBarScrollBehavior];
+    if (ApolloSupportsNativeTabBarScrollBehavior() &&
+        ![standardDefaults boolForKey:UDKeyAutoHideTabBarShowOnIdle]) {
+        // Idle re-expansion is now bundled into both selectable scroll modes.
+        // Normalize older/restored independent-switch state on supported OSes.
+        [standardDefaults setBool:YES forKey:UDKeyAutoHideTabBarShowOnIdle];
+        ApolloLog(@"[AutoHideTabBarFix] Migrated scroll behavior to include idle re-expansion");
+    }
+    NSInteger storedTabBarHideStyle =
+        [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyTabBarCollapseSide];
+    if (storedTabBarHideStyle < ApolloTabBarHideStyleLeft ||
+        storedTabBarHideStyle > ApolloTabBarHideStyleDown) {
+        storedTabBarHideStyle = ApolloTabBarHideStyleLeft;
+    }
+    sTabBarHideStyle = (ApolloTabBarHideStyle)storedTabBarHideStyle;
     sKeepSearchBarInPlace = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];
     sLGTitleGapCentering = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLGTitleGapCentering];
     sIPadTabBarBottom = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom];
