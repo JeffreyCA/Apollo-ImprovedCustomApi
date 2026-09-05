@@ -1,5 +1,5 @@
 // ApolloScrollEdgePopFix — keep the Liquid Glass scroll-edge fades alive across navigation
-// transitions.
+// transitions and tab switches.
 //
 // THE SYMPTOM
 // On iOS 26 the blurred/dimmed bands that mask content scrolling under the floating nav pills
@@ -69,6 +69,22 @@
 // resettles everything itself from clean geometry. (Earlier attempts froze ONLY
 // _updatePockets and still flickered — the mask rebuild in layoutSubviews was the unpatched
 // half of the storm.)
+//
+// THE TAB SWITCH (same kill switch, different transition)
+// Tapping another tab while the current feed is scrolled flashes the raw content under the
+// status bar / nav pills for a few frames before the new tab fades in. iOS 26 switches tabs
+// with a cross-fade (`_UITabCrossFadeTransition`, vended by the tab bar controller's visual
+// style), which leaves the outgoing view on screen at full opacity for a good ~300ms after
+// `transitionFromViewController:toViewController:transition:shouldSetSelected:` returns and
+// only then fades it. But the very first layout pass after that call — inside the same
+// CATransaction commit — already runs `_updatePockets` on the outgoing scroll views with the
+// outgoing navigation bar's pocket registration inactive, and tears down their TOP effect
+// views (a per-frame sampler of the outgoing view: 4 effect views → 2, the two bottom ones,
+// with `removeFromSuperview` called from `-[UIScrollView _updatePockets]`; presentation
+// opacity of the outgoing view still 1.0 at that point). Bottom pockets survive, exactly like
+// the nav case. Same remedy: freeze the outgoing tab's subtree for the lifetime of the
+// tab-bar controller's transition, resettle on completion. Once the cross-fade finishes UIKit
+// removes the outgoing view from the window anyway, so the deferred resettle is free.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -86,7 +102,7 @@ static const NSUInteger kApolloEdgeBottom = 4;
 // UIKit.ScrollEdgeEffectView, resolved once in the ctor (Swift-side class).
 static Class sScrollEdgeEffectViewClass;
 
-// Non-zero while at least one navigation transition is running.
+// Non-zero while at least one navigation transition or tab switch is running.
 static NSUInteger sTransitionsInFlight;
 
 // Bumped whenever the count drops to zero, so a late safety timeout can tell whether the
@@ -119,6 +135,16 @@ static void ApolloEdgeCollectScrollViews(UIView *view, NSMutableArray<UIScrollVi
     for (UIView *sub in view.subviews) ApolloEdgeCollectScrollViews(sub, out);
 }
 
+// Freeze only: the outgoing view keeps its frame, so there is no parked geometry to redirect
+// away from — the recompute itself is what has to be held off.
+static void ApolloEdgeFreezeSubtree(UIView *outgoingView) {
+    NSMutableArray<UIScrollView *> *scrollViews = [NSMutableArray array];
+    ApolloEdgeCollectScrollViews(outgoingView, scrollViews);
+    for (UIScrollView *scrollView in scrollViews) {
+        [sFrozenScrollViews addObject:scrollView];
+    }
+}
+
 static void ApolloEdgeRedirectGeometry(UIView *outgoingView, UIView *stableView) {
     NSMutableArray<UIScrollView *> *scrollViews = [NSMutableArray array];
     ApolloEdgeCollectScrollViews(outgoingView, scrollViews);
@@ -130,7 +156,7 @@ static void ApolloEdgeRedirectGeometry(UIView *outgoingView, UIView *stableView)
     }
 }
 
-static void ApolloEdgeArmSafetyTimeout(UINavigationController *nav, NSUInteger generation);
+static void ApolloEdgeArmSafetyTimeout(UIViewController *host, NSUInteger generation);
 
 static void ApolloEdgeEndTransition(NSUInteger generation) {
     if (generation != sTransitionGeneration || sTransitionsInFlight == 0) return;
@@ -159,21 +185,43 @@ static void ApolloEdgeEndTransition(NSUInteger generation) {
     [sFrozenScrollViews removeAllObjects];
 }
 
-// Re-arms for as long as the navigation controller still reports a live transition, so a held
+// Re-arms for as long as the host controller still reports a live transition, so a held
 // gesture stays covered while a genuinely finished one is always released. A fixed timeout
 // would expire mid-drag, which is exactly the case this fix exists for.
-static void ApolloEdgeArmSafetyTimeout(UINavigationController *nav, NSUInteger generation) {
-    __weak UINavigationController *weakNav = nav;
+static void ApolloEdgeArmSafetyTimeout(UIViewController *host, NSUInteger generation) {
+    __weak UIViewController *weakHost = host;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (generation != sTransitionGeneration || sTransitionsInFlight == 0) return;
-        UINavigationController *strongNav = weakNav;
-        if (strongNav && strongNav.transitionCoordinator) {
-            ApolloEdgeArmSafetyTimeout(strongNav, generation);   // still being dragged
+        UIViewController *strongHost = weakHost;
+        if (strongHost && strongHost.transitionCoordinator) {
+            ApolloEdgeArmSafetyTimeout(strongHost, generation);   // still being dragged
             return;
         }
         ApolloEdgeEndTransition(generation);
     });
+}
+
+// Counts the transition in and releases it when the host's coordinator completes (fires for
+// completed AND cancelled transitions, which is exactly the lifetime we want). Without a
+// coordinator there is nothing animated to cover, so release on the next runloop turn.
+static void ApolloEdgeTrackTransition(UIViewController *host) {
+    sTransitionsInFlight++;
+    NSUInteger generation = sTransitionGeneration;
+
+    id<UIViewControllerTransitionCoordinator> coordinator = host.transitionCoordinator;
+    if (coordinator) {
+        [coordinator animateAlongsideTransition:nil
+                                     completion:^(id<UIViewControllerTransitionCoordinatorContext> ctx) {
+            ApolloEdgeEndTransition(generation);
+        }];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{ ApolloEdgeEndTransition(generation); });
+    }
+
+    // A stuck counter would leave the override installed indefinitely, so never let one
+    // outlive the transition it was armed for.
+    ApolloEdgeArmSafetyTimeout(host, generation);
 }
 
 static void ApolloEdgeBeginTransition(UINavigationController *nav, UIViewController *outgoing) {
@@ -184,25 +232,7 @@ static void ApolloEdgeBeginTransition(UINavigationController *nav, UIViewControl
     if (outgoing.isViewLoaded && nav.isViewLoaded) {
         ApolloEdgeRedirectGeometry(outgoing.view, nav.view);
     }
-
-    sTransitionsInFlight++;
-    NSUInteger generation = sTransitionGeneration;
-
-    id<UIViewControllerTransitionCoordinator> coordinator = nav.transitionCoordinator;
-    if (coordinator) {
-        // Fires for completed AND cancelled transitions, which is exactly the lifetime we want.
-        [coordinator animateAlongsideTransition:nil
-                                     completion:^(id<UIViewControllerTransitionCoordinatorContext> ctx) {
-            ApolloEdgeEndTransition(generation);
-        }];
-    } else {
-        // Non-animated navigation: nothing to cover beyond this turn of the runloop.
-        dispatch_async(dispatch_get_main_queue(), ^{ ApolloEdgeEndTransition(generation); });
-    }
-
-    // A stuck counter would leave the override installed indefinitely, so never let one
-    // outlive the transition it was armed for.
-    ApolloEdgeArmSafetyTimeout(nav, generation);
+    ApolloEdgeTrackTransition(nav);
 }
 
 %group ScrollEdgePopFix
@@ -269,6 +299,31 @@ static void ApolloEdgeBeginTransition(UINavigationController *nav, UIViewControl
 
 %end
 
+%hook UITabBarController
+
+// The single funnel every tab change goes through (tab bar tap, selectedIndex, keyboard
+// shortcuts). After %orig the outgoing view is still in the window at full opacity; the
+// cross-fade that eventually fades it is scheduled for after the CATransaction commits, and
+// the pocket teardown lands in the layout pass of that same commit — so the freeze has to be
+// in place before this call returns to the run loop.
+- (void)transitionFromViewController:(UIViewController *)fromViewController
+                    toViewController:(UIViewController *)toViewController
+                          transition:(NSInteger)transition
+                   shouldSetSelected:(BOOL)shouldSetSelected {
+    %orig;
+    if (!fromViewController || fromViewController == toViewController ||
+        !fromViewController.isViewLoaded) {
+        return;
+    }
+    // No coordinator means UIKit switched instantly (Reduce Motion, first selection, an
+    // unanimated programmatic change): the outgoing view is already gone, nothing to cover.
+    if (!self.transitionCoordinator) return;
+    ApolloEdgeFreezeSubtree(fromViewController.view);
+    ApolloEdgeTrackTransition(self);
+}
+
+%end
+
 %end
 
 %ctor {
@@ -290,5 +345,5 @@ static void ApolloEdgeBeginTransition(UINavigationController *nav, UIViewControl
     sRedirectedScrollViews = [NSHashTable weakObjectsHashTable];
     sFrozenScrollViews = [NSHashTable weakObjectsHashTable];
     %init(ScrollEdgePopFix, ScrollEdgeEffectView = sScrollEdgeEffectViewClass);
-    ApolloLog(@"[ScrollEdgePopFix] hook installed (pocket recompute frozen + geometry redirected during nav transitions)");
+    ApolloLog(@"[ScrollEdgePopFix] hook installed (pocket recompute frozen + geometry redirected during nav transitions and tab switches)");
 }

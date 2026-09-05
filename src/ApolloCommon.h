@@ -158,6 +158,11 @@ void ApolloLGTitleCenteringModeChanged(void);
 // Keeps the Liquid Glass title capsule in sync with a custom title view's
 // independently-faded content (defined in ApolloLiquidGlass.xm; no-op off LG).
 void ApolloNavigationTitleGlassSetContentAlpha(UIView *contentView, CGFloat alpha);
+// Re-run the title capsule install/recentre for every title control in the bar (used when a
+// navigation transition settles). ApolloLiquidGlass.xm.
+void ApolloNavigationTitleGlassRefreshNavigationBar(UINavigationBar *bar);
+// YES through interactive push/pop setup and UIKit's completion cleanup (Liquid Glass only).
+BOOL ApolloNavTransitionInFlight(void);
 
 // Apollo's main ApolloTabBarController, found via the scene/app delegate's
 // tabBarController ivar or by walking window root VCs. Returns nil while the
@@ -250,6 +255,7 @@ void ApolloAppendListLayoutDiag(NSString *line);
 // (future iOS). Callers must treat unknown as "assume nothing" and fail OPEN
 // (accept UIKit's writes), never as "expanded" — fighting UIKit per frame on a
 // wrong guess is worse than missing one correction. Main-thread only.
+id ApolloTabBarVisualProvider(UITabBar *tabBar);
 NSInteger ApolloTabBarVisualMorphTarget(UITabBar *tabBar, BOOL *known);
 
 // One-byte Swift Bool stored property on the tab bar's visual provider (e.g.

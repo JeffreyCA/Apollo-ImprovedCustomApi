@@ -942,9 +942,45 @@ static NSMutableDictionary *ApolloSubredditIndexCaptureCellNativeState(UITableVi
     NSMutableDictionary *state = objc_getAssociatedObject(cell, &kApolloSubredditCellNativeStateKey);
     if (state) return state;
     state = [NSMutableDictionary dictionary];
-    state[@"separatorInset"] = [NSValue valueWithUIEdgeInsets:cell.separatorInset];
-    state[@"layoutMargins"] = [NSValue valueWithUIEdgeInsets:cell.layoutMargins];
-    state[@"contentMargins"] = [NSValue valueWithUIEdgeInsets:cell.contentView.layoutMargins];
+    UIEdgeInsets separatorInset = cell.separatorInset;
+    UIEdgeInsets layoutMargins = cell.layoutMargins;
+    // Apollo's list cells preserve their superview's layout margins and
+    // inherit the table's separator inset, and the suite widens both on the
+    // TABLE (ApplySeparatorInsets, before any cell displays). So a cell first
+    // seen with the suite on reports the 38pt enhancement inset on its right
+    // edge — reading it back here would snapshot the enhanced value as
+    // "native", and the master-off restore would write it straight back,
+    // leaving the favourite stars inset on exactly the cells that had been
+    // on screen (#1010). Substitute the table's captured native right edge,
+    // which is what the cell would have shown with the suite off.
+    UIEdgeInsets contentMargins = cell.contentView.layoutMargins;
+    UITableView *tableView = ApolloSubredditIndexTableForCell(cell);
+    NSDictionary *tableState = tableView ? objc_getAssociatedObject(tableView, &kApolloSubredditTableNativeStateKey) : nil;
+    if (tableState) {
+        UIEdgeInsets nativeTableMargins = [tableState[@"layoutMargins"] UIEdgeInsetsValue];
+        UIEdgeInsets nativeTableSeparatorInset = [tableState[@"separatorInset"] UIEdgeInsetsValue];
+        if (layoutMargins.right >= ApolloSubredditIndexRightInset &&
+            layoutMargins.right == tableView.layoutMargins.right) {
+            layoutMargins.right = nativeTableMargins.right;
+            // The content view inherits the cell's right margin through the
+            // same chain (less the strip UIKit reserves for the section
+            // index), and that inherited value is what positions the star.
+            // Natively the cell's right edge is too small to win, so the
+            // content view shows its own margin — UIKit's default, the same
+            // value its untouched left edge carries.
+            CGFloat indexStrip = MAX(CGRectGetWidth(cell.bounds) - CGRectGetMaxX(cell.contentView.frame), 0.0);
+            if (contentMargins.right > contentMargins.left + 0.5) {
+                contentMargins.right = MAX(contentMargins.left, nativeTableMargins.right - indexStrip);
+            }
+        }
+        if (separatorInset.right >= ApolloSubredditIndexRightInset &&
+            separatorInset.right == tableView.separatorInset.right) {
+            separatorInset.right = nativeTableSeparatorInset.right;
+        }
+    }
+    state[@"separatorInset"] = [NSValue valueWithUIEdgeInsets:separatorInset];
+    state[@"layoutMargins"] = [NSValue valueWithUIEdgeInsets:layoutMargins];
+    state[@"contentMargins"] = [NSValue valueWithUIEdgeInsets:contentMargins];
     state[@"cellBackgroundColor"] = cell.backgroundColor ?: (id)[NSNull null];
     state[@"contentBackgroundColor"] = cell.contentView.backgroundColor ?: (id)[NSNull null];
     state[@"cellOpaque"] = @(cell.opaque);
@@ -1779,6 +1815,15 @@ static void ApolloSubredditIndexInstallOrUpdate(UITableView *tableView) {
     if (!ApolloSubredditIndexLooksLikeSubredditsTable(tableView, titles)) return;
 
     objc_setAssociatedObject(tableView, &kApolloSubredditIndexTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Register the table the moment the suite first touches it. The
+    // cellForRow hook registers too, but only once a cell is produced — and
+    // Apollo reloads the list model at launch while the list sits under the
+    // restored feed, so reloadData reached here (hiding the native index)
+    // before any cell existed. A table hidden that way never entered the
+    // known set, and the master-off revert never reached it: the letters
+    // stayed painted clear until the app was relaunched.
+    if (!sApolloSubredditKnownTables) sApolloSubredditKnownTables = [NSHashTable weakObjectsHashTable];
+    [sApolloSubredditKnownTables addObject:tableView];
     ApolloSubredditIndexApplySeparatorInsets(tableView);
     // NB: deliberately do NOT colour the table's scroll-view background here. On iOS 26 any opaque
     // UIScrollView background flips the nav bar to its glass / content-reflecting appearance, which
@@ -1826,6 +1871,23 @@ static void ApolloSubredditIndexInstallOrUpdate(UITableView *tableView) {
                        tableView,
                        NSStringFromClass([ApolloSubredditIndexOwningViewController(tableView) class]));
     }
+}
+
+// Master off: the native section index is the one on screen, and Apollo never
+// colors it — the captured native sectionIndexColor is nil, so UIKit falls back
+// to the table's tintColor, which is Apollo's stock blue regardless of the
+// active theme (custom themes included). Tint it with the same theme accent the
+// enhancement overlay uses so the letters follow the theme in both modes.
+// Cheap enough for layoutSubviews: a hash lookup plus an isEqual guard, so the
+// color is written once per theme/appearance change, not per frame.
+static void ApolloSubredditIndexApplyNativeIndexAccent(UITableView *tableView) {
+    if (sSubredditListEnhancements || !tableView) return;
+    if (![sApolloSubredditKnownTables containsObject:tableView]) return;
+    UIColor *accent = ApolloSubredditIndexResolvedColor(ApolloThemeAccentColor(), tableView.traitCollection);
+    if (!accent) return;
+    if ([tableView.sectionIndexColor isEqual:accent]) return;
+    tableView.sectionIndexColor = accent;
+    ApolloLogDebug(@"[SubredditIndex] native index tinted with theme accent table=%p", tableView);
 }
 
 static BOOL ApolloSubredditIndexEnsureSubredditTable(UITableView *tableView) {
@@ -2642,6 +2704,7 @@ static void ApolloSubredditIndexRaiseNativeIndexAboveHeaders(UITableView *tableV
 - (void)layoutSubviews {
     %orig;
     ApolloSubredditIndexInstallOrUpdate((UITableView *)self);
+    ApolloSubredditIndexApplyNativeIndexAccent((UITableView *)self);
     ApolloSubredditIndexRaiseNativeIndexAboveHeaders((UITableView *)self);
 }
 
@@ -2649,6 +2712,7 @@ static void ApolloSubredditIndexRaiseNativeIndexAboveHeaders(UITableView *tableV
     objc_setAssociatedObject((UITableView *)self, &kApolloSubredditMultiredditsSectionKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     %orig;
     ApolloSubredditIndexInstallOrUpdate((UITableView *)self);
+    ApolloSubredditIndexApplyNativeIndexAccent((UITableView *)self);
 }
 
 - (void)deleteRowsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths withRowAnimation:(UITableViewRowAnimation)animation {
@@ -2981,6 +3045,9 @@ static void ApolloSubredditIndexRevertTableToNative(UITableView *tableView) {
         ApolloSubredditIndexRestoreHeaderNativeChrome([tableView headerViewForSection:section]);
     }
 
+    // The native index is back on screen: give it the theme accent rather
+    // than the nil (= Apollo-blue tint) it was captured with.
+    ApolloSubredditIndexApplyNativeIndexAccent(tableView);
     ApolloSubredditIndexReloadTablePreservingAnchor(tableView);
 }
 
@@ -3277,6 +3344,74 @@ static void ApolloSubredditIndexApplyRedditListCellPolishOnce(UITableViewCell *c
 }
 
 %end
+
+#if APOLLO_SIM_BUILD
+// Sim debug bridge ("indexdiag"): log the section-index state of every known
+// subreddit table — what the native index is colored, what we captured, whether
+// the overlay is installed — for chasing invisible / mis-colored index letters.
+static NSString *ApolloSubredditIndexDebugColor(UIColor *color, UITraitCollection *traits) {
+    if (!color) return @"nil";
+    UIColor *resolved = ApolloSubredditIndexResolvedColor(color, traits);
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if ([resolved getRed:&r green:&g blue:&b alpha:&a]) {
+        return [NSString stringWithFormat:@"rgba(%.2f,%.2f,%.2f,%.2f)", r, g, b, a];
+    }
+    return resolved.description;
+}
+
+void ApolloSubredditIndexDebugDescribeTables(void);
+void ApolloSubredditIndexDebugDescribeTables(void) {
+    NSArray<UITableView *> *tables = sApolloSubredditKnownTables.allObjects;
+    ApolloLog(@"[SubredditIndex][diag] enhancements=%d modern=%d knownTables=%lu accent=%@",
+              sSubredditListEnhancements, sModernSubredditDividers, (unsigned long)tables.count,
+              ApolloSubredditIndexDebugColor(ApolloThemeAccentColor(), nil));
+    for (UITableView *tableView in tables) {
+        UITraitCollection *traits = tableView.traitCollection;
+        UIView *indexView = nil;
+        for (UIView *subview in tableView.subviews) {
+            if ([NSStringFromClass(subview.class) rangeOfString:@"TableViewIndex"].location != NSNotFound) {
+                indexView = subview;
+                break;
+            }
+        }
+        ApolloSubredditIndexOverlayView *overlay = objc_getAssociatedObject(tableView, &kApolloSubredditIndexOverlayKey);
+        NSDictionary *state = objc_getAssociatedObject(tableView, &kApolloSubredditTableNativeStateKey);
+        id capturedIndexColor = state[@"sectionIndexColor"];
+        ApolloLog(@"[SubredditIndex][diag] table=%p window=%d recognised=%d titles=%lu tint=%@ indexColor=%@ indexBg=%@ indexTracking=%@ captured=%@ capturedIndexColor=%@ indexView=%@ overlay=%@",
+                  tableView, tableView.window != nil,
+                  [objc_getAssociatedObject(tableView, &kApolloSubredditIndexTableKey) boolValue],
+                  (unsigned long)ApolloSubredditIndexTitlesForTable(tableView).count,
+                  ApolloSubredditIndexDebugColor(tableView.tintColor, traits),
+                  ApolloSubredditIndexDebugColor(tableView.sectionIndexColor, traits),
+                  ApolloSubredditIndexDebugColor(tableView.sectionIndexBackgroundColor, traits),
+                  ApolloSubredditIndexDebugColor(tableView.sectionIndexTrackingBackgroundColor, traits),
+                  state ? @"yes" : @"no",
+                  [capturedIndexColor isKindOfClass:[UIColor class]] ? ApolloSubredditIndexDebugColor(capturedIndexColor, traits) : (capturedIndexColor ? @"null" : @"absent"),
+                  indexView ? [NSString stringWithFormat:@"%@ frame=%@ hidden=%d alpha=%.2f", NSStringFromClass(indexView.class), NSStringFromCGRect(indexView.frame), indexView.hidden, indexView.alpha] : @"none",
+                  overlay ? [NSString stringWithFormat:@"frame=%@ superview=%@ labels=%lu", NSStringFromCGRect(overlay.frame), NSStringFromClass(overlay.superview.class), (unsigned long)overlay.labels.count] : @"none");
+        ApolloLog(@"[SubredditIndex][diag]   table margins=%@ separatorInset=%@ capturedMargins=%@ capturedSeparatorInset=%@",
+                  NSStringFromUIEdgeInsets(tableView.layoutMargins), NSStringFromUIEdgeInsets(tableView.separatorInset),
+                  state[@"layoutMargins"] ? NSStringFromUIEdgeInsets([state[@"layoutMargins"] UIEdgeInsetsValue]) : @"-",
+                  state[@"separatorInset"] ? NSStringFromUIEdgeInsets([state[@"separatorInset"] UIEdgeInsetsValue]) : @"-");
+        NSUInteger logged = 0;
+        for (UITableViewCell *cell in tableView.visibleCells) {
+            UIControl *star = ApolloSubredditIndexFindStarControlInView(cell, cell);
+            if (!star) continue;
+            NSDictionary *cellState = objc_getAssociatedObject(cell, &kApolloSubredditCellNativeStateKey);
+            CGRect starFrame = [cell convertRect:star.bounds fromView:star];
+            ApolloLog(@"[SubredditIndex][diag]   cell=%@ preserves=%d margins=%@ separatorInset=%@ contentMargins=%@ capturedMargins=%@ capturedSeparatorInset=%@ marginsApplied=%d starX=%.1f cellW=%.1f",
+                      ApolloSubredditIndexCellTitle(cell), cell.preservesSuperviewLayoutMargins,
+                      NSStringFromUIEdgeInsets(cell.layoutMargins), NSStringFromUIEdgeInsets(cell.separatorInset),
+                      NSStringFromUIEdgeInsets(cell.contentView.layoutMargins),
+                      cellState[@"layoutMargins"] ? NSStringFromUIEdgeInsets([cellState[@"layoutMargins"] UIEdgeInsetsValue]) : @"-",
+                      cellState[@"separatorInset"] ? NSStringFromUIEdgeInsets([cellState[@"separatorInset"] UIEdgeInsetsValue]) : @"-",
+                      [objc_getAssociatedObject(cell, &kApolloSubredditCellMarginsAppliedKey) boolValue],
+                      CGRectGetMinX(starFrame), CGRectGetWidth(cell.bounds));
+            if (++logged >= 3) break;
+        }
+    }
+}
+#endif
 
 %ctor {
     ApolloSubredditIndexInstallHeaderHook();

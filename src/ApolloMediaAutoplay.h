@@ -12,7 +12,8 @@ extern "C" {
 BOOL ApolloShouldAutoplayInlineGIF(void);
 
 /// Cached autoplay decision for the current settings/reachability epoch.
-/// Invalidated when settings, reachability, or Low Power Mode changes.
+/// Invalidated when settings or reachability change. Low Power Mode is
+/// deliberately not part of the decision (the mode setting is).
 BOOL ApolloShouldAutoplayInlineGIFCached(void);
 
 /// Current inline-GIF autoplay mode as a normalized string
@@ -92,7 +93,7 @@ BOOL ApolloPauseInlineGIFNodeForAutoplay(id imageNode);
 /// Returns YES when a paused node was reloaded; NO when skipped or resume-only.
 BOOL ApolloReloadInlineGIFImageNodeForAutoplay(id imageNode);
 
-/// Install observers for the Autoplay Inline GIFs preference / reachability / Low Power Mode.
+/// Install observers for the Autoplay Inline GIFs preference / reachability.
 void ApolloMediaAutoplayInstall(void);
 
 #ifdef __cplusplus

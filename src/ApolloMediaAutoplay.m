@@ -151,14 +151,13 @@ static void ApolloInstallAutoplayDefaultsKVO(NSUserDefaults *defaults, NSString 
     }
 }
 
+// Deliberately NOT gated on Low Power Mode. The Autoplay Inline GIFs setting is
+// the user's whole answer to "should these animate?": Always / WiFi Only keep
+// playing in Low Power Mode, and anyone who wants to save battery picks Tap to
+// Play or Never. The old unconditional LPM veto made Always silently behave
+// like Tap to Play for anyone whose phone lives in Low Power Mode (#634,
+// #1004), and Apollo's own feed GIFs never checked LPM either.
 static BOOL ApolloComputeShouldAutoplayInlineGIF(NSString **outMode) {
-    if (@available(iOS 9.0, *)) {
-        if ([NSProcessInfo processInfo].isLowPowerModeEnabled) {
-            if (outMode) *outMode = @"lpm";
-            return NO;
-        }
-    }
-
     ApolloStartReachabilityMonitor();
 
     NSString *mode = ApolloAutoplayGIFModeString();
@@ -629,13 +628,8 @@ void ApolloMediaAutoplayInstall(void) {
         ApolloInstallAutoplayDefaultsKVO([NSUserDefaults standardUserDefaults], UDKeyAutoplayInlineGIFs);
         ApolloInstallAutoplayDefaultsKVO([NSUserDefaults standardUserDefaults], kApolloNativeAutoplayGIFsKey);
         ApolloInstallAutoplayDefaultsKVO([[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuiteName], kApolloNativeAutoplayGIFsKey);
-        if (@available(iOS 9.0, *)) {
-            [[NSNotificationCenter defaultCenter] addObserverForName:NSProcessInfoPowerStateDidChangeNotification
-                                                              object:nil
-                                                               queue:[NSOperationQueue mainQueue]
-                                                          usingBlock:^(__unused NSNotification *note) {
-                ApolloRefreshVisibleInlineGIFAutoplay();
-            }];
-        }
+        // No NSProcessInfoPowerStateDidChangeNotification observer: Low Power
+        // Mode no longer feeds the decision, so a power-state flip has nothing
+        // to refresh (see ApolloComputeShouldAutoplayInlineGIF).
     });
 }

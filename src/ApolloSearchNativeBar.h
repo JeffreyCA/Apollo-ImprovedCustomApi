@@ -11,3 +11,6 @@ BOOL ApolloNativeFeedSearchEnabled(void);
 
 // YES while THIS feed table is mid-native-search with a non-empty query.
 BOOL ApolloNativeFeedSearchActiveQuery(UIScrollView *tableView);
+
+// Flush and restore an expanded feed search before a cancelled navigation is drawn.
+void ApolloNativeFeedSearchRestoreCancelledNavigation(UIViewController *vc);
