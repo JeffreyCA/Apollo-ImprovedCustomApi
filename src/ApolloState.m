@@ -75,6 +75,7 @@ BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
 NSInteger sSubredditFeedIconStyle = ApolloSubredditFeedIconStyleClassic;
 NSInteger sSubredditFeedLayout = ApolloSubredditFeedLayoutRows;
+BOOL sPerAccountFavoritesEnabled = NO;
 BOOL sHideSubredditListDescriptions = NO;
 BOOL sHideMultiredditDescriptions = NO;
 BOOL sEnableFlairColors = NO;

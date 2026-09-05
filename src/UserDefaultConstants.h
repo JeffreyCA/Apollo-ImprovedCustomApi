@@ -50,6 +50,18 @@ static NSString *const UDKeyHideRPopularRedditList = @"HideRPopularRedditList";
 static NSString *const UDKeyHideRAllRedditList = @"HideRAllRedditList";
 static NSString *const UDKeyHideModeratorRedditList = @"HideModeratorRedditList";
 static NSString *const ApolloFeedShortcutsChangedNotification = @"ApolloFeedShortcutsChangedNotification";
+// Keep an independent FavoriteSubreddits list for each Reddit account. Opt-in:
+// default NO via registerDefaults. ApolloPerAccountFavorites projects the active
+// account's bucket back through Apollo's native FavoriteSubreddits key so every
+// stock reader/mutator continues to work unchanged.
+static NSString *const UDKeyPerAccountFavoritesEnabled = @"PerAccountFavoritesEnabled";
+// Versioned envelope: { "version": 1, "buckets": { "u:name": [subreddits],
+// "anonymous": [subreddits] } }. Missing bucket and explicit empty bucket are
+// intentionally distinct; accounts created after the first migration start empty.
+static NSString *const UDKeyPerAccountFavoriteSubreddits = @"PerAccountFavoriteSubreddits";
+// Apollo's own active favorites projection and its native refresh notification.
+static NSString *const UDKeyApolloFavoriteSubreddits = @"FavoriteSubreddits";
+static NSString *const ApolloFavoriteSubredditsUpdatedNotification = @"com.christianselig.FavoriteSubredditsUpdated";
 // Subreddits the user moderates but chose to hide from the Subreddits list
 // (Reddit offers no way to leave or delete some dead subreddits). Array of
 // display names, compared case-insensitively.
