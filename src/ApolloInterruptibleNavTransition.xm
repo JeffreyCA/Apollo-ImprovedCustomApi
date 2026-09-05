@@ -75,6 +75,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "ApolloCommon.h"
+#import "ApolloSearchNativeBar.h"
 
 // Apollo's animator object -> the most recently built UIViewPropertyAnimator.
 static const void *kApolloNavAnimatorKey = &kApolloNavAnimatorKey;
@@ -132,12 +133,19 @@ static UIView *ApolloNavMakeShadowView(CGRect frame, UITraitCollection *traits) 
 
 static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
                                                        id<UIViewControllerContextTransitioning> ctx) {
+    BOOL interactive = ctx.isInteractive;
+    // Loading the views and setting frames can synchronously lay out the bar.
+    // Cover setup too, so transient title controls cannot install capsules.
+    if (interactive) sApolloNavTransitionsInFlight++;
     UIView *container = ctx.containerView;
     UIViewController *fromVC = [ctx viewControllerForKey:UITransitionContextFromViewControllerKey];
     UIViewController *toVC = [ctx viewControllerForKey:UITransitionContextToViewControllerKey];
     UIView *fromView = [ctx viewForKey:UITransitionContextFromViewKey] ?: fromVC.view;
     UIView *toView = [ctx viewForKey:UITransitionContextToViewKey] ?: toVC.view;
     BOOL push = ApolloNavAnimatorIsPresenting(animatorObject);
+    UISearchController *fromSearch = fromVC.navigationItem.searchController;
+    BOOL restoreSearchOnCancel = ApolloNativeFeedSearchEnabled() && !fromSearch.active &&
+                                 CGRectGetHeight(fromSearch.searchBar.bounds) > 1.0;
     CGFloat width = CGRectGetWidth(container.bounds);
     CGFloat parallax = width / kApolloNavParallaxDivisor;
 
@@ -177,7 +185,6 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
     UINavigationBar *navigationBar = toVC.navigationController.navigationBar
         ?: fromVC.navigationController.navigationBar;
 
-    BOOL interactive = ctx.isInteractive;
     ApolloLog(@"[InterruptibleNav] built %s animator for ctx %p (interactive=%d, %@ -> %@)",
               push ? "push" : "pop", (void *)ctx, interactive,
               NSStringFromClass(fromVC.class), NSStringFromClass(toVC.class));
@@ -185,7 +192,6 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
     // can sit at partial alpha indefinitely and then reverse, which is where a capsule on the
     // incoming title reads as a stray bubble. A timed push/pop cross-fades capsule and title
     // together in half a second, exactly as it always did.
-    if (interactive) sApolloNavTransitionsInFlight++;
     NSTimeInterval duration = interactive ? kApolloNavInteractiveDuration : kApolloNavNonInteractiveDuration;
     UIViewPropertyAnimator *animator;
     if (interactive) {
@@ -222,13 +228,18 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
         }
         fromView.userInteractionEnabled = fromWasInteractive;
         toView.userInteractionEnabled = toWasInteractive;
-        if (interactive && sApolloNavTransitionsInFlight > 0) sApolloNavTransitionsInFlight--;
         ApolloLog(@"[InterruptibleNav] %s animator for ctx %p finished (cancelled=%d)",
                   push ? "push" : "pop", (void *)ctx, cancelled);
         // No cache bookkeeping here: this may synchronously start the next transition (a push or
         // pop issued from didShowViewController:), whose animator must survive untouched. The
         // per-context lookup in interruptibleAnimatorForTransition: keeps the two apart.
         [ctx completeTransition:!cancelled];
+        // completeTransition: synchronously restores the item stack and feed
+        // geometry on cancellation. Keep the guard up through that cleanup.
+        if (interactive && sApolloNavTransitionsInFlight > 0) sApolloNavTransitionsInFlight--;
+        if (cancelled && restoreSearchOnCancel) {
+            ApolloNativeFeedSearchRestoreCancelledNavigation(fromVC);
+        }
         // The bar has settled on whichever item won; give the title capsules that were held
         // back during the cross-fade their chance now (they fade in rather than pop).
         if (interactive) ApolloNavigationTitleGlassRefreshNavigationBar(navigationBar);

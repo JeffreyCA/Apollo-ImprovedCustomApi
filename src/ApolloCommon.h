@@ -161,7 +161,7 @@ void ApolloNavigationTitleGlassSetContentAlpha(UIView *contentView, CGFloat alph
 // Re-run the title capsule install/recentre for every title control in the bar (used when a
 // navigation transition settles). ApolloLiquidGlass.xm.
 void ApolloNavigationTitleGlassRefreshNavigationBar(UINavigationBar *bar);
-// YES while ApolloInterruptibleNavTransition is running a push/pop (Liquid Glass only).
+// YES through interactive push/pop setup and UIKit's completion cleanup (Liquid Glass only).
 BOOL ApolloNavTransitionInFlight(void);
 
 // Apollo's main ApolloTabBarController, found via the scene/app delegate's
