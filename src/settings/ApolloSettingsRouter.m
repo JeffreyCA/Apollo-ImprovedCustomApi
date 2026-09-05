@@ -69,9 +69,10 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
             return [[ApolloFeedShortcutsSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         });
         add(@"subreddit-layout", @"Subreddit Layout", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloSubredditLayoutViewController class]));
-        add(@"subreddit-sections", @"Subreddit Sections", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloSubredditSectionsViewController class]));
-        add(@"profiles", @"Profiles", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloProfilesSettingsViewController class]));
-        add(@"profile-layout", @"Profile Layout", @"Apollo Reborn → Features → Profiles", ApolloSettingsInsetGrouped([ApolloProfileLayoutViewController class]));
+        add(@"subreddit-sections", @"Subreddit Sections", @"Apollo Reborn → Features → Subreddits", ^UIViewController *{
+            return [[ApolloSubredditSectionsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        });
+        add(@"profile-layout", @"Profile Layout", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloProfileLayoutViewController class]));
         add(@"interface", @"Interface", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloInterfaceSettingsViewController class]));
         add(@"notification-backend", @"Notification Backend", @"Apollo Reborn → Advanced", ApolloSettingsInsetGrouped([ApolloNotificationBackendViewController class]));
         add(@"saved-categories", @"Saved Categories", @"General → Other", ApolloSettingsInsetGrouped([SavedCategoriesViewController class]));
@@ -91,7 +92,7 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
             return [[ApolloThemeManagerViewController alloc] init]; // default init = hub/list mode
         });
 
-        sRouteAliases = @{ @"pip": @"picture-in-picture", @"ai": @"apollo-ai" };
+        sRouteAliases = @{ @"pip": @"picture-in-picture", @"ai": @"apollo-ai", @"profiles": @"profile-layout" };
         [sRouteAliases enumerateKeysAndObjectsUsingBlock:^(NSString *alias, NSString *canonical, BOOL *stop) {
             builders[alias] = builders[canonical];
             titles[alias] = titles[canonical];

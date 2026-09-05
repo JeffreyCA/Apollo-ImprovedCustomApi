@@ -4,21 +4,59 @@
 #import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
+#import "settings/ApolloSettingsPinnedPreview.h"
 #import <QuartzCore/QuartzCore.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 
-// MARK: - Live preview (fake comments)
+// MARK: - Sections
+
+typedef NS_ENUM(NSInteger, ApolloIMSection) {
+    ApolloIMSectionPreview = 0,   // one transparent spacer row; the pinned card sits on it
+    ApolloIMSectionMaster,
+    ApolloIMSectionOptions,
+    ApolloIMSectionCount,
+};
+
+typedef NS_ENUM(NSInteger, ApolloIMMasterRow) {
+    ApolloIMMasterRowPreviews = 0,   // inline media in posts + comments
+    ApolloIMMasterRowChat,           // inline media in Apollo's native message threads
+    ApolloIMMasterRowCount,
+};
+
+typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
+    ApolloIMOptionsRowAlignment = 0,
+    ApolloIMOptionsRowAutoplay,
+    ApolloIMOptionsRowMediaSize,
+    ApolloIMOptionsRowCount,
+};
+
+// MARK: - Live preview (fake comment + message thread)
 //
-// Same pattern as ApolloLPPreviewCardsView (Rich Link Preview settings): a
-// standalone UIView owned by the controller, re-hosted into its cell on every
-// cellForRow so it survives reloadData, with one apply/refresh entry point the
-// controls call continuously while dragging. Frame-based layout — this is a
-// plain settings view, not a Texture hook, so laying out subviews here is fine.
+// A standalone UIView owned by the controller. It is NOT hosted in a table
+// cell: it lives in the pinned preview card (ApolloPinnedPreviewHost, a direct
+// subview of the table view — see ApolloSettingsPinnedPreview.h), so it
+// survives every reloadData untouched and keeps updating live while the list
+// scrolls beneath it. One apply/refresh entry point the controls call
+// continuously while dragging. Frame-based layout — this is a plain settings
+// view, not a Texture hook, so laying out subviews here is fine.
+//
+// Two mocks, one per master switch on this screen:
+//   • a comment (avatar, name, text, then the GIF block that follows the
+//     size / alignment / autoplay controls — or a plain link when Inline Media
+//     Previews is off);
+//   • a received message bubble with a small inline image (or a plain link when
+//     Inline Media in Messages is off). Size/alignment don't apply to message
+//     threads (ApolloWrapImageNodeForLayout is comments/posts only), so the
+//     bubble's image is deliberately fixed-size.
 
 @interface ApolloInlineMediaPreviewView : UIView
-@property (nonatomic) CGFloat mediaFraction;   // 0.5 / 0.75 / 1.0
-@property (nonatomic) NSInteger alignment;     // ApolloInlineImageAlignment
-@property (nonatomic) BOOL showsPlayOverlay;   // paused modes that tap-to-play
+@property (nonatomic) BOOL commentMediaEnabled;   // Inline Media Previews (master)
+@property (nonatomic) BOOL messageMediaEnabled;   // Inline Media in Messages
+@property (nonatomic) CGFloat mediaFraction;      // 0.5 / 0.75 / 1.0
+@property (nonatomic) NSInteger alignment;        // ApolloInlineImageAlignment
+@property (nonatomic) BOOL showsPlayOverlay;      // paused modes that tap-to-play
+@property (nonatomic, strong) UIColor *accentColor;   // plain-link text colour
 
 @property (nonatomic, strong) UIView *avatarOne;
 @property (nonatomic, strong) UILabel *nameOne;
@@ -26,19 +64,48 @@
 @property (nonatomic, strong) UIView *mediaBlock;
 @property (nonatomic, strong) UILabel *gifBadge;
 @property (nonatomic, strong) UIImageView *playIcon;
-@property (nonatomic, strong) UIView *avatarTwo;
+@property (nonatomic, strong) UILabel *commentLink;
 @property (nonatomic, strong) UILabel *nameTwo;
-@property (nonatomic, strong) UIView *textBarTwo;
-@property (nonatomic, strong) UIView *cardBlock;
-@property (nonatomic, strong) UIView *cardThumb;
-@property (nonatomic, strong) UIView *cardLineOne;
-@property (nonatomic, strong) UIView *cardLineTwo;
+@property (nonatomic, strong) UIView *bubble;
+@property (nonatomic, strong) UIView *bubbleText;
+@property (nonatomic, strong) UIView *bubbleImage;
+@property (nonatomic, strong) UILabel *bubbleLink;
 @end
+
+// Card edge → mock content. The content column is capped so an iPad-width card
+// shows a phone-width comment centered in it instead of a banner-sized block.
+// The card is pinned while the list scrolls, so every point of height here is a
+// point the list can't use — the layout is deliberately compact: the media block
+// keeps a CONSTANT height and only its width follows the slider (width and
+// alignment are what the settings control; a 16:9 block at 100% cost ~190pt and
+// left a hole at 50%), and the message bubble holds a small inline image.
+static const CGFloat kApolloIMPreviewInset = 12.0;      // horizontal
+static const CGFloat kApolloIMPreviewPad = 8.0;         // vertical
+static const CGFloat kApolloIMPreviewMaxContent = 440.0;
+static const CGFloat kApolloIMMediaHeight = 110.0;      // comment media block
+static const CGFloat kApolloIMLinkHeight = 18.0;
+static const CGSize  kApolloIMBubbleImageSize = {88.0, 44.0};
+
+static CGFloat ApolloIMContentWidth(CGFloat cardWidth) {
+    return MAX(60.0, MIN(cardWidth - kApolloIMPreviewInset * 2.0, kApolloIMPreviewMaxContent));
+}
+
+static CGFloat ApolloIMBubbleWidth(CGFloat rowWidth) {
+    return MAX(120.0, rowWidth * 0.72);
+}
+
+// Bubble = 8 pad + 8 text bar + 6 gap + (image | link line) + 8 pad.
+static CGFloat ApolloIMBubbleHeight(BOOL mediaOn) {
+    CGFloat body = mediaOn ? kApolloIMBubbleImageSize.height : kApolloIMLinkHeight;
+    return 8.0 + 8.0 + 6.0 + body + 8.0;
+}
 
 @implementation ApolloInlineMediaPreviewView
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
+        _commentMediaEnabled = YES;
+        _messageMediaEnabled = YES;
         _mediaFraction = 1.0;
         _alignment = ApolloInlineImageAlignmentCenter;
         [self build];
@@ -57,7 +124,7 @@ static UIView *ApolloIMBar(UIView *parent, CGFloat alpha) {
 static UIView *ApolloIMAvatar(UIView *parent) {
     UIView *avatar = [[UIView alloc] init];
     avatar.backgroundColor = [UIColor systemFillColor];
-    avatar.layer.cornerRadius = 12.0;
+    avatar.layer.cornerRadius = 11.0;
     [parent addSubview:avatar];
     return avatar;
 }
@@ -67,6 +134,17 @@ static UILabel *ApolloIMName(UIView *parent, NSString *text) {
     label.text = text;
     label.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
     label.textColor = [UIColor secondaryLabelColor];
+    [parent addSubview:label];
+    return label;
+}
+
+// The "plain link" stand-in shown wherever inline media is switched off — the
+// row then renders the URL as accent-coloured text, exactly like Apollo does.
+static UILabel *ApolloIMLink(UIView *parent, NSString *text) {
+    UILabel *label = [[UILabel alloc] init];
+    label.text = text;
+    label.font = [UIFont systemFontOfSize:13.0];
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
     [parent addSubview:label];
     return label;
 }
@@ -97,79 +175,105 @@ static UILabel *ApolloIMName(UIView *parent, NSString *text) {
     self.playIcon.contentMode = UIViewContentModeScaleAspectFit;
     [self.mediaBlock addSubview:self.playIcon];
 
-    self.avatarTwo = ApolloIMAvatar(self);
+    self.commentLink = ApolloIMLink(self, @"i.redd.it/happy-cat.gif");
+
     self.nameTwo = ApolloIMName(self, @"u/LinkLover · 1h");
-    self.textBarTwo = ApolloIMBar(self, 0.35);
 
-    self.cardBlock = [[UIView alloc] init];
-    self.cardBlock.backgroundColor = [UIColor secondarySystemFillColor];
-    self.cardBlock.layer.cornerRadius = 10.0;
-    self.cardBlock.clipsToBounds = YES;
-    [self addSubview:self.cardBlock];
+    self.bubble = [[UIView alloc] init];
+    self.bubble.backgroundColor = [UIColor secondarySystemFillColor];
+    self.bubble.layer.cornerRadius = 16.0;
+    self.bubble.clipsToBounds = YES;
+    [self addSubview:self.bubble];
 
-    self.cardThumb = [[UIView alloc] init];
-    self.cardThumb.backgroundColor = [UIColor systemFillColor];
-    self.cardThumb.layer.cornerRadius = 6.0;
-    [self.cardBlock addSubview:self.cardThumb];
-    self.cardLineOne = ApolloIMBar(self.cardBlock, 0.5);
-    self.cardLineTwo = ApolloIMBar(self.cardBlock, 0.3);
+    self.bubbleText = ApolloIMBar(self.bubble, 0.5);
+
+    self.bubbleImage = [[UIView alloc] init];
+    self.bubbleImage.backgroundColor = [UIColor systemFillColor];
+    self.bubbleImage.layer.cornerRadius = 8.0;
+    self.bubbleImage.clipsToBounds = YES;
+    [self.bubble addSubview:self.bubbleImage];
+
+    self.bubbleLink = ApolloIMLink(self.bubble, @"i.redd.it/vacation.jpg");
 }
 
-+ (CGFloat)preferredHeight {
-    // Sized for the 100% media block on typical widths; smaller fractions
-    // simply leave breathing room. Row height stays fixed so live slider
-    // drags never force table reloads.
-    return 384.0;
+// Natural card height, laid out for the TALLEST state (both switches on). The
+// row height therefore never changes while the controls are adjusted — the
+// media block's height is constant and switched-off media simply leaves a
+// little room — so live slider drags never force table reloads.
++ (CGFloat)heightForCardWidth:(CGFloat)cardWidth {
+    (void)cardWidth;   // width no longer affects the height; kept for the call sites
+    return kApolloIMPreviewPad + 22.0 + 6.0 + 8.0 + 8.0 + kApolloIMMediaHeight + 12.0
+         + 14.0 + 4.0 + ApolloIMBubbleHeight(YES) + kApolloIMPreviewPad;
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat W = self.bounds.size.width;
     if (W <= 0) return;
-    CGFloat margin = 12.0;
-    CGFloat rowWidth = W - margin * 2.0;
-    CGFloat y = 10.0;
+    CGFloat rowWidth = ApolloIMContentWidth(W);
+    CGFloat margin = (W - rowWidth) * 0.5;
+    CGFloat y = kApolloIMPreviewPad;
 
-    self.avatarOne.frame = CGRectMake(margin, y, 24, 24);
-    self.nameOne.frame = CGRectMake(margin + 32, y + 4, rowWidth - 32, 16);
-    y += 32;
-    self.textBarOne.frame = CGRectMake(margin, y, rowWidth * 0.86, 10);
-    y += 20;
+    // Comment header + a line of text.
+    self.avatarOne.frame = CGRectMake(margin, y, 22, 22);
+    self.nameOne.frame = CGRectMake(margin + 30, y + 3, rowWidth - 30 - 40, 16);   // room for the pin glyph
+    y += 22 + 6;
+    self.textBarOne.frame = CGRectMake(margin, y, rowWidth * 0.86, 8);
+    y += 8 + 8;
 
-    // Media block — width follows the media slider, aspect fixed at 16:9,
-    // horizontal position follows the alignment setting (same slack rule as
-    // ApolloWrapImageNodeForLayout).
-    CGFloat mediaWidth = MAX(60.0, rowWidth * self.mediaFraction);
-    CGFloat mediaHeight = mediaWidth * 9.0 / 16.0;
-    CGFloat slack = rowWidth - mediaWidth;
-    CGFloat mediaX = margin + (self.alignment == ApolloInlineImageAlignmentLeft ? 0.0 :
-                     self.alignment == ApolloInlineImageAlignmentRight ? slack : slack * 0.5);
-    self.mediaBlock.frame = CGRectMake(mediaX, y, mediaWidth, mediaHeight);
-    self.gifBadge.frame = CGRectMake(8, mediaHeight - 26, 40, 18);
-    // Matches the real overlay: a small play badge pinned bottom-right.
-    CGFloat playSide = 26.0;
-    self.playIcon.frame = CGRectMake(mediaWidth - 6.0 - playSide, mediaHeight - 6.0 - playSide, playSide, playSide);
-    self.playIcon.hidden = !self.showsPlayOverlay;
-    y += mediaHeight + 18;
+    // Media block — width follows the media slider, height constant, horizontal
+    // position follows the alignment setting (same slack rule as
+    // ApolloWrapImageNodeForLayout). With Inline Media Previews off the row
+    // shows the link as plain text instead.
+    BOOL commentMedia = self.commentMediaEnabled;
+    self.mediaBlock.hidden = !commentMedia;
+    self.commentLink.hidden = commentMedia;
+    if (commentMedia) {
+        CGFloat mediaWidth = MAX(60.0, rowWidth * self.mediaFraction);
+        CGFloat mediaHeight = kApolloIMMediaHeight;
+        CGFloat slack = rowWidth - mediaWidth;
+        CGFloat mediaX = margin + (self.alignment == ApolloInlineImageAlignmentLeft ? 0.0 :
+                         self.alignment == ApolloInlineImageAlignmentRight ? slack : slack * 0.5);
+        self.mediaBlock.frame = CGRectMake(mediaX, y, mediaWidth, mediaHeight);
+        self.gifBadge.frame = CGRectMake(8, mediaHeight - 26, 40, 18);
+        // Matches the real overlay: a small play badge pinned bottom-right.
+        CGFloat playSide = 26.0;
+        self.playIcon.frame = CGRectMake(mediaWidth - 6.0 - playSide, mediaHeight - 6.0 - playSide, playSide, playSide);
+        self.playIcon.hidden = !self.showsPlayOverlay;
+        y += mediaHeight;
+    } else {
+        self.commentLink.frame = CGRectMake(margin, y, rowWidth, kApolloIMLinkHeight);
+        y += kApolloIMLinkHeight;
+    }
+    y += 12;
 
-    self.avatarTwo.frame = CGRectMake(margin, y, 24, 24);
-    self.nameTwo.frame = CGRectMake(margin + 32, y + 4, rowWidth - 32, 16);
-    y += 32;
-    self.textBarTwo.frame = CGRectMake(margin, y, rowWidth * 0.62, 10);
-    y += 20;
-
-    // Link preview card mock — fixed full width (card sizing is handled by the
-    // Compact/Full modes in Rich Link Preview Settings, not by this screen).
-    CGFloat cardWidth = rowWidth;
-    CGFloat cardHeight = 72.0;
-    self.cardBlock.frame = CGRectMake(margin + (rowWidth - cardWidth) * 0.5, y, cardWidth, cardHeight);
-    self.cardThumb.frame = CGRectMake(8, 8, 56, 56);
-    CGFloat lineX = 72.0;
-    self.cardLineOne.frame = CGRectMake(lineX, 14, MAX(40.0, cardWidth - lineX - 12), 12);
-    self.cardLineTwo.frame = CGRectMake(lineX, 36, MAX(30.0, (cardWidth - lineX - 12) * 0.7), 10);
+    // Message thread: sender name, then a received bubble with a line of text
+    // and either a small inline image or the same plain-link stand-in.
+    self.nameTwo.frame = CGRectMake(margin, y, rowWidth, 14);
+    y += 14 + 4;
+    BOOL messageMedia = self.messageMediaEnabled;
+    CGFloat bubbleWidth = ApolloIMBubbleWidth(rowWidth);
+    CGFloat inner = bubbleWidth - 20.0;
+    CGFloat by = 8.0;
+    self.bubbleText.frame = CGRectMake(10, by, inner * 0.8, 8);
+    by += 8 + 6;
+    self.bubbleImage.hidden = !messageMedia;
+    self.bubbleLink.hidden = messageMedia;
+    if (messageMedia) {
+        self.bubbleImage.frame = CGRectMake(10, by, MIN(inner, kApolloIMBubbleImageSize.width), kApolloIMBubbleImageSize.height);
+        by += kApolloIMBubbleImageSize.height;
+    } else {
+        self.bubbleLink.frame = CGRectMake(10, by, inner, kApolloIMLinkHeight);
+        by += kApolloIMLinkHeight;
+    }
+    by += 8;
+    self.bubble.frame = CGRectMake(margin, y, bubbleWidth, by);
 }
 
 - (void)refresh {
+    UIColor *accent = self.accentColor ?: [UIColor systemBlueColor];
+    self.commentLink.textColor = accent;
+    self.bubbleLink.textColor = accent;
     [self setNeedsLayout];
     [self layoutIfNeeded];
 }
@@ -309,10 +413,11 @@ static UIViewController *ApolloIMVCForView(UIView *view) {
 @end
 
 // UISlider with exactly three stops. Unlike a stock slider, tracking begins
-// from a touch anywhere on the bar (not just on the thumb), and the thumb
-// snaps between the detents while dragging — with a selection tick on each
-// snap. Tick marks at both ends and the middle show the three positions so
-// it doesn't read as a free-flowing slider.
+// from a touch anywhere on the bar (not just on the thumb), the thumb snaps
+// between the detents while dragging — with a selection tick on each snap —
+// and lifting the finger (a plain tap included) lands on the detent nearest the
+// release point. Tick marks at both ends and the middle show the three
+// positions so it doesn't read as a free-flowing slider.
 @interface ApolloIMDetentSlider : UISlider
 @property (nonatomic, strong) NSArray<UIView *> *tickViews;
 @property (nonatomic, strong) UISelectionFeedbackGenerator *feedback;
@@ -338,6 +443,8 @@ static UIViewController *ApolloIMVCForView(UIView *view) {
 // re-wiring is idempotent.
 @property (nonatomic, strong) ApolloIMSliderClaimGesture *claimGesture;
 @property (nonatomic, strong) NSHashTable<UIGestureRecognizer *> *wiredBackGestures;
+// Our own tracking flag — see -isTracking.
+@property (nonatomic) BOOL apolloTracking;
 @end
 
 @implementation ApolloIMDetentSlider
@@ -458,12 +565,48 @@ static UIViewController *ApolloIMVCForView(UIView *view) {
     }
 }
 
-- (void)apollo_applyTouch:(UITouch *)touch {
+// The un-snapped value at an x position along the track.
+- (float)apollo_rawValueForX:(CGFloat)x {
     CGRect track = [self trackRectForBounds:self.bounds];
     CGFloat width = MAX(1.0, CGRectGetWidth(track));
-    CGFloat fraction = ([touch locationInView:self].x - CGRectGetMinX(track)) / width;
+    CGFloat fraction = (x - CGRectGetMinX(track)) / width;
     fraction = MIN(1.0, MAX(0.0, fraction));
-    float raw = self.minimumValue + fraction * (self.maximumValue - self.minimumValue);
+    return self.minimumValue + fraction * (self.maximumValue - self.minimumValue);
+}
+
+- (float)apollo_rawValueForTouch:(UITouch *)touch {
+    return [self apollo_rawValueForX:[touch locationInView:self].x];
+}
+
+// Touch-up: land on the detent nearest x — tap or drag alike. Plain nearest-stop
+// snap on purpose: the hysteresis band and the 2-frame confirmation exist to
+// debounce a HELD finger, and neither applies once it has lifted. For a tap they
+// would leave the thumb where it was (a tap is a single frame, so the streak can
+// never confirm — issue #1006); for a drag they could park the thumb a detent
+// short of where the finger was released.
+- (void)apollo_selectDetentAtX:(CGFloat)x source:(NSString *)source {
+    float raw = [self apollo_rawValueForX:x];
+    NSInteger target = ApolloIMSnapPercent(raw);
+    if (target != self.lastSnappedPercent) {
+        ApolloLog(@"[IMSlider] %@ → %ld%% (was %ld%%)", source, (long)target, (long)self.lastSnappedPercent);
+        [self apollo_commitPercent:target];
+    } else if ((NSInteger)lroundf(self.value) != target) {
+        [self setValue:(float)target animated:YES];   // re-seat a thumb left off-grid
+    }
+}
+
+// Commit a detent: one animated thumb move, one selection tick, one action.
+- (void)apollo_commitPercent:(NSInteger)percent {
+    self.lastSnappedPercent = percent;
+    self.pendingStreak = 0;
+    self.lastFireTime = CACurrentMediaTime();
+    [self setValue:(float)percent animated:YES];
+    [self.feedback selectionChanged];
+    [self sendActionsForControlEvents:UIControlEventValueChanged];
+}
+
+- (void)apollo_applyTouch:(UITouch *)touch {
+    float raw = [self apollo_rawValueForTouch:touch];
     // Hysteretic snap keyed off the current detent — a held finger's jitter
     // can't flip it across a boundary, so the haptic fires once per crossing.
     NSInteger snapped = ApolloIMSnapPercentHysteretic(raw, self.lastSnappedPercent);
@@ -483,21 +626,52 @@ static UIViewController *ApolloIMVCForView(UIView *view) {
     BOOL confirmed = (snapped != self.lastSnappedPercent) && (self.pendingStreak >= 2) && !lockedOut;
 
     if (confirmed) {
-        self.lastSnappedPercent = snapped;      // one haptic per confirmed crossing
-        self.pendingStreak = 0;
-        self.lastFireTime = now;
-        [self setValue:(float)snapped animated:YES];
-        [self.feedback selectionChanged];
-        [self sendActionsForControlEvents:UIControlEventValueChanged];
+        [self apollo_commitPercent:snapped];   // one haptic per confirmed crossing
     }
+}
+
+// MARK: iOS 26 — make UIControl finish the touch sequence
+//
+// On iOS 26 UISlider installs a "fluid" visual element (_UISliderFluidVisualElement)
+// that changes how the CLASSIC UIControl tracking sequence completes, in two ways
+// (both read from the decompiled UIKitCore):
+//
+//  1. -[UISlider isTracking] defers to the visual element's own "interactively
+//     changing" flag, which only turns on for a thumb drag the element drives
+//     itself. UIControl's touchesMoved:/touchesEnded: consult -isTracking before
+//     calling continueTracking/endTracking, so a touch we started from the bare
+//     track (beginTracking returned YES, but the element never saw a thumb drag)
+//     reported NOT tracking and was dropped after beginTracking.
+//  2. -[UISlider _deferFinalActions] returns YES whenever the fluid element is
+//     installed. With that, UIControl's touchesEnded: does NOT call
+//     endTrackingWithTouch: — it flags the touch-up as deferred and expects the
+//     fluid interaction to finish the sequence later. We refuse that interaction
+//     (see addInteraction:), so the deferral never completed: endTracking /
+//     cancelTracking never fired for any touch, and the control stayed "tracking"
+//     forever. (This, not synthetic input, is why end-tracking-based designs kept
+//     failing here, and why a tap never landed — issue #1006.)
+//
+// Both overrides simply restore the classic sequence: report our own tracking
+// state, and never defer the final actions.
+- (BOOL)isTracking {
+    return self.apolloTracking;
+}
+
+- (BOOL)_deferFinalActions {
+    return NO;
 }
 
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
     // Catch any pop pan installed after we entered the window (e.g. re-added when
     // the push transition settled); wiring is idempotent.
     [self apollo_wireSwipeBackFailureRequirements];
-    // Sync to the settled value before the drag; self.value isn't animating yet.
-    self.lastSnappedPercent = (NSInteger)lroundf(self.value);
+    self.apolloTracking = YES;
+    // Sync to the settled value before the drag — but only when it IS settled: a
+    // quick second touch while the previous commit's thumb animation is still in
+    // flight would otherwise read a mid-animation, off-grid value and lose the
+    // committed detent the hysteresis keys off.
+    NSInteger settled = (NSInteger)lroundf(self.value);
+    if (settled == 50 || settled == 75 || settled == 100) self.lastSnappedPercent = settled;
     self.pendingPercent = self.lastSnappedPercent;
     self.pendingStreak = 0;
     [self.feedback prepare];
@@ -510,17 +684,35 @@ static UIViewController *ApolloIMVCForView(UIView *view) {
     return YES;
 }
 
+// Touch-up (tap or drag): land on the detent nearest the release point. This is
+// the path that makes a plain tap select a stop (issue #1006) — beginTracking
+// alone never commits, by design of the anti-jitter guards above.
+- (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    [super endTrackingWithTouch:touch withEvent:event];
+    self.apolloTracking = NO;
+    if (!touch) return;
+    [self apollo_selectDetentAtX:[touch locationInView:self].x source:@"released"];
+}
+
+// A cancelled touch commits nothing — the thumb stays on the last detent the
+// drag logic confirmed.
+- (void)cancelTrackingWithEvent:(UIEvent *)event {
+    [super cancelTrackingWithEvent:event];
+    self.apolloTracking = NO;
+}
+
 @end
 
 // MARK: - Table view (keeps the slider drag from scrolling the screen)
 
-// The settings table is isa-swizzled to this class in viewDidLoad. It overrides
-// two UIScrollView touch-arbitration hooks, scoped to the size slider only, so
-// the screen never scrolls out from under a slider drag — WITHOUT any per-drag
-// state to enable/restore (the earlier scrollEnabled / canCancelContentTouches
-// / pan-disabling approaches either collapsed the layout or left the table
-// stuck when UIControl end-tracking didn't fire).
-@interface ApolloIMSettingsTableView : UITableView
+// The settings table is isa-swizzled to this class in viewDidLoad. On top of
+// the shared pinned-preview layout pass (ApolloPinnedPreviewTableView) it
+// overrides two UIScrollView touch-arbitration hooks, scoped to the size slider
+// only, so the screen never scrolls out from under a slider drag — WITHOUT any
+// per-drag state to enable/restore (the earlier scrollEnabled /
+// canCancelContentTouches / pan-disabling approaches either collapsed the
+// layout or left the table stuck when UIControl end-tracking didn't fire).
+@interface ApolloIMSettingsTableView : ApolloPinnedPreviewTableView
 @end
 @implementation ApolloIMSettingsTableView
 static BOOL ApolloIMViewIsInSlider(UIView *view) {
@@ -543,33 +735,18 @@ static BOOL ApolloIMViewIsInSlider(UIView *view) {
     if (ApolloIMViewIsInSlider(view)) return NO;
     return [super touchesShouldCancelInContentView:view];
 }
+
 @end
 
 // MARK: - Controller
 
-typedef NS_ENUM(NSInteger, ApolloIMSection) {
-    ApolloIMSectionPreview = 0,
-    ApolloIMSectionMaster,
-    ApolloIMSectionOptions,
-    ApolloIMSectionCount,
-};
-
-typedef NS_ENUM(NSInteger, ApolloIMMasterRow) {
-    ApolloIMMasterRowPreviews = 0,   // inline media in posts + comments
-    ApolloIMMasterRowChat,           // inline media in Apollo's native message threads
-    ApolloIMMasterRowCount,
-};
-
-typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
-    ApolloIMOptionsRowAlignment = 0,
-    ApolloIMOptionsRowAutoplay,
-    ApolloIMOptionsRowMediaSize,
-    ApolloIMOptionsRowCount,
-};
-
 @interface InlineMediaSettingsViewController ()
-@property (nonatomic, strong) ApolloInlineMediaPreviewView *previewView;
+@property (nonatomic, strong) ApolloPinnedPreviewHost *previewHost;
 @property (nonatomic, strong) UILabel *mediaSizeValueLabel;
+// Card width the spacer row was last measured for (0 = only the table's own
+// section inset was available). Updated from the real cell frame by the pinned
+// layout pass, which then asks for a one-row re-measure.
+@property (nonatomic) CGFloat previewCardWidth;
 @end
 
 @implementation InlineMediaSettingsViewController
@@ -587,29 +764,117 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
     // applies while content touches are delayed; NO makes tracking begin at once
     // for a vertical drag too).
     self.tableView.delaysContentTouches = NO;
+
+    // The pinned preview card: a subview of the table (positioned by the
+    // subclass's layout pass), not a cell, so it never gets rebuilt by reloads.
+    ApolloPinnedPreviewHost *host = [[ApolloPinnedPreviewHost alloc] initWithFrame:CGRectZero];
+    host.contentView = [[ApolloInlineMediaPreviewView alloc] initWithFrame:CGRectZero];
+    host.spacerIndexPath = ^NSIndexPath * {
+        return [NSIndexPath indexPathForRow:0 inSection:ApolloIMSectionPreview];
+    };
+    __weak __typeof(self) weakSelf = self;
+    host.cardWidthDidChange = ^(CGFloat width) {
+        [weakSelf previewCardWidthDidChange:width];
+    };
+    host.pinned = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInlineMediaPreviewPinned];
+    host.pinDidChange = ^(BOOL pinned) {
+        [[NSUserDefaults standardUserDefaults] setBool:pinned forKey:UDKeyInlineMediaPreviewPinned];
+        // Slide the block into (or out of) its pinned spot instead of snapping:
+        // the table's layout pass computes the new frames inside the animation.
+        UITableView *table = weakSelf.tableView;
+        [table setNeedsLayout];
+        [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.9 initialSpringVelocity:0
+                            options:UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{ [table layoutIfNeeded]; }
+                         completion:nil];
+    };
+    self.previewHost = host;
+    ApolloPinnedPreviewAttachHost(self.tableView, host);
+    [self applyThemeToPreviewHost];
+    [self syncPreviewState];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.tableView reloadData];
+    [self syncPreviewState];
 }
 
 // MARK: Preview plumbing
 
-- (ApolloInlineMediaPreviewView *)ensurePreviewView {
-    if (!self.previewView) {
-        self.previewView = [[ApolloInlineMediaPreviewView alloc] initWithFrame:CGRectZero];
-    }
-    [self syncPreviewState];
-    return self.previewView;
+- (ApolloInlineMediaPreviewView *)previewView {
+    return (ApolloInlineMediaPreviewView *)self.previewHost.contentView;
 }
 
+// Push every setting this screen owns into the mock. Called from each control's
+// action (continuously while the slider drags) — the card is pinned, so the
+// change is visible without scrolling back up.
 - (void)syncPreviewState {
-    self.previewView.mediaFraction = sInlineMediaSizePercent / 100.0;
-    self.previewView.alignment = sInlineImageAlignment;
+    ApolloInlineMediaPreviewView *preview = self.previewView;
+    preview.commentMediaEnabled = sEnableInlineImages;
+    preview.messageMediaEnabled = sEnableChatMedia;
+    preview.mediaFraction = sInlineMediaSizePercent / 100.0;
+    preview.alignment = sInlineImageAlignment;
     NSString *mode = ApolloAutoplayGIFModeString();
-    self.previewView.showsPlayOverlay = [mode isEqualToString:@"tap-to-play"];
+    preview.showsPlayOverlay = [mode isEqualToString:@"tap-to-play"];
+    [preview refresh];
+}
+
+// Card chrome follows the same theme walk as the real cells (cell colour,
+// section corner radius, table background for the stuck backdrop, accent for
+// the plain-link stand-ins).
+- (void)applyThemeToPreviewHost {
+    ApolloPinnedPreviewHost *host = self.previewHost;
+    if (!host) return;
+    host.card.backgroundColor = [self apollo_themeCellBackgroundColor];
+    host.card.layer.cornerRadius = ApolloPinnedPreviewSectionCornerRadius(self.tableView);
+    UIColor *tableBackground = self.tableView.backgroundColor;
+    UIColor *resolved = [tableBackground resolvedColorWithTraitCollection:self.tableView.traitCollection];
+    if (!resolved || CGColorGetAlpha(resolved.CGColor) < 0.99) {
+        tableBackground = [UIColor systemGroupedBackgroundColor];
+    }
+    host.backdropColor = tableBackground;
+    host.accentColor = [self apollo_themeAccentColor];
+    self.previewView.accentColor = host.accentColor;
     [self.previewView refresh];
+}
+
+- (void)apollo_applyTheme {
+    [super apollo_applyTheme];
+    [self applyThemeToPreviewHost];
+}
+
+// The spacer row must stay invisible whatever the theme pass does to cells.
+- (void)apollo_applyThemeToCell:(UITableViewCell *)cell {
+    if ([cell isKindOfClass:[ApolloPinnedPreviewSpacerCell class]]) {
+        ApolloPinnedPreviewClearSpacerCell(cell);
+        return;
+    }
+    [super apollo_applyThemeToCell:cell];
+}
+
+// Width the spacer row's height is derived from: the measured cell width once
+// the layout pass has seen a real cell, else the table's reported section inset.
+- (CGFloat)previewCardWidthForTable:(UITableView *)tableView {
+    if (self.previewCardWidth > 0) return self.previewCardWidth;
+    UIEdgeInsets inset = ApolloPinnedPreviewSectionContentInset(tableView);
+    return CGRectGetWidth(tableView.bounds) - inset.left - inset.right;
+}
+
+- (void)previewCardWidthDidChange:(CGFloat)width {
+    if (width <= 0 || fabs(width - self.previewCardWidth) <= 0.5) return;
+    CGFloat oldHeight = [ApolloInlineMediaPreviewView heightForCardWidth:[self previewCardWidthForTable:self.tableView]];
+    self.previewCardWidth = width;
+    CGFloat newHeight = [ApolloInlineMediaPreviewView heightForCardWidth:width];
+    ApolloLog(@"[IMPreview] card width %.1f → spacer row %.1f → %.1f", width, oldHeight, newHeight);
+    if (fabs(newHeight - oldHeight) <= 0.5) return;
+    if (self.tableView.numberOfSections <= ApolloIMSectionPreview) return;
+    // Re-measure just the spacer row; the host follows the new rect on the next
+    // layout pass. No animation so the pinned card doesn't visibly resize.
+    [UIView performWithoutAnimation:^{
+        [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0 inSection:ApolloIMSectionPreview]]
+                              withRowAnimation:UITableViewRowAnimationNone];
+    }];
 }
 
 // MARK: Cell helpers (repo-wide patterns — see PictureInPictureViewController)
@@ -801,13 +1066,11 @@ static NSString *ApolloIMMessageMediaFooter(void) {
     BOOL inlineOn = sEnableInlineImages;
     switch (indexPath.section) {
         case ApolloIMSectionPreview: {
-            UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            ApolloInlineMediaPreviewView *preview = [self ensurePreviewView];
-            [preview removeFromSuperview];
-            preview.frame = cell.contentView.bounds;
-            preview.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-            [cell.contentView addSubview:preview];
+            // Transparent placeholder — the pinned host draws the card on top of
+            // (or, once scrolled, instead of) this slot.
+            ApolloPinnedPreviewSpacerCell *cell = [[ApolloPinnedPreviewSpacerCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+            ApolloPinnedPreviewClearSpacerCell(cell);
+            cell.isAccessibilityElement = NO;
             return cell;
         }
         case ApolloIMSectionMaster:
@@ -847,7 +1110,9 @@ static NSString *ApolloIMMessageMediaFooter(void) {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == ApolloIMSectionPreview) return [ApolloInlineMediaPreviewView preferredHeight];
+    if (indexPath.section == ApolloIMSectionPreview) {
+        return [ApolloInlineMediaPreviewView heightForCardWidth:[self previewCardWidthForTable:tableView]];
+    }
     if (indexPath.section == ApolloIMSectionOptions && indexPath.row == ApolloIMOptionsRowMediaSize) {
         return 88.0;
     }
@@ -878,6 +1143,7 @@ static NSString *ApolloIMMessageMediaFooter(void) {
     [[NSUserDefaults standardUserDefaults] setBool:sEnableInlineImages forKey:UDKeyEnableInlineImages];
     [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:ApolloIMSectionOptions]
                   withRowAnimation:UITableViewRowAnimationNone];
+    [self syncPreviewState];   // comment mock flips between GIF block and plain link
 }
 
 // Master toggle for message-thread media (inline images/GIFs/emoji/snoomoji +
@@ -888,11 +1154,17 @@ static NSString *ApolloIMMessageMediaFooter(void) {
 - (void)chatMediaSwitchToggled:(UISwitch *)sw {
     sEnableChatMedia = sw.on;
     [[NSUserDefaults standardUserDefaults] setBool:sEnableChatMedia forKey:UDKeyEnableChatMedia];
+    [self syncPreviewState];   // message bubble flips between inline image and plain link
 }
 
 - (void)mediaSizeSliderChanged:(UISlider *)slider {
-    NSInteger percent = ApolloIMSnapPercent(slider.value);
-    if ((NSInteger)lroundf(slider.value) != percent) [slider setValue:(float)percent animated:NO];
+    // The detent slider only ever sends an action for a committed detent (drag
+    // crossing or tap), so read that rather than re-deriving it from `value`,
+    // which may still be animating toward it.
+    NSInteger percent = [slider isKindOfClass:[ApolloIMDetentSlider class]]
+        ? ((ApolloIMDetentSlider *)slider).lastSnappedPercent
+        : ApolloIMSnapPercent(slider.value);
+    if (percent != 50 && percent != 75 && percent != 100) percent = ApolloIMSnapPercent(slider.value);
     self.mediaSizeValueLabel.text = [NSString stringWithFormat:@"%ld%%", (long)percent];
     if (percent != sInlineMediaSizePercent) {
         sInlineMediaSizePercent = percent;

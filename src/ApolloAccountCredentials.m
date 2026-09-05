@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <os/lock.h>
+#import <malloc/malloc.h>
 #include <string.h>
 
 @implementation ApolloAccountCredentialEntry
@@ -183,23 +184,48 @@ static BOOL ApolloPublishActiveUsernameCache(NSString *username, uint64_t genera
 // Keep every assumption guarded. If a future Apollo/Swift runtime changes the
 // layout, this returns nil and callers fail closed instead of messaging an
 // invalid pointer.
-id ApolloActiveAccountClient(void) {
+static BOOL ApolloAccountIvarRangeFitsClass(Class cls, Ivar ivar, size_t length) {
+    if (!cls || !ivar) return NO;
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    size_t instanceSize = class_getInstanceSize(cls);
+    return offset >= 0 && (size_t)offset <= instanceSize &&
+        length <= instanceSize - (size_t)offset;
+}
+
+static BOOL ApolloAccountLooksLikeHeapPointer(uintptr_t address) {
+    // Apollo is 64-bit-only. Reject nil/small/tagged/non-canonical values before
+    // passing a private Swift word to malloc or Objective-C runtime helpers.
+    return address >= 0x100000000ULL &&
+        (address & (sizeof(uintptr_t) - 1)) == 0 &&
+        (address & 0xF000000000000000ULL) == 0;
+}
+
+static ApolloPersistedAccountIdentityStatus ApolloResolveLiveAccountClient(id *outClient) {
+    if (outClient) *outClient = nil;
     // Main-thread only. The walk below reads AccountManager's live Swift array
     // buffer without a retain; a concurrent reassignment of `accounts` on
     // another thread would free the storage between our reads (use-after-free).
     // Every caller today is a main-thread UI action (the follow-button tap); this
     // fails closed rather than trusting a future off-main caller not to exist.
-    if (![NSThread isMainThread]) return nil;
+    if (![NSThread isMainThread]) return ApolloPersistedAccountIdentityUnknown;
 
     Class managerClass = objc_getClass("_TtC6Apollo14AccountManager");
     SEL sharedSelector = NSSelectorFromString(@"shared");
-    if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) return nil;
+    if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
 
     id manager = ((id (*)(id, SEL))objc_msgSend)(managerClass, sharedSelector);
-    if (!manager) return nil;
+    if (!manager || object_getClass(manager) != managerClass) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
     Ivar accountsIvar = class_getInstanceVariable(managerClass, "accounts");
     Ivar currentIndexIvar = class_getInstanceVariable(managerClass, "currentAccountIndex");
-    if (!accountsIvar || !currentIndexIvar) return nil;
+    if (!ApolloAccountIvarRangeFitsClass(managerClass, accountsIvar, sizeof(uintptr_t)) ||
+        !ApolloAccountIvarRangeFitsClass(managerClass, currentIndexIvar,
+                                         sizeof(NSInteger) + sizeof(uint8_t))) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
 
     // Hopper: Optional<Int> is stored as the Int word followed by an
     // extra-inhabitant byte; bit 0 set at +8 means nil. This is the same check
@@ -210,7 +236,8 @@ id ApolloActiveAccountClient(void) {
     ptrdiff_t currentIndexOffset = ivar_getOffset(currentIndexIvar);
     memcpy(&index, managerBytes + currentIndexOffset, sizeof(index));
     memcpy(&indexIsNil, managerBytes + currentIndexOffset + sizeof(NSInteger), sizeof(indexIsNil));
-    if ((indexIsNil & 0x1) != 0 || index < 0) return nil;
+    if ((indexIsNil & 0x1) != 0) return ApolloPersistedAccountIdentitySignedOut;
+    if (index < 0) return ApolloPersistedAccountIdentityUnknown;
 
     uintptr_t storageWord = 0;
     memcpy(&storageWord, managerBytes + ivar_getOffset(accountsIvar), sizeof(storageWord));
@@ -220,27 +247,71 @@ id ApolloActiveAccountClient(void) {
     // tagged-pointer top bit). object_getClass on such a word dereferences a
     // non-canonical pointer → crash. If `accounts` is ever backed by a bridged
     // NSArray, bail instead of masking-and-dereferencing.
-    if (storageWord & 0xF000000000000000ULL) return nil;
-    void *storage = (void *)(storageWord & ~(uintptr_t)0x7);
-    if (!storage) return nil;
+    uintptr_t storageAddress = storageWord & ~(uintptr_t)0x7;
+    if (!ApolloAccountLooksLikeHeapPointer(storageAddress)) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
+    void *storage = (void *)storageAddress;
+    size_t storageSize = malloc_size(storage);
+    const size_t storageHeaderSize = 4 * sizeof(uintptr_t);
+    if (storageSize < storageHeaderSize) return ApolloPersistedAccountIdentityUnknown;
     Class storageClass = object_getClass((__bridge id)storage);
     const char *storageClassName = storageClass ? class_getName(storageClass) : NULL;
-    if (!storageClassName || strstr(storageClassName, "ContiguousArrayStorage") == NULL) return nil;
+    if (!storageClassName || strstr(storageClassName, "ContiguousArrayStorage") == NULL) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
 
     uintptr_t count = 0;
     memcpy(&count, (uint8_t *)storage + (2 * sizeof(uintptr_t)), sizeof(count));
-    if (count == 0 || count > 64) return nil;
+    if (count == 0 || count > 64) return ApolloPersistedAccountIdentityUnknown;
+    if (count > (storageSize - storageHeaderSize) / sizeof(uintptr_t)) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
 
-    if ((uintptr_t)index >= count) return nil;
+    if ((uintptr_t)index >= count) return ApolloPersistedAccountIdentityUnknown;
 
-    void *rawClient = NULL;
+    uintptr_t rawClientAddress = 0;
     size_t elementOffset = (4 + (NSUInteger)index) * sizeof(uintptr_t);
-    memcpy(&rawClient, (uint8_t *)storage + elementOffset, sizeof(rawClient));
-    if (!rawClient) return nil;
-    id client = (__bridge id)rawClient;
+    memcpy(&rawClientAddress, (uint8_t *)storage + elementOffset, sizeof(rawClientAddress));
+    if (!ApolloAccountLooksLikeHeapPointer(rawClientAddress)) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
     Class clientClass = objc_getClass("RDKClient");
-    if (!clientClass || ![client isMemberOfClass:clientClass]) return nil;
-    return client;
+    if (!clientClass) return ApolloPersistedAccountIdentityUnknown;
+    void *rawClient = (void *)rawClientAddress;
+    if (malloc_size(rawClient) < class_getInstanceSize(clientClass) ||
+        object_getClass((__bridge id)rawClient) != clientClass) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
+    id client = (__bridge id)rawClient;
+    if (outClient) *outClient = client;
+    return ApolloPersistedAccountIdentitySignedIn;
+}
+
+id ApolloActiveAccountClient(void) {
+    id client = nil;
+    return ApolloResolveLiveAccountClient(&client) == ApolloPersistedAccountIdentitySignedIn
+        ? client : nil;
+}
+
+ApolloPersistedAccountIdentityStatus ApolloResolveLiveActiveAccountIdentity(
+    NSString **outNormalizedUsername) {
+    if (outNormalizedUsername) *outNormalizedUsername = nil;
+    id client = nil;
+    ApolloPersistedAccountIdentityStatus status = ApolloResolveLiveAccountClient(&client);
+    if (status != ApolloPersistedAccountIdentitySignedIn) return status;
+
+    NSString *username = nil;
+    @try {
+        id user = [client valueForKey:@"currentUser"];
+        id value = user ? [user valueForKey:@"username"] : nil;
+        if ([value isKindOfClass:[NSString class]]) username = ApolloNormalizeUsername(value);
+    } @catch (__unused NSException *e) {
+        username = nil;
+    }
+    if (username.length == 0) return ApolloPersistedAccountIdentityUnknown;
+    if (outNormalizedUsername) *outNormalizedUsername = username;
+    return ApolloPersistedAccountIdentitySignedIn;
 }
 
 static id ApolloAccountCredsUnarchive(NSData *data) {
@@ -254,6 +325,49 @@ static id ApolloAccountCredsUnarchive(NSData *data) {
     @catch (__unused NSException *ex) { obj = nil; }
     [u finishDecoding];
     return obj;
+}
+
+ApolloPersistedAccountIdentityStatus ApolloResolvePersistedActiveAccountIdentity(
+    NSString **outNormalizedUsername) {
+    if (outNormalizedUsername) *outNormalizedUsername = nil;
+
+    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloAccountCredsGroupSuite];
+    id archive = [group objectForKey:@"RedditAccounts2"];
+    // The keychain is AccountManager's authoritative launch source. A missing
+    // defaults mirror can therefore mean "not loaded yet", not signed out.
+    // Only a successfully decoded empty array confirms the anonymous state.
+    if (!archive) return ApolloPersistedAccountIdentityUnknown;
+
+    id decoded = ApolloAccountCredsUnarchive(archive);
+    if (![decoded isKindOfClass:[NSArray class]]) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
+
+    NSArray *accounts = (NSArray *)decoded;
+    if (accounts.count == 0) return ApolloPersistedAccountIdentitySignedOut;
+
+    // AccountManager treats an absent persisted selection as the first account
+    // while loading. Once present, the value must still address this exact array.
+    id indexValue = [group objectForKey:@"CurrentRedditAccountIndex"];
+    if (indexValue && ![indexValue respondsToSelector:@selector(integerValue)]) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
+    NSInteger index = indexValue ? [indexValue integerValue] : 0;
+    if (index < 0 || (NSUInteger)index >= accounts.count) {
+        return ApolloPersistedAccountIdentityUnknown;
+    }
+
+    NSString *username = nil;
+    @try {
+        id user = [accounts[(NSUInteger)index] valueForKey:@"currentUser"];
+        id value = user ? [user valueForKey:@"username"] : nil;
+        if ([value isKindOfClass:[NSString class]]) username = ApolloNormalizeUsername(value);
+    } @catch (__unused NSException *e) {
+        username = nil;
+    }
+    if (username.length == 0) return ApolloPersistedAccountIdentityUnknown;
+    if (outNormalizedUsername) *outNormalizedUsername = username;
+    return ApolloPersistedAccountIdentitySignedIn;
 }
 
 static BOOL ApolloLogIfUsernameResultChanged(NSString *newResult) {
@@ -397,7 +511,32 @@ void ApolloPersistedAccountStats(NSInteger *outCount, NSInteger *outWithUser) {
 }
 
 // All lowercased usernames currently in the persisted RedditAccounts2 blob.
-static NSSet<NSString *> *ApolloAllPersistedAccountUsernames(void) {
+BOOL ApolloResolvePersistedAccountUsernames(NSSet<NSString *> **outUsernames) {
+    if (outUsernames) *outUsernames = nil;
+    NSMutableSet<NSString *> *names = [NSMutableSet set];
+    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloAccountCredsGroupSuite];
+    id archive = [group objectForKey:@"RedditAccounts2"];
+    if (!archive) return NO;
+    id accounts = ApolloAccountCredsUnarchive(archive);
+    if (![accounts isKindOfClass:[NSArray class]]) return NO;
+    for (id client in (NSArray *)accounts) {
+        NSString *username = nil;
+        @try { username = [[client valueForKey:@"currentUser"] valueForKey:@"username"]; }
+        @catch (__unused NSException *e) { return NO; }
+        if (![username isKindOfClass:[NSString class]]) return NO;
+        NSString *normalized = ApolloNormalizeUsername(username);
+        if (normalized.length == 0) return NO;
+        [names addObject:normalized];
+    }
+    if (outUsernames) *outUsernames = [names copy];
+    return YES;
+}
+
+NSSet<NSString *> *ApolloPersistedAccountUsernames(void) {
+    // OAuth sign-in tracking is intentionally best-effort: poison repair can
+    // leave one client without currentUser while every healthy identity still
+    // needs to count as pre-existing. Favorites migration uses the strict,
+    // status-bearing helper above instead.
     NSMutableSet<NSString *> *names = [NSMutableSet set];
     NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloAccountCredsGroupSuite];
     id accounts = ApolloAccountCredsUnarchive([group objectForKey:@"RedditAccounts2"]);
@@ -406,9 +545,9 @@ static NSSet<NSString *> *ApolloAllPersistedAccountUsernames(void) {
         NSString *username = nil;
         @try { username = [[client valueForKey:@"currentUser"] valueForKey:@"username"]; }
         @catch (__unused NSException *e) { continue; }
-        if ([username isKindOfClass:[NSString class]] && username.length > 0) {
-            [names addObject:ApolloNormalizeUsername(username)];
-        }
+        if (![username isKindOfClass:[NSString class]]) continue;
+        NSString *normalized = ApolloNormalizeUsername(username);
+        if (normalized.length > 0) [names addObject:normalized];
     }
     return names;
 }
@@ -416,7 +555,7 @@ static NSSet<NSString *> *ApolloAllPersistedAccountUsernames(void) {
 void ApolloNoteInteractiveOAuthSignIn(void) {
     // Snapshot BEFORE arming: the decode below fires the hooked setters
     // itself, and they must observe the flag as still disarmed.
-    NSMutableSet<NSString *> *preexisting = [ApolloAllPersistedAccountUsernames() mutableCopy];
+    NSMutableSet<NSString *> *preexisting = [ApolloPersistedAccountUsernames() mutableCopy];
     [preexisting unionSet:ApolloWebSessionUsernames()];
     NSSet<NSString *> *preexistingSnapshot = [preexisting copy];
     NS_VALID_UNTIL_END_OF_SCOPE NSSet<NSString *> *retiredPreexisting = nil;
