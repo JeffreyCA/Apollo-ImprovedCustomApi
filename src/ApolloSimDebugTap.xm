@@ -547,6 +547,10 @@ static void ApolloSimDebugNavChurn(NSString *mode) {
     });
 }
 
+// Grouped on purpose: an ungrouped %hook makes Logos append its registration
+// after the closing #endif, where the device build (no APOLLO_SIM_BUILD) has
+// none of these declarations. %init(ApolloSimNavChurn) lives in the %ctor below.
+%group ApolloSimNavChurn
 %hook UIViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
@@ -560,6 +564,7 @@ static void ApolloSimDebugNavChurn(NSString *mode) {
               "(non-nil means the push started synchronously, inside the pop's completeTransition:)",
               NSStringFromClass(popped.class), nav.transitionCoordinator);
 }
+%end
 %end
 
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
@@ -721,6 +726,7 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
 }
 
 %ctor {
+    %init(ApolloSimNavChurn);
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
         ApolloSimDebugTapNotification, CFSTR("apollofix.debugtap"), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
