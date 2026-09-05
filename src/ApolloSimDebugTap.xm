@@ -26,6 +26,8 @@
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "UIWindow+Apollo.h"
+
+void ApolloSubredditIndexDebugDescribeTables(void); // ApolloSubredditIndexPolish.xm (sim-only)
 #import <objc/message.h>
 #import <mach/mach.h>
 
@@ -655,6 +657,13 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         // cold launch.
         if ([contents hasPrefix:@"listdiag"]) {
             ApolloSubredditListDiagRearm();
+            return;
+        }
+        // "indexdiag" command: log every known subreddit table's section-index
+        // state (native index color, captured native state, overlay) — see
+        // ApolloSubredditIndexDebugDescribeTables in ApolloSubredditIndexPolish.
+        if ([contents hasPrefix:@"indexdiag"]) {
+            ApolloSubredditIndexDebugDescribeTables();
             return;
         }
         // "headerstyle N" command: switch the Header Style setting through the
