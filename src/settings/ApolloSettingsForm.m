@@ -168,6 +168,9 @@ static const void *kApolloSFSwitchRowKey = &kApolloSFSwitchRowKey;
     // -rebuildForm and -visibilityDidChange, never during enumeration — the
     // table's counts and our answers must agree for the whole layout pass.
     NSArray<NSArray<ApolloSettingsRow *> *> *_visibleRows;
+    // A footer-height re-check is already queued for the next runloop turn
+    // (see -tableView:willDisplayFooterView:forSection:).
+    BOOL _footerHeightCheckPending;
 }
 
 - (NSArray<ApolloSettingsSection *> *)buildForm {
@@ -464,6 +467,68 @@ static void ApolloSFAddPath(NSMutableDictionary<NSNumber *, NSMutableArray<NSInd
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     ApolloSettingsRow *row = [self apollo_sf_rowAtIndexPath:indexPath];
     return row.height ? row.height() : tableView.rowHeight;
+}
+
+#pragma mark section footer heights
+
+// UITableView never re-measures a plain-string section footer once it has a
+// height for it. Footers on screen at first layout are measured from their
+// real view; footers that start off-screen get UIKit's classic title-height
+// estimate, and that estimate stays even after the footer's view exists. For
+// most strings the two agree closely enough, but the estimate under-measures
+// long multi-paragraph text — seen with the Apollo AI Summaries footer on iOS
+// 26: estimated 254pt where the footer view's own sizeThatFits: says 258.7 —
+// and UITableViewHeaderFooterView anchors its label to the BOTTOM of the view,
+// so a footer that was sized short pushes its first line up against the
+// section box above it instead of leaving the usual gap.
+//
+// An empty beginUpdates/endUpdates pass makes the table re-measure the footers
+// that are on screen from their real views and leaves header heights alone
+// (checked: 45.3pt before and after). So: after a footer comes on screen, look
+// at the visible footers on the next runloop turn — by then the label has its
+// final font — and run that pass, without animation, when one disagrees with
+// its view. Footers that were sized right come back at exactly their current
+// height, so nothing else moves. Deliberately NOT done through
+// heightForFooterInSection:: merely implementing that delegate method switches
+// the whole table from estimated to exact section sizing, which also changes
+// every header height (55/38pt instead of 45.3) on every form screen.
+- (CGFloat)apollo_sf_fittedHeightForFooterView:(UIView *)view inTableView:(UITableView *)tableView {
+    if (![view isKindOfClass:[UITableViewHeaderFooterView class]]) return 0.0;
+    if (((UITableViewHeaderFooterView *)view).textLabel.text.length == 0) return 0.0;
+    CGFloat width = CGRectGetWidth(tableView.bounds);
+    if (width <= 0.0) return 0.0;
+    return [view sizeThatFits:CGSizeMake(width, 0.0)].height;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
+    if (![view isKindOfClass:[UITableViewHeaderFooterView class]]) return;
+    if (_footerHeightCheckPending) return;
+    _footerHeightCheckPending = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf->_footerHeightCheckPending = NO;
+        [strongSelf apollo_sf_remeasureMismatchedFooters];
+    });
+}
+
+- (void)apollo_sf_remeasureMismatchedFooters {
+    UITableView *tableView = self.tableView;
+    if (!tableView.window) return;
+    NSInteger sections = tableView.numberOfSections;
+    for (NSInteger section = 0; section < sections; section++) {
+        UITableViewHeaderFooterView *footer = [tableView footerViewForSection:section];
+        CGFloat fitted = [self apollo_sf_fittedHeightForFooterView:footer inTableView:tableView];
+        if (fitted <= 0.0 || fabs(fitted - CGRectGetHeight(footer.bounds)) < 0.5) continue;
+        ApolloLog(@"[SettingsForm] footer %ld is %.1fpt tall but its view fits %.1fpt — re-measuring visible footers",
+                  (long)section, CGRectGetHeight(footer.bounds), fitted);
+        [UIView performWithoutAnimation:^{
+            [tableView beginUpdates];
+            [tableView endUpdates];
+        }];
+        return;
+    }
 }
 
 @end
