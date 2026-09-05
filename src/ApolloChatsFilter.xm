@@ -2602,11 +2602,46 @@ static BOOL ApolloInboxMessageMayBeChatMirror(id message) {
     return ApolloInboxStringProp(message, @selector(subject)).length > 0;
 }
 
+// Swap a Swift class-typed stored property — a plain strong reference the
+// ObjC runtime has no layout information for — the way the compiled setter
+// does: retain the new value, store it, release the old one.
+static BOOL ApolloInboxSwapObjectIvar(id object, const char *name, id value) {
+    if (!object || !name) return NO;
+    Ivar ivar = NULL;
+    for (Class cls = [object class]; cls && cls != [NSObject class] && !ivar; cls = class_getSuperclass(cls)) {
+        ivar = class_getInstanceVariable(cls, name);
+    }
+    ptrdiff_t offset = ivar ? ivar_getOffset(ivar) : 0;
+    if (offset <= 0) return NO;
+    void **slot = (void **)((uint8_t *)(__bridge void *)object + offset);
+    void *previous = *slot;
+    *slot = (__bridge_retained void *)value;
+    if (previous) CFRelease(previous);
+    return YES;
+}
+
+// The row's section controller, reachable as the cell node's action delegate
+// (a Swift existential whose first word is the object it wraps; a class check
+// guards the read).
+static id ApolloInboxSectionControllerForCellNode(id node) {
+    Class sectionClass = objc_getClass("_TtC6Apollo22InboxSectionController");
+    Ivar ivar = node ? class_getInstanceVariable([node class], "actionDelegate") : NULL;
+    ptrdiff_t offset = ivar ? ivar_getOffset(ivar) : 0;
+    if (!sectionClass || offset <= 0) return nil;
+    void *candidate = *(void **)((uint8_t *)(__bridge void *)node + offset);
+    if (!candidate) return nil;
+    id object = (__bridge id)candidate;
+    return [object isKindOfClass:sectionClass] ? object : nil;
+}
+
 // Opening the legacy thread marked the message read; do the same here, the
 // way Apollo's own swipe action does it: a read copy of the model, the API
-// call, and the ModelObjectUpdated broadcast every inbox list observes to swap
-// the row's model and re-render it.
-static void ApolloInboxMarkMessageRead(id message) {
+// call, the copy swapped into the row's section controller (so the row
+// rebuilds from it) and the ModelObjectUpdated broadcast every inbox list
+// observes to swap its own model. The broadcast alone updates the counts but
+// leaves the tapped row's cell painted unread — its cell is rebuilt through
+// Apollo's own cell builder by reloading the row.
+static void ApolloInboxMarkMessageRead(id message, id cellNode, id tableNode, NSIndexPath *indexPath) {
     if (![message respondsToSelector:@selector(isUnread)] ||
         !((BOOL (*)(id, SEL))objc_msgSend)(message, @selector(isUnread))) return;
     if (![message conformsToProtocol:@protocol(NSCopying)]) return;
@@ -2619,9 +2654,17 @@ static void ApolloInboxMarkMessageRead(id message) {
     if ([client respondsToSelector:@selector(markMessageAsRead:completion:)]) {
         ((id (*)(id, SEL, id, id))objc_msgSend)(client, @selector(markMessageAsRead:completion:), updated, nil);
     }
+    id sectionController = ApolloInboxSectionControllerForCellNode(cellNode);
+    BOOL swapped = ApolloInboxSwapObjectIvar(sectionController, "message", updated);
+    if (swapped) ApolloInboxSwapObjectIvar(cellNode, "message", updated);
     [[NSNotificationCenter defaultCenter] postNotificationName:@"com.christianselig.ModelObjectUpdated"
                                                         object:message
                                                       userInfo:@{ @"newModel": updated }];
+    if (swapped && indexPath && [tableNode respondsToSelector:@selector(reloadRowsAtIndexPaths:withRowAnimation:)]) {
+        ((void (*)(id, SEL, id, NSInteger))objc_msgSend)(tableNode, @selector(reloadRowsAtIndexPaths:withRowAnimation:),
+                                                        @[indexPath], (NSInteger)UITableViewRowAnimationNone);
+    }
+    ChatsFilterLog(@"marked the tapped chat mirror read (row %@)", swapped ? @"rebuilt" : @"left to the list's next reload");
 }
 
 static void ApolloInboxOpenChatPath(UIViewController *host, NSString *chatPath) {
@@ -2678,6 +2721,7 @@ static BOOL ApolloInboxOpenChatMirrorIfNeeded(id listAdapter, id tableNode, NSIn
 
     __weak id weakAdapter = listAdapter;
     __weak id weakTable = tableNode;
+    __weak id weakNode = node;
     __weak UIViewController *weakHost = host;
     ApolloChatRoomDirectoryResolve(subject, partner, timestamp, ^(NSString *chatPath) {
         id table = weakTable;
@@ -2697,7 +2741,7 @@ static BOOL ApolloInboxOpenChatMirrorIfNeeded(id listAdapter, id tableNode, NSIn
             sInboxChatMirrorBypass = NO;
             return;
         }
-        ApolloInboxMarkMessageRead(message);
+        ApolloInboxMarkMessageRead(message, weakNode, table, indexPath);
         ApolloInboxOpenChatPath(strongHost, chatPath);
     });
     return YES;
