@@ -41,6 +41,10 @@ static const CGFloat kApolloPinnedPreviewPinSide = 22.0;        // glyph box
 @property (nonatomic, strong, readwrite) UIView *card;
 @property (nonatomic, strong) UILabel *titleLabel;      // pinned copy of the section header
 @property (nonatomic, readwrite) BOOL stuck;
+// Keeps the block locked while the list scrolls back under a just-unpinned
+// card, so the card itself never moves. Set by -apollo_releaseWhileStuck and
+// cleared by the layout pass once the list is home (or the user takes over).
+@property (nonatomic) BOOL holdStuck;
 @property (nonatomic, strong) UIButton *pinButton;
 @property (nonatomic, strong) UIImageView *pinIcon;
 @property (nonatomic, strong) UILabel *pinCaption;
@@ -128,7 +132,23 @@ static const CGFloat kApolloPinnedPreviewPinSide = 22.0;        // glyph box
 }
 
 - (void)apollo_pinTapped {
+    // A drag that starts on the card scrolls the list (the table cancels the
+    // pin button's touch — see ApolloPinnedPreviewTableView), so a touch-up
+    // that still reaches us mid-drag or while the list is coasting is not a
+    // deliberate tap. Ignore it.
+    UIScrollView *scrollView = nil;
+    for (UIView *v = self.superview; v; v = v.superview) {
+        if ([v isKindOfClass:[UIScrollView class]]) { scrollView = (UIScrollView *)v; break; }
+    }
+    if (scrollView.isDragging || scrollView.isDecelerating) return;
+
+    BOOL wasStuck = self.stuck;
     self.pinned = !self.pinned;
+    ApolloLog(@"[PinnedPreview] pin toggled → %@", self.pinned ? @"pinned" : @"unpinned");
+    // Unpinning a locked block: the thing under the finger must not fly off the
+    // top of the screen. Keep the card exactly where it is and bring the list
+    // down to it instead.
+    if (!self.pinned && wasStuck) [self apollo_releaseWhileStuck:scrollView];
     [self.pinFeedback selectionChanged];
 
     // Bounce the glyph so the tap reads as a state change.
@@ -152,6 +172,29 @@ static const CGFloat kApolloPinnedPreviewPinSide = 22.0;        // glyph box
     });
 
     if (self.pinDidChange) self.pinDidChange(self.pinned);
+}
+
+// Unpinned while locked: scroll the list back to the top, which is exactly
+// where the spacer row sits under the (never-moved) card. The block keeps
+// locking (holdStuck) for the duration of that scroll, so the card stays put
+// while the rows slide down beneath it; once the list is home the layout pass
+// finds the card at its flow position and the native header takes over from
+// the copy without a visible change.
+- (void)apollo_releaseWhileStuck:(UIScrollView *)scrollView {
+    if (!scrollView) return;
+    self.holdStuck = YES;
+    CGFloat target = -scrollView.adjustedContentInset.top;
+    [scrollView setContentOffset:CGPointMake(scrollView.contentOffset.x, target) animated:YES];
+    // Belt and braces: the layout pass ends the hold as soon as the list lands.
+    // If that scroll never happens (an offset change UIKit swallows), don't
+    // leave the block held forever.
+    __weak __typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __strong __typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf.holdStuck) return;
+        strongSelf.holdStuck = NO;
+        [strongSelf.superview setNeedsLayout];
+    });
 }
 
 // The header's text label, wherever this iOS version nests it.
@@ -300,6 +343,18 @@ void ApolloPinnedPreviewAttachHost(UITableView *table, ApolloPinnedPreviewHost *
     [self apollo_layoutPinnedPreview];
 }
 
+// The whole preview card is covered by its pin button (a UIControl), and
+// UIScrollView's default refuses to cancel a touch that landed on a control —
+// which would make a drag starting anywhere on the card (a third of the screen)
+// not scroll at all. Say YES for anything inside the host: a real drag scrolls
+// the list, a tap still reaches the button.
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view {
+    for (UIView *v = view; v; v = v.superview) {
+        if ([v isKindOfClass:[ApolloPinnedPreviewHost class]]) return YES;
+    }
+    return [super touchesShouldCancelInContentView:view];
+}
+
 - (void)apollo_layoutPinnedPreview {
     ApolloPinnedPreviewHost *host = objc_getAssociatedObject(self, &kApolloPinnedPreviewHostKey);
     if (!host || host.superview != self) return;
@@ -360,7 +415,11 @@ void ApolloPinnedPreviewAttachHost(UITableView *table, ApolloPinnedPreviewHost *
     // Lock only when there's real list room left under the block at rest.
     CGFloat listRoom = viewport - (CGRectGetMaxY(row) + kApolloPinnedPreviewStuckBottomPad);
     BOOL compactHeight = self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact;
-    BOOL canLock = host.pinned && !compactHeight && listRoom >= kApolloPinnedPreviewMinListViewport;
+    // A release scroll (see -apollo_releaseWhileStuck:) holds the lock while the
+    // list comes back under the unpinned card. Drop the hold the moment the list
+    // is home — or the moment the user takes over with a drag of their own.
+    if (host.holdStuck && (fabs(scrolled) <= 0.5 || self.isDragging)) host.holdStuck = NO;
+    BOOL canLock = (host.pinned || host.holdStuck) && !compactHeight && listRoom >= kApolloPinnedPreviewMinListViewport;
 
     // Pinned: the block stays exactly where it rests on screen. Its content
     // y follows the offset one-for-one, so scrolling down slides the rows
