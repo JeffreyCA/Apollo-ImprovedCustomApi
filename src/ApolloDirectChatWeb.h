@@ -61,6 +61,13 @@ void ApolloModernChatControllerShowInboxSection(UIViewController *controller,
 // ownership to the web controller while Chat is visible, and restore it when
 // Notifications returns.
 void ApolloModernChatControllerSetInboxVisible(UIViewController *controller, BOOL visible);
+// Open a conversation inside an existing Chat controller (the Inbox hub's, or
+// a standalone one): a validated Reddit Chat conversation path such as
+// /chat/room/<opaque-room-id> loads as a real navigation under the same
+// covered transition a tapped room gets, in the Messages section. A controller
+// that has not loaded its first document yet takes it as its initial
+// destination instead. Anything else is ignored.
+void ApolloModernChatControllerOpenConversationPath(UIViewController *controller, NSString *path);
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller);
 // YES while `controller` (a modern Chat controller) is inside a conversation
 // (/chat/room/… or a /chat/threads/<id> reply thread) rather than one of the

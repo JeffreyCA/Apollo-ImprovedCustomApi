@@ -37,6 +37,23 @@ __BEGIN_DECLS
 // Inbox becomes visible.
 void ApolloChatUnreadPollerKick(void);
 
+// A Matrix bearer for the active account: the cached poller token, the stored
+// cookie's still-fresh token_v2, a fresh one from a live mailbox web view (see
+// the provider below), or a mint — nil when none is obtainable right now (no
+// web session, modern Chat unsupported, a dead session in its backoff).
+// Main queue in and out. Shared with the chat room directory.
+void ApolloChatPollObtainBearerForActiveAccount(void (^completion)(NSString * _Nullable bearer));
+// The modern mailbox web views load real reddit.com documents, and Reddit
+// refreshes token_v2 on those — their cookie jar is a free bearer source the
+// poller consults before an offscreen mint. Registered by ApolloDirectChatWeb;
+// the provider answers nil when no current-account web view is alive.
+void ApolloChatPollSetWebJarBearerProvider(void (^ _Nullable provider)(void (^completion)(NSString * _Nullable token)));
+// A request made with `bearer` came back 401/403: forget it so the next
+// request harvests or mints a fresh token instead of retrying a dead one.
+void ApolloChatPollNoteBearerRejected(NSString * _Nullable bearer);
+// Homeserver base URL, honouring the simulator debug override.
+NSString *ApolloChatPollHomeserver(void);
+
 __END_DECLS
 
 NS_ASSUME_NONNULL_END

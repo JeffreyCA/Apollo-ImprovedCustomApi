@@ -7,6 +7,7 @@
 
 #import "ApolloDirectChatWeb.h"
 #import "ApolloAccountCredentials.h"
+#import "ApolloChatUnreadPoller.h"
 #import "ApolloCommon.h"
 #import "ApolloListLayoutSupport.h"
 #import "ApolloState.h"
@@ -799,6 +800,7 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
                                                    attempt:(NSUInteger)attempt;
 - (void)apollo_cancelChatTransition;
 - (void)apollo_revealChat;
+- (void)apollo_openConversationPath:(NSString *)path;
 - (void)apollo_routeURLOutsideMailbox:(NSURL *)url;
 - (void)apollo_prepareForMailboxReturnAnimated:(BOOL)animated;
 - (void)apollo_showAuthenticationError:(NSString *)detail automaticallyPrompt:(BOOL)automaticallyPrompt;
@@ -919,11 +921,15 @@ static NSHashTable<UIGestureRecognizer *> *sStandaloneChatBackPanWired = nil;
 static BOOL sStandaloneChatBackInteractive = NO;   // NO = the release takes the instant step
 static void ApolloStandaloneChatBackPanInstall(ApolloDirectChatWebViewController *controller);
 static void ApolloStandaloneChatBackPanForgetHost(ApolloDirectChatWebViewController *controller);
+// The most recently created mailbox controller: its cookie jar is the bearer
+// source the chat poller and room directory read (see the %ctor registration).
+static __weak ApolloDirectChatWebViewController *sLatestMailboxWebController = nil;
 
 @implementation ApolloDirectChatWebViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    sLatestMailboxWebController = self;
     self.title = self.mailboxKind == ApolloModernMailboxKindModmail ? @"Moderator Mail" : @"Reddit Chat";
     self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
     self.view.backgroundColor = UIColor.systemBackgroundColor;
@@ -2983,6 +2989,47 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
     [self.webView loadRequest:request];
 }
 
+// A conversation opened from OUTSIDE the web content (a legacy-inbox chat
+// mirror tapped in Notifications). It loads as a real navigation: the policy
+// callback covers the room while it settles exactly as a tapped room is, and
+// the in-room Back control then returns to the list through its own reload
+// path. Before the first document exists the path simply becomes the initial
+// destination, so cookie seeding does not race a list load against it.
+- (void)apollo_openConversationPath:(NSString *)path {
+    if (self.mailboxKind != ApolloModernMailboxKindChat) return;
+    NSString *validated = ApolloValidatedModernMailboxPath(ApolloModernMailboxKindChat, path);
+    if (!validated || ![self apollo_isChatConversationPath:validated]) {
+        ApolloLog(@"[DirectChatWeb] Ignored an invalid conversation path");
+        return;
+    }
+    if (self.embeddedInInbox) {
+        self.embeddedInboxSection = ApolloModernChatInboxSectionMessages;
+        [self.webView evaluateJavaScript:
+            @"window.__apolloEmbeddedSection='messages';"
+             "try{sessionStorage.setItem('__apolloEmbeddedSection','messages');}catch(e){}"
+                       completionHandler:nil];
+    }
+    NSURL *url = [NSURL URLWithString:[@"https://www.reddit.com" stringByAppendingString:validated]];
+    if (!self.webView.URL) {
+        self.initialDestinationPath = validated;
+        ApolloLog(@"[DirectChatWeb] Queued a conversation as the first Chat document");
+        return;
+    }
+    if ([[self apollo_currentChatPath] isEqualToString:validated]) {
+        ApolloLog(@"[DirectChatWeb] Conversation already open");
+        return;
+    }
+    // Retire any list readiness/filter loop still running for the previous
+    // route; the room's covered transition owns the reveal from here.
+    self.readinessGeneration += 1;
+    [self.webView stopLoading];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.cachePolicy = NSURLRequestUseProtocolCachePolicy;
+    [self.webView loadRequest:request];
+    ApolloLog(@"[DirectChatWeb] Opening a Chat conversation from the native inbox%@",
+              self.embeddedInInbox ? @" (Inbox hub)" : @"");
+}
+
 - (void)apollo_seedAndLoad {
     self.username = ApolloActiveWebSessionUsername() ?: @"";
     ApolloWebSessionEntry *session = ApolloWebSessionPollFor(self.username);
@@ -3573,6 +3620,11 @@ void ApolloModernChatControllerShowInboxSection(UIViewController *controller,
     [(ApolloDirectChatWebViewController *)controller apollo_showEmbeddedInboxSection:section];
 }
 
+void ApolloModernChatControllerOpenConversationPath(UIViewController *controller, NSString *path) {
+    if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return;
+    [(ApolloDirectChatWebViewController *)controller apollo_openConversationPath:path];
+}
+
 BOOL ApolloModernChatControllerSessionIsCurrent(UIViewController *controller) {
     if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return NO;
     ApolloDirectChatWebViewController *chatController =
@@ -3932,5 +3984,27 @@ static void ApolloStandaloneChatBackPanForgetHost(ApolloDirectChatWebViewControl
 %ctor {
     %init;
     ApolloMigrateModernMailboxPreferences();
+    // The mailbox web views load real reddit.com documents, so their isolated
+    // cookie jar carries the token_v2 Reddit refreshed on the way — an
+    // already-minted Matrix bearer for the chat poller and room directory.
+    // Only a controller seeded for the CURRENT account's session qualifies.
+    ApolloChatPollSetWebJarBearerProvider(^(void (^completion)(NSString *token)) {
+        ApolloDirectChatWebViewController *controller = sLatestMailboxWebController;
+        WKWebView *webView = controller.webView;
+        if (!webView || !ApolloModernChatControllerSessionIsCurrent(controller)) {
+            completion(nil);
+            return;
+        }
+        [webView.configuration.websiteDataStore.httpCookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+            NSString *token = nil;
+            for (NSHTTPCookie *cookie in cookies) {
+                if ([cookie.name isEqualToString:@"token_v2"] && cookie.value.length > 0) {
+                    token = cookie.value;
+                    break;
+                }
+            }
+            completion(token);
+        }];
+    });
     ApolloLog(@"[DirectChatWeb] module loaded");
 }

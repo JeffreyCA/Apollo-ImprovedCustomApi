@@ -15,6 +15,7 @@
 //      the real Messages row as a legacy fallback.
 //   4. In that fallback, filter the IGListKit objects to chat-subject messages.
 
+#import "ApolloChatRoomDirectory.h"
 #import "ApolloChatUnreadPoller.h"
 #import "ApolloCommon.h"
 #import "ApolloDirectChatWeb.h"
@@ -22,6 +23,7 @@
 #import "ApolloUserProfileCache.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloSubredditCustomIconCache.h"
+#import "ApolloWebSessionStore.h"
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -1915,19 +1917,14 @@ static NSInteger ApolloRealMessagesRow(ApolloBoxesRowState *state, NSInteger dis
 #pragma mark - messages list: filter to chats
 
 // Reddit's legacy-inbox chat mirrors carry a bracketed whole-subject marker —
-// "[direct chat room]" / "[group chat room]" — never free text. Anchor the
-// match to that exact shape (single bracket pair spanning the entire trimmed
-// subject, ending in "chat room") so a real PM that merely mentions a chat
-// room in its subject can never be misclassified in either direction.
-// (Raised by @jordanearle in review.)
+// "[direct chat room]" / "[group chat room]" — never free text. The exact
+// shape rule (single bracket pair spanning the entire trimmed subject, ending
+// in "chat room", so a real PM that merely mentions a chat room can never be
+// misclassified in either direction — raised by @jordanearle in review) lives
+// in ApolloChatRoomDirectory, which also uses it to tell an unnamed room's
+// mirror from a titled one when a tapped row is resolved to its Chat room.
 static BOOL ApolloMessageSubjectIsChatRoomMirror(NSString *subject) {
-    if (![subject isKindOfClass:[NSString class]] || subject.length == 0) return NO;
-    NSString *trimmed = [[subject stringByTrimmingCharactersInSet:
-        [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-    if (![trimmed hasPrefix:@"["] || ![trimmed hasSuffix:@" chat room]"]) return NO;
-    // Exactly one bracketed token and nothing outside it: the first closing
-    // bracket must be the subject's final character.
-    return [trimmed rangeOfString:@"]"].location == trimmed.length - 1;
+    return ApolloChatSubjectIsRoomMarker(subject);
 }
 
 static BOOL ApolloMessageIsChatRoomMirror(id msg) {
@@ -2017,8 +2014,10 @@ static NSArray *ApolloChatFilterOutChats(NSArray *messages) {
     if ([objc_getAssociatedObject(self, &kChatFilterKey) boolValue]) sChatFilterActive = YES;
     ApolloInstallInboxModeSwitcher(self);
     // The user is looking at the Inbox: refresh the chat unread count now
-    // rather than waiting out the periodic cadence.
+    // rather than waiting out the periodic cadence, and warm the chat room
+    // directory so a tapped chat mirror can open its room without waiting.
     ApolloChatUnreadPollerKick();
+    ApolloChatRoomDirectoryPrefetch();
     if (ApolloInboxControllerIsAll(self) && ApolloModernChatShouldOpen() &&
         !objc_getAssociatedObject(self, &kInboxAllChatHubKey)) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
@@ -2608,6 +2607,182 @@ static void ApolloInboxCellApplyAvatar(id cellNode) {
                    badgeValue ?: @"none", (long)ApolloModernChatUnreadBadgeCount(),
                    combinedValue ?: @"none");
     %orig(combinedValue);
+}
+
+%end
+
+#pragma mark - native inbox rows: open chat mirrors in modern Chat
+
+// Reddit mirrors every modern Chat message into the legacy inbox as a private
+// message. ApolloChatFilterOutChats hides the bracket-marked direct-chat
+// mirrors while modern Chat is on, but a converted message thread or a titled
+// group room keeps its title as the subject and stays listed under
+// Notifications — and tapping one pushed Apollo's legacy thread, a dead end
+// next to the modern Chat surface one switch away. With modern Chat on, the
+// tap now resolves the mirror to its Chat room (ApolloChatRoomDirectory) and
+// opens it there: in place inside the Inbox (All) hub, or as a pushed Chat
+// controller from any other inbox list (Unread, Messages, Sent). When no room
+// can be matched the tap falls through to Apollo's own handler, so the legacy
+// thread stays the safety net. With modern Chat off nothing here runs.
+
+static BOOL sInboxChatMirrorBypass = NO;   // re-entry: run Apollo's handler for the fallback
+
+static UIViewController *ApolloInboxHostControllerForTableNode(id tableNode) {
+    Class inboxClass = objc_getClass("_TtC6Apollo19InboxViewController");
+    if (!inboxClass || ![tableNode respondsToSelector:@selector(view)]) return nil;
+    UIResponder *responder = ((UIView *(*)(id, SEL))objc_msgSend)(tableNode, @selector(view));
+    while (responder) {
+        if ([responder isKindOfClass:inboxClass]) return (UIViewController *)responder;
+        responder = responder.nextResponder;
+    }
+    return nil;
+}
+
+// A private message that can be a chat mirror: not a post/comment reply or a
+// mention, not a subreddit/moderator message, not admin-distinguished.
+static BOOL ApolloInboxMessageMayBeChatMirror(id message) {
+    Class messageClass = objc_getClass("RDKMessage");
+    Class replyClass = objc_getClass("RDKCommentReplyMessage");
+    if (!messageClass || ![message isKindOfClass:messageClass]) return NO;
+    if (replyClass && [message isKindOfClass:replyClass]) return NO;
+    if ([message respondsToSelector:@selector(isCommentReply)] &&
+        ((BOOL (*)(id, SEL))objc_msgSend)(message, @selector(isCommentReply))) return NO;
+    long long contentType = [message respondsToSelector:@selector(contentType)]
+        ? ((long long (*)(id, SEL))objc_msgSend)(message, @selector(contentType)) : -1;
+    if (contentType >= 0 && contentType <= 2) return NO;   // post reply / comment reply / mention
+    if (ApolloInboxSubredditClean(ApolloInboxStringProp(message, @selector(subreddit)))) return NO;
+    if (ApolloInboxStringProp(message, @selector(distinguished)).length > 0) return NO;
+    return ApolloInboxStringProp(message, @selector(subject)).length > 0;
+}
+
+// Opening the legacy thread marked the message read; do the same here, the
+// way Apollo's own swipe action does it: a read copy of the model, the API
+// call, and the ModelObjectUpdated broadcast every inbox list observes to swap
+// the row's model and re-render it.
+static void ApolloInboxMarkMessageRead(id message) {
+    if (![message respondsToSelector:@selector(isUnread)] ||
+        !((BOOL (*)(id, SEL))objc_msgSend)(message, @selector(isUnread))) return;
+    if (![message conformsToProtocol:@protocol(NSCopying)]) return;
+    id updated = [message copy];
+    if (![updated respondsToSelector:@selector(setUnread:)]) return;
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(updated, @selector(setUnread:), NO);
+    Class clientClass = objc_getClass("RDKClient");
+    id client = clientClass && [clientClass respondsToSelector:@selector(sharedClient)]
+        ? ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient)) : nil;
+    if ([client respondsToSelector:@selector(markMessageAsRead:completion:)]) {
+        ((id (*)(id, SEL, id, id))objc_msgSend)(client, @selector(markMessageAsRead:completion:), updated, nil);
+    }
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"com.christianselig.ModelObjectUpdated"
+                                                        object:message
+                                                      userInfo:@{ @"newModel": updated }];
+}
+
+static void ApolloInboxOpenChatPath(UIViewController *host, NSString *chatPath) {
+    if (ApolloInboxControllerIsAll(host)) {
+        // Same transition as tapping the Chat switch, then straight into the
+        // room; the hub's Messages section is where the room's Back leads.
+        ApolloSetInboxChatHubVisible(host, YES, YES);
+        ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(host, &kInboxAllChatHubKey);
+        if (hub) {
+            [hub.sectionSwitcher apollo_setSelectedSection:ApolloModernChatInboxSectionMessages animated:NO];
+            ApolloModernChatControllerOpenConversationPath(hub.chatController, chatPath);
+            ChatsFilterLog(@"opened a chat mirror's room in the Inbox Chat hub");
+            return;
+        }
+    }
+    UIViewController *controller = ApolloCreateModernChatViewControllerForPath(chatPath);
+    [host.navigationController pushViewController:controller animated:YES];
+    ChatsFilterLog(@"opened a chat mirror's room in a pushed Chat controller");
+}
+
+static BOOL ApolloInboxOpenChatMirrorIfNeeded(id listAdapter, id tableNode, NSIndexPath *indexPath) {
+    if (sInboxChatMirrorBypass || !ApolloModernChatShouldOpen()) return NO;
+    if (![tableNode respondsToSelector:@selector(nodeForRowAtIndexPath:)]) return NO;
+    id node = ((id (*)(id, SEL, id))objc_msgSend)(tableNode, @selector(nodeForRowAtIndexPath:), indexPath);
+    Class cellClass = objc_getClass("_TtC6Apollo13InboxCellNode");
+    if (!cellClass || ![node isKindOfClass:cellClass]) return NO;
+    id message = ApolloInboxIvarValue(node, @"message");
+    if (!ApolloInboxMessageMayBeChatMirror(message)) return NO;
+    UIViewController *host = ApolloInboxHostControllerForTableNode(tableNode);
+    if (!host) return NO;
+
+    NSString *subject = ApolloInboxStringProp(message, @selector(subject));
+    NSString *author = ApolloInboxStringProp(message, @selector(author));
+    NSString *recipient = ApolloInboxStringProp(message, @selector(recipient));
+    NSString *me = ApolloInboxCurrentUser() ?: ApolloActiveWebSessionUsername();
+    BOOL sent = me.length > 0 && author.length > 0 && [me caseInsensitiveCompare:author] == NSOrderedSame;
+    NSString *partner = sent ? recipient : author;
+    if (partner.length == 0 || [partner hasPrefix:@"["]) partner = nil;   // "[deleted]"
+    NSDate *created = [message respondsToSelector:@selector(createdUTC)]
+        ? ((id (*)(id, SEL))objc_msgSend)(message, @selector(createdUTC)) : nil;
+    NSTimeInterval timestamp = [created isKindOfClass:[NSDate class]] ? created.timeIntervalSince1970 : 0;
+    ChatsFilterLog(@"chat mirror tapped (%@, partner %@); resolving its modern Chat room",
+                   ApolloChatSubjectIsRoomMarker(subject) ? @"unnamed room" : @"titled room",
+                   partner.length ? @"known" : @"unknown");
+
+    __weak id weakAdapter = listAdapter;
+    __weak id weakTable = tableNode;
+    __weak UIViewController *weakHost = host;
+    ApolloChatRoomDirectoryResolve(subject, partner, timestamp, ^(NSString *chatPath) {
+        id table = weakTable;
+        UIViewController *strongHost = weakHost;
+        if ([table respondsToSelector:@selector(deselectRowAtIndexPath:animated:)]) {
+            ((void (*)(id, SEL, id, BOOL))objc_msgSend)(table, @selector(deselectRowAtIndexPath:animated:),
+                                                       indexPath, YES);
+        }
+        if (!strongHost || !strongHost.viewIfLoaded.window) return;   // the list went away meanwhile
+        if (!chatPath) {
+            id adapter = weakAdapter;
+            if (!adapter || !table) return;
+            ChatsFilterLog(@"no modern Chat room matched the tapped mirror; opening Apollo's legacy thread");
+            sInboxChatMirrorBypass = YES;
+            ((void (*)(id, SEL, id, id))objc_msgSend)(adapter, @selector(tableNode:didSelectRowAtIndexPath:),
+                                                      table, indexPath);
+            sInboxChatMirrorBypass = NO;
+            return;
+        }
+        ApolloInboxMarkMessageRead(message);
+        ApolloInboxOpenChatPath(strongHost, chatPath);
+    });
+    return YES;
+}
+
+// Apollo's shared list adapter is the table delegate of every Texture list;
+// only an InboxCellNode carrying a chat mirror is taken over here.
+%hook _TtC6Apollo11ListAdapter
+
+- (void)tableNode:(id)tableNode didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (ApolloInboxOpenChatMirrorIfNeeded(self, tableNode, indexPath)) return;
+    %orig;
+}
+
+%end
+
+// Mirrors carry the sender's account id (`author_fullname`), which RDKMessage
+// drops but direct rooms are keyed by. Note it as the message JSON goes by.
+static void ApolloInboxNoteMessageJSON(id json) {
+    if (![json isKindOfClass:[NSDictionary class]]) return;
+    NSDictionary *data = json;
+    if ([json[@"data"] isKindOfClass:[NSDictionary class]]) {
+        if (![json[@"kind"] isEqual:@"t4"]) return;
+        data = json[@"data"];
+    }
+    if (![data[@"subject"] isKindOfClass:[NSString class]]) return;   // messages only
+    ApolloChatRoomDirectoryNoteUserFullname(data[@"author"], data[@"author_fullname"]);
+}
+
+%hook MTLJSONAdapter
+
++ (id)modelOfClass:(Class)modelClass fromJSONDictionary:(NSDictionary *)JSONDictionary error:(NSError **)error {
+    ApolloInboxNoteMessageJSON(JSONDictionary);
+    return %orig;
+}
+
++ (id)modelsOfClass:(Class)modelClass fromJSONArray:(NSArray *)JSONArray error:(NSError **)error {
+    if ([JSONArray isKindOfClass:[NSArray class]]) {
+        for (id json in JSONArray) ApolloInboxNoteMessageJSON(json);
+    }
+    return %orig;
 }
 
 %end
