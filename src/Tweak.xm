@@ -34,6 +34,7 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloAccountCredentials.h"
+#import "ApolloPerAccountFavorites.h"
 #import "crash/ApolloCrashManager.h"
 #import "crash/ApolloCrashContext.h"
 #import "crash/ApolloCrashPromptCoordinator.h"
@@ -3588,12 +3589,37 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
            [key isEqualToString:@"CurrentRedditAccountIndex"];
 }
 
+static BOOL ApolloDefaultsKeyChangesSelectedAccount(NSString *key) {
+    return [key isEqualToString:@"CurrentRedditAccountIndex"];
+}
+
+static BOOL ApolloDefaultsKeyChangesAccountCollection(NSString *key) {
+    return [key isEqualToString:@"RedditAccounts2"];
+}
+
+static BOOL ApolloDefaultsKeyChangesNativeFavorites(NSString *key) {
+    return [key isEqualToString:UDKeyApolloFavoriteSubreddits];
+}
+
 %hook NSUserDefaults
 
 - (void)setObject:(id)value forKey:(NSString *)key {
     %orig;
     if (ApolloDefaultsKeyChangesActiveAccount(key)) {
         ApolloInvalidateActiveAccountUsernameCache();
+    }
+    // Do not project on a RedditAccounts2-only write: account reordering can
+    // persist the reordered array before its matching index, making the old
+    // numeric index briefly point at the wrong username. The selection write
+    // below, or Apollo's eventual account notification, sees the coherent pair.
+    if (ApolloDefaultsKeyChangesSelectedAccount(key)) {
+        ApolloPerAccountFavoritesAccountStateDidChange();
+    }
+    if (ApolloDefaultsKeyChangesAccountCollection(key)) {
+        ApolloPerAccountFavoritesAccountsCollectionDidChange();
+    }
+    if (ApolloDefaultsKeyChangesNativeFavorites(key)) {
+        ApolloPerAccountFavoritesNativeFavoritesDidChange();
     }
 }
 
@@ -3602,6 +3628,9 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     if (ApolloDefaultsKeyChangesActiveAccount(key)) {
         ApolloInvalidateActiveAccountUsernameCache();
     }
+    if (ApolloDefaultsKeyChangesSelectedAccount(key)) {
+        ApolloPerAccountFavoritesAccountStateDidChange();
+    }
 }
 
 - (void)removeObjectForKey:(NSString *)key {
@@ -3609,6 +3638,31 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     if (ApolloDefaultsKeyChangesActiveAccount(key)) {
         ApolloInvalidateActiveAccountUsernameCache();
     }
+    if (ApolloDefaultsKeyChangesSelectedAccount(key)) {
+        ApolloPerAccountFavoritesAccountStateDidChange();
+    }
+    if (ApolloDefaultsKeyChangesAccountCollection(key)) {
+        ApolloPerAccountFavoritesAccountsCollectionDidChange();
+    }
+    if (ApolloDefaultsKeyChangesNativeFavorites(key)) {
+        ApolloPerAccountFavoritesNativeFavoritesDidChange();
+    }
+}
+
+%end
+
+// AccountManager updates its live Swift selection, posts this notification,
+// and only then persists CurrentRedditAccountIndex asynchronously. Project the
+// live account's favorites before any notification observer sees the old list;
+// the module's observer remains as an idempotent fallback.
+%hook NSNotificationCenter
+
+- (void)postNotificationName:(NSNotificationName)name object:(id)object {
+    if ([name isEqualToString:@"com.christianselig.RedditCurrentAccountChanged"] ||
+        [name isEqualToString:@"com.christianselig.RedditAccountChanged"]) {
+        ApolloPerAccountFavoritesLiveAccountStateDidChange();
+    }
+    %orig;
 }
 
 %end
@@ -3657,6 +3711,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeySubredditListEnhancements: @YES,
                                     UDKeySubredditFeedIconStyle: @(ApolloSubredditFeedIconStyleClassic),
                                     UDKeySubredditFeedLayout: @(ApolloSubredditFeedLayoutRows),
+                                    UDKeyPerAccountFavoritesEnabled: @NO,
                                     UDKeyModernSubredditDividers: @YES,
                                     UDKeyShowDeletedComments: @NO,
                                     UDKeyTapToRevealDeletedComments: @NO,
@@ -3693,6 +3748,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyInlineMediaPreviewPinned: @YES,
                                     UDKeyLinkPreviewBodyMode: @(ApolloLinkPreviewModeFull),
                                     UDKeyLinkPreviewCommentsMode: @(ApolloLinkPreviewModeFull),
+                                    UDKeyLinkPreviewPreviewPinned: @YES,
                                     UDKeyLinkPreviewCardColor: @(ApolloLinkPreviewCardColorNeutral),
                                     UDKeyImageUploadProvider: @(ImageUploadProviderImgur),
                                     UDKeyCommentLinkHost: @(CommentLinkHostOff),
@@ -3716,7 +3772,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeySubredditShowDisplayName: @YES,
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
-                                    UDKeyAutoHideTabBarShowOnIdle: @NO,
+                                    UDKeyAutoHideTabBarShowOnIdle: @YES,
+                                    UDKeyClassicTabBarScrollBehavior: @NO,
                                     UDKeyTabBarCollapseSide: @0,
                                     UDKeyKeepSearchBarInPlace: @NO,
                                     UDKeyLGTitleGapCentering: @YES,
@@ -3976,9 +4033,21 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sSubredditShowDisplayName = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowDisplayName];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
-    sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
-    sTabBarCollapseSide = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyTabBarCollapseSide];
-    if (sTabBarCollapseSide != 0 && sTabBarCollapseSide != 1) sTabBarCollapseSide = 0;
+    sClassicTabBarScrollBehavior = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyClassicTabBarScrollBehavior];
+    if (ApolloSupportsNativeTabBarScrollBehavior() &&
+        ![standardDefaults boolForKey:UDKeyAutoHideTabBarShowOnIdle]) {
+        // Idle re-expansion is now bundled into both selectable scroll modes.
+        // Normalize older/restored independent-switch state on supported OSes.
+        [standardDefaults setBool:YES forKey:UDKeyAutoHideTabBarShowOnIdle];
+        ApolloLog(@"[AutoHideTabBarFix] Migrated scroll behavior to include idle re-expansion");
+    }
+    NSInteger storedTabBarHideStyle =
+        [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyTabBarCollapseSide];
+    if (storedTabBarHideStyle < ApolloTabBarHideStyleLeft ||
+        storedTabBarHideStyle > ApolloTabBarHideStyleDown) {
+        storedTabBarHideStyle = ApolloTabBarHideStyleLeft;
+    }
+    sTabBarHideStyle = (ApolloTabBarHideStyle)storedTabBarHideStyle;
     sKeepSearchBarInPlace = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];
     sLGTitleGapCentering = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLGTitleGapCentering];
     sIPadTabBarBottom = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom];
@@ -4037,6 +4106,7 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
         sSubredditFeedLayout = ApolloSubredditFeedLayoutRows;
         [standardDefaults setInteger:sSubredditFeedLayout forKey:UDKeySubredditFeedLayout];
     }
+    sPerAccountFavoritesEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPerAccountFavoritesEnabled];
     sHideSubredditListDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideSubredditListDescriptions];
     sHideMultiredditDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideMultiredditDescriptions];
     sEnableFlairColors = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
@@ -4376,6 +4446,11 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     // over from a mid-session web login is now resolved — clear the indicator.
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestart];
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestartUsername];
+
+    // Start only after every setting is loaded and any launch-time account
+    // synthesis has finished, so the first projection sees the final persisted
+    // account array. The feature is dormant when its opt-in flag is off.
+    ApolloPerAccountFavoritesStart();
 
     // Mirror the selected app icon for Bark notification icon passthrough.
     ApolloBarkCaptureInitialIconSelection();

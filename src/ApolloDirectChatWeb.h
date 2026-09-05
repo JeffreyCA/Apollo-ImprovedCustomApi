@@ -64,11 +64,37 @@ void ApolloModernChatControllerSetInboxVisible(UIViewController *controller, BOO
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller);
 // YES while `controller` (a modern Chat controller) is inside a conversation
 // (/chat/room/… or a /chat/threads/<id> reply thread) rather than one of the
-// list surfaces. The Inbox hub's Chat -> Notifications swipe tracker checks
-// this so a horizontal flick inside a room (message bubbles, the GIF picker's
-// horizontally scrolling grid, …) can never yank the user out to
-// Notifications; rooms keep their own back affordances.
+// list surfaces. The Inbox hub's back-swipe tracker checks this to decide
+// which level of the hierarchy one gesture climbs: out of the conversation
+// while one is open, otherwise Chat -> Notifications.
 BOOL ApolloModernChatControllerIsOnConversationRoute(UIViewController * _Nullable controller);
+// Climbs that first level: from an open conversation back to the list it was
+// opened from, by clicking Reddit's own in-room Back control — the same
+// instant pane flip a tap performs, URL repair and all. Returns YES when the
+// caller's gesture was consumed (a back was issued, or one is still in
+// flight) and NO when `controller` is not a modern Chat controller inside a
+// conversation, in which case the caller keeps its own behavior.
+BOOL ApolloModernChatControllerGoBackToConversationList(UIViewController * _Nullable controller);
+// Interactive form of that same step, for a gesture that should feel like
+// every other iOS back: Begin sets up the conversation over a still frame of
+// the list it was opened from (NO if there is nothing to reveal, or a back is
+// already running — the caller then falls back to the plain call above),
+// Update tracks the drag in 0...1, and Finish either completes the step or
+// puts the conversation back with the web view never touched.
+BOOL ApolloModernChatControllerBeginInteractiveBack(UIViewController * _Nullable controller);
+void ApolloModernChatControllerUpdateInteractiveBack(UIViewController * _Nullable controller,
+                                                     CGFloat progress);
+void ApolloModernChatControllerFinishInteractiveBack(UIViewController * _Nullable controller,
+                                                     BOOL commit, CGFloat velocity);
+// The gesture rules the two chat-hierarchy swipes share (the Inbox hub's
+// mode-pan and the standalone Chat screen's own back-pan). YES when `pan`
+// starts over horizontally scrollable web content inside `hostView` (a
+// carousel in a bubble), which keeps its drag; and the release rule — commit
+// past the halfway point, or on a decisive same-direction throw.
+BOOL ApolloModernChatPanStartsOverHorizontalScroller(UIPanGestureRecognizer * _Nullable pan,
+                                                     UIView * _Nullable hostView);
+BOOL ApolloModernChatBackSwipeCommits(UIGestureRecognizerState state, CGFloat progress,
+                                      CGFloat velocity, CGPoint translation);
 // API-key-free accounts cannot use Apollo's OAuth-only native new-Modmail
 // endpoints. This presents Reddit's current cookie-authenticated Modmail inbox
 // in the same isolated, Apollo-themed mailbox shell as modern Chat.

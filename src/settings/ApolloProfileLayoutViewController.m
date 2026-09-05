@@ -107,7 +107,7 @@
 
     ApolloSettingsSection *layoutSection =
         [ApolloSettingsSection sectionWithTitle:@"Layout"
-                                         footer:@"New adds the immersive melt backdrop and more space. Classic is flat and compact. Avatar sets how the profile picture is shown everywhere."
+                                         footer:@"New adds the immersive melt backdrop and more space. Classic is flat and compact. Avatar sets the shape of the profile-header picture."
                                            rows:@[ density, avatar ]];
 
     ApolloSettingsRow *banner =

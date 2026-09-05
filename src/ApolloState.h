@@ -1,8 +1,25 @@
 #import <Foundation/Foundation.h>
 
 @class UIScrollView;
+@class UITabBar;
+@class UITabBarController;
 @class UINavigationItem;
 @class UIViewController;
+
+// Persisted through the legacy UDKeyTabBarCollapseSide key so existing
+// Left/Right preferences and settings backups remain compatible.
+typedef NS_ENUM(NSInteger, ApolloTabBarHideStyle) {
+    ApolloTabBarHideStyleLeft = 0,
+    ApolloTabBarHideStyleRight = 1,
+    ApolloTabBarHideStyleFade = 2,
+    ApolloTabBarHideStyleDown = 3,
+};
+
+static inline BOOL ApolloTabBarHideStyleUsesCustomPresentation(
+    ApolloTabBarHideStyle style) {
+    return style == ApolloTabBarHideStyleFade ||
+           style == ApolloTabBarHideStyleDown;
+}
 
 extern NSString *sRedditClientId;
 extern NSString *sRedditClientSecret;
@@ -95,11 +112,12 @@ extern BOOL sHideTabBarTitles;
 #ifdef __cplusplus
 extern "C" {
 #endif
-// Central setter used by the settings UI. Enabling icon-only mode also clears
-// Apollo's narrower "Hide Username on Tab Bar" preference because every tab
-// title is already hidden, then refreshes both settings surfaces live.
+// Central setter used by the settings UI. Icon-only mode temporarily suspends
+// Apollo's narrower "Hide Username on Tab Bar" preference, then restores the
+// user's prior choice when tab labels return.
 void ApolloSetHideTabBarTitlesEnabled(BOOL enabled);
-// Repairs a persisted both-on state during launch or settings restore.
+// Suspends a persisted native setting while icon-only mode is active. Used at
+// launch/restore and after external native-setting notifications.
 void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void);
 #ifdef __cplusplus
 }
@@ -144,12 +162,28 @@ extern BOOL sCommunityHighlights;
 // Full mode uses a hidden WKWebView to harvest up to 6 highlights beyond the 2
 // Reddit's REST API exposes. See ApolloSubredditHighlights.xm (ApolloHLWebFetch).
 extern BOOL sCommunityHighlightsWeb;
-extern BOOL sAutoHideTabBarShowOnIdle;
-// Which side the iOS 26 minimized (Liquid Glass) tab bar pill docks on:
-// 0 = Left (system default), 1 = Right. Read live at layout time so a change
-// applies without relaunch. Default 0 via registerDefaults
-// (UDKeyTabBarCollapseSide). See ApolloTabBarCollapseSide.xm.
-extern NSInteger sTabBarCollapseSide;
+// Posted after the Liquid Glass tab-bar scroll behavior changes so the runtime
+// can cancel in-flight work and reconcile the native policy.
+extern NSString *const ApolloTabBarScrollBehaviorChangedNotification;
+// NO selects Two-Gesture; YES selects Classic bidirectional behavior. See
+// ApolloAutoHideTabBar.xm and UDKeyClassicTabBarScrollBehavior.
+extern BOOL sClassicTabBarScrollBehavior;
+// Read live so a change applies without relaunch. Default Left via
+// registerDefaults. The old key name is retained only for compatibility.
+extern ApolloTabBarHideStyle sTabBarHideStyle;
+#ifdef __cplusplus
+extern "C" {
+#endif
+BOOL ApolloSupportsNativeTabBarScrollBehavior(void);
+#ifdef __cplusplus
+}
+#endif
+// Explicit presentation ownership shared with list geometry and other tab-bar
+// owners. Never infer presentation ownership from alpha/transform or the
+// global style alone.
+BOOL ApolloTabBarIsHideOnScrollPresentationOwned(UITabBar *tabBar);
+void ApolloRestoreHideOnScrollPresentation(UITabBarController *tabBarController,
+                                           NSString *reason);
 // iPad + Liquid Glass only. When ON, docks the iOS 26 floating tab bar at the
 // bottom (classic) instead of the top-center pill. Opt-in; default OFF via
 // registerDefaults. Temporary stopgap for issue #387. See ApolloIPadTabBarBottom.xm.
@@ -272,6 +306,9 @@ typedef NS_ENUM(NSInteger, ApolloSubredditFeedLayout) {
 extern NSInteger sSubredditFeedIconStyle;
 extern NSInteger sSubredditFeedLayout;
 
+// Opt-in per-account FavoriteSubreddits projection. Defaults OFF; see
+// ApolloPerAccountFavorites.{h,m}.
+extern BOOL sPerAccountFavoritesEnabled;
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;
