@@ -31,6 +31,13 @@
 //
 // Non-glass is untouched: every entry point gates on IsLiquidGlass(), and the
 // legacy module keeps full ownership there.
+//
+// The comments screen's "Find in Comments" bar is the same ApolloSearchToolbar
+// on the same base class, so it gets the same treatment: the resting half
+// (attach, toolbar hide, inset ownership, reveal) is shared here, and its
+// active half — driving Apollo's in-thread match pipeline, the match navigator
+// in the nav bar — lives in ApolloFindInCommentsGlass.xm. See
+// NSBIsNativeSearchCommentsVC for the gate.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -41,6 +48,11 @@
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloSearchNativeBar.h"
+#import "ApolloFindInCommentsGlass.h"
+
+// ApolloSwipeUpComments.xm: YES for the CommentsViewController hosted in the
+// media viewer's swipe-up comments sheet.
+extern "C" BOOL ApolloSwipeCommentsIsPaneCommentsController(UIViewController *controller);
 
 // Forward ref for the geometry hooks (same pattern as ApolloSearchInPlace.xm).
 @interface ASTableView : UITableView
@@ -123,7 +135,7 @@ static BOOL    sNSBAwaitingScroll    = NO;
 static CGFloat sNSBDismissTargetTop = 0.0;
 
 static const void *kNSBBridgeKey     = &kNSBBridgeKey;      // VC -> bridge delegate object
-static const void *kNSBFeedTableKey  = &kNSBFeedTableKey;   // ASTableView -> @YES (native-managed feed)
+static const void *kNSBFeedTableKey  = &kNSBFeedTableKey;   // ASTableView -> @YES (native-managed table: a feed, or a comments screen)
 static const void *kNSBAppearedKey   = &kNSBAppearedKey;    // VC -> @YES once it has appeared at least once
 static CGFloat sNSBToolbarBand = 45.0; // Apollo's resting toolbar height (the band its inset reserves)
 // How far above the safe area a resting write may sit and still count as one:
@@ -164,6 +176,31 @@ static BOOL NSBTraceEnabled(void) {
     return enabled;
 }
 
+static UIViewController *NSBFeedVCForView(UIView *view);
+
+// The comments screen sizes its bottom inset for a visible keyboard as the
+// ABSOLUTE keyboard height (Apollo's CommentsViewController keyboard hook, from
+// the keyboardFrame ivar its keyboardWillChangeFrame handler stores; plus its
+// own toolbar band only while its bar is docked, which the native bar never
+// lets happen) — not safe area + extra like every other bottom write. Report
+// that height so the relativizer can recognise the write and take the safe
+// area back out of it. NO while the keyboard is hidden: Apollo parks the frame
+// at the view's bottom edge then (ApolloListBottomInsetGuard normalises a
+// no-overlap frame to that same sentinel).
+static BOOL NSBCommentsKeyboardHeight(UIViewController *vc, CGFloat *outHeight) {
+    if (![vc isKindOfClass:objc_getClass("_TtC6Apollo22CommentsViewController")]) return NO;
+    Ivar ivar = class_getInstanceVariable(object_getClass(vc), "keyboardFrame");
+    if (!ivar) return NO;
+    const char *base = (const char *)(__bridge void *)vc + ivar_getOffset(ivar);
+    if (*(const uint8_t *)(base + sizeof(CGRect)) != 0) return NO;   // Optional.none
+    CGRect frame = *(const CGRect *)base;
+    if (frame.size.height <= 1.0) return NO;
+    UIView *view = vc.viewIfLoaded;
+    if (view && fabs(CGRectGetMinY(frame) - CGRectGetHeight(view.bounds)) < 0.5) return NO;
+    *outHeight = frame.size.height;
+    return YES;
+}
+
 // Convert Apollo's absolute inset writes into the deltas Automatic expects.
 //
 // Apollo sizes the feed as "safe area, plus a band for its own — now hidden —
@@ -193,7 +230,16 @@ static void NSBRelativizeInset(UIScrollView *sv, UIEdgeInsets *inset) {
     // the two would open a gap under the last row. Converted only when the
     // result is small enough that it cannot read as absolute on the way back
     // in — that is what keeps the echoes from walking this down to zero.
-    if (safe.bottom > 1.0 && inset->bottom >= safe.bottom - 1.0) {
+    //
+    // The comments screen's keyboard write is the one absolute bottom that is
+    // NOT safe area + extra (see NSBCommentsKeyboardHeight): matched against
+    // Apollo's own keyboard height, it loses the safe area the same way, and
+    // the echo (height minus safe area) no longer matches, so it stays put.
+    CGFloat keyboard = 0.0;
+    UIViewController *owner = (safe.bottom > 1.0) ? NSBFeedVCForView(sv) : nil;
+    if (owner && NSBCommentsKeyboardHeight(owner, &keyboard) && fabs(inset->bottom - keyboard) < 1.5) {
+        inset->bottom = MAX(0.0, inset->bottom - safe.bottom);
+    } else if (safe.bottom > 1.0 && inset->bottom >= safe.bottom - 1.0) {
         CGFloat rel = inset->bottom - safe.bottom;
         if (rel < 0.0) rel = 0.0;
         if (rel < safe.bottom - 1.0) inset->bottom = rel;
@@ -237,6 +283,29 @@ static BOOL NSBIsNativeSearchFeedVC(UIViewController *vc) {
     if (ApolloNSBReadBoolIvar(vc, "searchBarShouldStickToKeyboard", &stick) && stick) return NO;
     return ApolloNSBObjectIvar(vc, "upperToolbar") != nil &&
            ApolloNSBObjectIvar(vc, "searchTextField") != nil;
+}
+
+// A comments controller we manage the same way: Apollo's in-thread "Find in
+// Comments" (the stick-to-keyboard layout) on a CommentsViewController whose
+// toolbar exists. The resting bar is shared with the feed; the active half —
+// driving Apollo's match pipeline, the match navigator in the nav bar — lives
+// in ApolloFindInCommentsGlass.xm. Left to Apollo: the media viewer's swipe-up
+// comments sheet (its chrome is the sheet's glass, not a navigation bar) and a
+// 3D-touch preview (no navigation bar to host a palette).
+static BOOL NSBIsNativeSearchCommentsVC(UIViewController *vc) {
+    if (![vc isKindOfClass:objc_getClass("_TtC6Apollo22CommentsViewController")]) return NO;
+    BOOL stick = NO;
+    if (!ApolloNSBReadBoolIvar(vc, "searchBarShouldStickToKeyboard", &stick) || !stick) return NO;
+    if (ApolloNSBObjectIvar(vc, "upperToolbar") == nil ||
+        ApolloNSBObjectIvar(vc, "searchTextField") == nil) return NO;
+    BOOL preview = NO;
+    if (ApolloNSBReadBoolIvar(vc, "isShowingIn3DTouchPreview", &preview) && preview) return NO;
+    return !ApolloSwipeCommentsIsPaneCommentsController(vc);
+}
+
+// Any controller the native bar owns.
+static BOOL NSBIsNativeSearchVC(UIViewController *vc) {
+    return NSBIsNativeSearchFeedVC(vc) || NSBIsNativeSearchCommentsVC(vc);
 }
 
 static UIScrollView *NSBTableForVC(UIViewController *vc) {
@@ -795,11 +864,20 @@ static void NSBAttachNativeSearch(UIViewController *vc) {
     UINavigationItem *navItem = vc.navigationItem;
     if (navItem.searchController != nil) return; // ours (or someone's) — never fight it
 
-    ApolloNativeSearchBridge *bridge = objc_getAssociatedObject(vc, kNSBBridgeKey);
-    if (!bridge) {
-        bridge = [[ApolloNativeSearchBridge alloc] init];
-        bridge.feedVC = vc;
-        objc_setAssociatedObject(vc, kNSBBridgeKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // The comments screen gets the comments bridge (ApolloFindInCommentsGlass.xm
+    // drives Apollo's in-thread match pipeline); feeds get the results bridge.
+    BOOL comments = NSBIsNativeSearchCommentsVC(vc);
+    id<UISearchBarDelegate, UISearchControllerDelegate> bridge = nil;
+    if (comments) {
+        bridge = ApolloFindInCommentsGlassBridgeForController(vc);
+    } else {
+        ApolloNativeSearchBridge *feedBridge = objc_getAssociatedObject(vc, kNSBBridgeKey);
+        if (!feedBridge) {
+            feedBridge = [[ApolloNativeSearchBridge alloc] init];
+            feedBridge.feedVC = vc;
+            objc_setAssociatedObject(vc, kNSBBridgeKey, feedBridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        bridge = feedBridge;
     }
 
     UISearchController *sc = [[UISearchController alloc] initWithSearchResultsController:nil];
@@ -810,7 +888,7 @@ static void NSBAttachNativeSearch(UIViewController *vc) {
     // could come back unrestored after an interactive pop).
     sc.hidesNavigationBarDuringPresentation = NO;
     sc.delegate = bridge;
-    sc.searchBar.placeholder = @"Search";
+    sc.searchBar.placeholder = comments ? ApolloFindInCommentsGlassPlaceholder() : @"Search";
     sc.searchBar.delegate = bridge;
     UIColor *accent = ApolloThemeAccentColor();
     if (accent) sc.searchBar.tintColor = accent;
@@ -885,6 +963,13 @@ static CGFloat NSBNavBottomForTable(UIScrollView *table, UIViewController *vc) {
 @property (nonatomic) BOOL revealAttemptedAtTop;
 @property (nonatomic) BOOL revealCheckPending;
 @property (nonatomic) BOOL revealAfterRefreshPending;
+// The palette's fully expanded height, learned from settled observations (60pt
+// on an iPhone). A refresh that ends on a full reload can leave the palette
+// parked PART way collapsed with the list resting flush under it — the same
+// dead end as a collapsed bar, just shorter — and only a known full height
+// tells that state apart from a revealed one.
+@property (nonatomic) CGFloat paletteFullHeight;
+@property (nonatomic) CGFloat paletteFullWidth;   // the width that height was learned at (a rotation relearns)
 @end
 @implementation ApolloNativeSearchRestingState
 @end
@@ -992,7 +1077,21 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
         ? [(UITableView *)table refreshControl] : nil;
     if (rc.isRefreshing) return;
     if (fabs(table.contentOffset.y + table.adjustedContentInset.top) > 2.0) return; // not at the rest
-    if (CGRectGetHeight(sc.searchBar.bounds) > 1.0) return;            // already revealed
+    // Learn the expanded height from settled states only (the drag / refresh
+    // bails above keep a rubber-band-stretched palette out of it), then treat
+    // anything short of it as needing the same repair as a collapsed bar. Seen
+    // on the comments screen: a pull-to-refresh whose reload re-parks the list
+    // leaves the palette at ~32pt of 60 with the content resting flush beneath.
+    CGFloat barHeight = CGRectGetHeight(sc.searchBar.bounds);
+    CGFloat barWidth = CGRectGetWidth(sc.searchBar.bounds);
+    if (fabs(barWidth - state.paletteFullWidth) > 0.5) {   // rotation / split change: relearn
+        state.paletteFullWidth = barWidth;
+        state.paletteFullHeight = 0.0;
+    }
+    if (barHeight > state.paletteFullHeight && barHeight < 100.0) state.paletteFullHeight = barHeight;
+    BOOL revealed = barHeight > 1.0 &&
+                    (state.paletteFullHeight <= 1.0 || barHeight >= state.paletteFullHeight - 1.0);
+    if (revealed) return;                                              // already revealed
     state.revealInFlight = YES;
     state.revealAttemptedAtTop = YES;
     // A delayed policy restore kept the bar non-collapsible through the next
@@ -1012,7 +1111,7 @@ static void NSBEnsureBarRevealedAtTop(UIViewController *vc, UIScrollView *table)
 }
 
 void ApolloNativeFeedSearchRestoreCancelledNavigation(UIViewController *vc) {
-    if (!ApolloNativeFeedSearchEnabled() || !vc || !NSBIsNativeSearchFeedVC(vc)) return;
+    if (!ApolloNativeFeedSearchEnabled() || !vc || !NSBIsNativeSearchVC(vc)) return;
     UIScrollView *table = NSBTableForVC(vc);
     if (!NSBHasSettledFeedGeometry(vc, table)) return;
     // completeTransition: restores the item stack before UIKit's next layout
@@ -1077,9 +1176,15 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
 - (void)viewWillAppear:(BOOL)animated {
     if (ApolloNativeFeedSearchEnabled()) NSBInvalidateRestingSearch((UIViewController *)self);
     %orig;
-    if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchFeedVC(self)) return;
+    if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchVC(self)) return;
     NSBAttachNativeSearch((UIViewController *)self);
     NSBHideApolloToolbar((UIViewController *)self);
+    if (NSBIsNativeSearchCommentsVC(self)) {
+        // The comments query lives on Apollo's field too; its bar text and
+        // match navigator come back with the screen.
+        ApolloFindInCommentsGlassViewWillAppear((UIViewController *)self);
+        return;
+    }
     // Returning to a live search (e.g. back from an opened result): keep the
     // native bar's text in step with Apollo's field so the query stays visible.
     UINavigationItem *navItem = [(UIViewController *)self navigationItem];
@@ -1102,8 +1207,9 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchFeedVC(self)) return;
-    sNSBTransitioning = NO;
+    if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchVC(self)) return;
+    if (NSBIsNativeSearchCommentsVC(self)) ApolloFindInCommentsGlassViewDidAppear((UIViewController *)self);
+    else sNSBTransitioning = NO;
     // Record the appearance before anything can bail: the scroll-away policy is
     // applied from the layout pass too (see below), and on the paths where the
     // search controller is attached late this is the only thing that tells that
@@ -1127,8 +1233,9 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
 - (void)viewWillDisappear:(BOOL)animated {
     if (ApolloNativeFeedSearchEnabled()) NSBInvalidateRestingSearch((UIViewController *)self);
     %orig;
-    if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchFeedVC(self)) return;
-    sNSBTransitioning = YES;
+    if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchVC(self)) return;
+    if (NSBIsNativeSearchCommentsVC(self)) ApolloFindInCommentsGlassViewWillDisappear((UIViewController *)self);
+    else sNSBTransitioning = YES;
     // Leaving the feed (e.g. opening a result) with the search UI presented:
     // deactivate it cleanly. Keeping it active across a push leaves UIKit's
     // presentation half-restored after the pop (missing nav bar, collapsed
@@ -1140,7 +1247,7 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchFeedVC(self)) return;
+    if (!ApolloNativeFeedSearchEnabled() || !NSBIsNativeSearchVC(self)) return;
     // The toolbar/field ivars can be nil on the very first willAppear; attach
     // lazily here too (idempotent — bails once a searchController exists).
     NSBAttachNativeSearch((UIViewController *)self);
@@ -1210,9 +1317,7 @@ static void NSBScheduleRevealCheck(UIScrollView *table) {
 - (BOOL)becomeFirstResponder {
     if (ApolloNativeFeedSearchEnabled()) {
         UIViewController *vc = NSBFeedVCForView((UIView *)self);
-        if (vc && NSBIsNativeSearchFeedVC(vc) &&
-            vc.navigationItem.searchController != nil &&
-            objc_getAssociatedObject(vc, kNSBBridgeKey) != nil) {
+        if (vc && NSBIsNativeSearchVC(vc) && vc.navigationItem.searchController != nil) {
             return NO;
         }
     }

@@ -227,7 +227,14 @@ static void ApolloListRememberCurrentBottom(UIScrollView *table,
 
 - (void)setContentInset:(UIEdgeInsets)inset {
     if ((UIScrollView *)self != sApolloListActiveKeyboardRecoveryTable ||
-        sApolloListActiveKeyboardRecoveryFloor <= 0.5) {
+        sApolloListActiveKeyboardRecoveryFloor <= 0.5 ||
+        // A table UIKit insets through the safe area (the native search bar's
+        // feeds and comments screens, ApolloSearchNativeBar.xm) writes bottoms
+        // RELATIVE to that chrome, while the floor here is absolute — and UIKit
+        // supplies the tab-bar clearance itself there, so the stranded-rows
+        // failure this recovers from cannot occur. Same stand-down as the
+        // settled verification passes below.
+        self.contentInsetAdjustmentBehavior != UIScrollViewContentInsetAdjustmentNever) {
         %orig(inset);
         return;
     }
