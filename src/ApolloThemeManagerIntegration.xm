@@ -131,8 +131,25 @@ static ApolloAppearanceAppendedSwitchRow *AppendedRowAt(id vc, UITableView *tv, 
     return ip.row == native ? row : nil;
 }
 
-// Built once per (screen instance, row), re-themed from the donor (the
-// section's first native row) and re-read from the row's isOn on every dequeue.
+// The first UISwitch in a cell's tree: Apollo's switch rows keep the control
+// as the accessory view or as a content subview depending on the cell class.
+static UISwitch *FirstSwitchInView(UIView *view) {
+    if ([view isKindOfClass:[UISwitch class]]) return (UISwitch *)view;
+    for (UIView *subview in view.subviews) {
+        UISwitch *found = FirstSwitchInView(subview);
+        if (found) return found;
+    }
+    return nil;
+}
+
+// Built once per (screen instance, row), re-themed from its donors and
+// re-read from the row's isOn on every dequeue. The section's first native
+// row donates the cell chrome (background, label font/colour); its first
+// native SWITCH row donates the on-tint — copied verbatim, nil included,
+// because Apollo's own switches are un-tinted (nil = the system green) and
+// the appended one must match its siblings. Only a section with no switch at
+// all (none today) falls back to the theme accent. (The Posts section opens
+// with the Post Size value row, so row 0 alone can't be the tint donor.)
 static UITableViewCell *BuildAppendedSwitchCell(id vc, UITableView *tv, NSIndexPath *ip,
                                                 ApolloAppearanceAppendedSwitchRow *row) {
     const void *cellKey = (__bridge const void *)row;   // the spec's identity keys its cached cell
@@ -147,17 +164,23 @@ static UITableViewCell *BuildAppendedSwitchCell(id vc, UITableView *tv, NSIndexP
         cell.accessoryView = sw;
         objc_setAssociatedObject(vc, cellKey, cell, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    UITableViewCell *donor = (sCellOrig && ip.row > 0)
-        ? sCellOrig(vc, @selector(tableView:cellForRowAtIndexPath:),
-                    tv, [NSIndexPath indexPathForRow:0 inSection:ip.section])
-        : nil;
+    UITableViewCell *donor = nil;
+    UISwitch *donorSwitch = nil;
+    for (NSInteger native = 0; sCellOrig && native < ip.row; native++) {
+        UITableViewCell *candidate = sCellOrig(vc, @selector(tableView:cellForRowAtIndexPath:),
+                                               tv, [NSIndexPath indexPathForRow:native inSection:ip.section]);
+        if (!candidate) continue;
+        if (!donor) donor = candidate;
+        donorSwitch = [candidate.accessoryView isKindOfClass:[UISwitch class]]
+            ? (UISwitch *)candidate.accessoryView : FirstSwitchInView(candidate);
+        if (donorSwitch) break;
+    }
     if (donor) {
         cell.backgroundColor = donor.backgroundColor;
         cell.textLabel.font = donor.textLabel.font;
         cell.textLabel.textColor = donor.textLabel.textColor;
     }
-    UISwitch *donorSwitch = [donor.accessoryView isKindOfClass:[UISwitch class]] ? (UISwitch *)donor.accessoryView : nil;
-    sw.onTintColor = donorSwitch.onTintColor ?: ApolloThemeAccentColor();
+    sw.onTintColor = donorSwitch ? donorSwitch.onTintColor : ApolloThemeAccentColor();
     sw.on = row.isOn ? row.isOn() : NO;
     return cell;
 }
