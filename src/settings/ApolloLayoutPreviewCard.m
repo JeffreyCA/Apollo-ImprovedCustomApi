@@ -69,13 +69,15 @@
 }
 
 - (NSString *)accessibilityValue {
-    if (self.pinned && !self.pinningAvailable) return @"Pinning paused";
+    if (!self.pinningAvailable) return self.pinned ? @"Pinning paused" : @"Needs room";
     return self.pinned ? @"Pinned" : @"Unpinned";
 }
 
 - (NSString *)accessibilityHint {
-    if (self.pinned && !self.pinningAvailable) {
-        return @"Pinning needs more room for settings and resumes when there is enough space. Tap to unpin.";
+    if (!self.pinningAvailable) {
+        return self.pinned
+            ? @"Pinning needs more room for settings and resumes when there is enough space. Tap to unpin."
+            : @"Pinning needs more room for settings. Tap to pin automatically when there is enough space.";
     }
     return self.pinned ? @"Unpin to scroll the preview with settings."
                        : @"Pin to keep the preview visible while scrolling.";
@@ -87,27 +89,30 @@
 }
 
 - (void)setPinned:(BOOL)pinned {
+    if (_pinned == pinned) return;
     _pinned = pinned;
     [self apollo_applyCurrentAppearance];
+    [self apollo_showPinCaption];
 }
 
 - (void)setPinningAvailable:(BOOL)pinningAvailable {
     if (_pinningAvailable == pinningAvailable) return;
     _pinningAvailable = pinningAvailable;
     [self apollo_applyCurrentAppearance];
+    [self apollo_showPinCaption];
 }
 
 - (void)apollo_applyCurrentAppearance {
     UIImageSymbolConfiguration *configuration =
         [UIImageSymbolConfiguration configurationWithPointSize:13.0 weight:UIImageSymbolWeightSemibold];
     BOOL activelyPinned = self.pinned && self.pinningAvailable;
-    self.pinIcon.image = [UIImage systemImageNamed:activelyPinned ? @"pin.fill" : @"pin"
-                               withConfiguration:configuration];
+    NSString *symbol = self.pinningAvailable ? (self.pinned ? @"pin.fill" : @"pin") : @"pin.slash";
+    self.pinIcon.image = [UIImage systemImageNamed:symbol withConfiguration:configuration];
     UIColor *secondary = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel)
         ?: UIColor.secondaryLabelColor;
     self.pinIcon.tintColor = activelyPinned
         ? (ApolloThemeAccentColor() ?: self.tintColor)
-        : (self.pinned ? secondary : UIColor.tertiaryLabelColor);
+        : (self.pinned || !self.pinningAvailable ? secondary : UIColor.tertiaryLabelColor);
     self.pinCaption.textColor = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel)
         ?: UIColor.secondaryLabelColor;
     self.pinControl.accessibilityLabel = self.pinned ? @"Unpin preview" : @"Pin preview";
@@ -125,22 +130,25 @@
                          animations:^{ self.pinIcon.transform = CGAffineTransformIdentity; }
                          completion:nil];
     }
+    if (self.pinDidChange) self.pinDidChange(self.pinned);
+}
 
+- (void)apollo_showPinCaption {
     NSUInteger token = ++self.pinCaptionToken;
     [self.pinCaption.layer removeAllAnimations];
-    self.pinCaption.text = self.pinned
-        ? (self.pinningAvailable ? @"Pinned" : @"Needs room") : @"Unpinned";
+    self.pinCaption.text = self.pinningAvailable
+        ? (self.pinned ? @"Pinned" : @"Unpinned") : @"Needs room";
     self.pinCaption.alpha = 0.0;
     [self setNeedsLayout];
     [self layoutIfNeeded];
     [UIView animateWithDuration:0.15 animations:^{ self.pinCaption.alpha = 1.0; }];
+    if (!self.pinningAvailable) return;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || strongSelf.pinCaptionToken != token) return;
         [UIView animateWithDuration:0.3 animations:^{ strongSelf.pinCaption.alpha = 0.0; }];
     });
-    if (self.pinDidChange) self.pinDidChange(self.pinned);
 }
 
 - (void)layoutSubviews {
