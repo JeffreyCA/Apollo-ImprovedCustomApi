@@ -2682,7 +2682,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                     onSelect:^{ [weakSelf testNotificationBackendConnection]; }];
     testConnection.visible = ^BOOL {
         NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL];
-        return url.length > 0;
+        return [self isNotificationBackendURLValid:url];
 };
                                     
     ApolloSettingsRow *registrationToken =
