@@ -29,11 +29,17 @@
 #import <CoreImage/CoreImage.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <math.h>
 #import "ApolloState.h"
 #import "ApolloCommon.h"
 #import "ApolloScrapeWebView.h"
 #import "ApolloSubredditHighlights.h"
 #import "ApolloDevvitPosts.h"
+#import "ApolloPostReadState.h"
+#import "ApolloThemeRuntime.h"
+#import "ApolloAccountCredentials.h"
+#import "ApolloWebJSON.h"
+#import "ApolloWebSessionStore.h"
 
 #pragma mark - Minimal runtime interfaces
 
@@ -288,7 +294,10 @@ static void ApolloHLReloadFeed(UIViewController *vc) {
 @property (nonatomic, copy) NSString *permalink;   // "/r/sub/comments/..."
 @property (nonatomic, copy) NSString *fullName;    // "t3_xxxx"
 @property (nonatomic, copy) NSString *flairText;
+@property (nonatomic) BOOL hasFlairMetadata; // a known nil means the flair was removed
 @property (nonatomic) long long numComments;
+@property (nonatomic) BOOL hasCommentCount; // missing metadata is not a real zero
+@property (nonatomic, strong) NSDate *createdAt; // Reddit's created_utc, never local discovery time
 @property (nonatomic, strong) NSURL *thumbnailURL;
 @property (nonatomic) BOOL isSpoiler;
 // A live Devvit custom post (match thread, game). When the feed renders those
@@ -470,6 +479,23 @@ static NSString *const kApolloHLDiskCacheDefaultsKey = @"CommunityHighlightsDisk
 static NSUInteger const kApolloHLDiskCacheMaxSubs = 40;
 
 static NSString *ApolloHLStringValue(id v); // defined with the parse helpers below
+
+// Both Reddit JSON and our cache store UTC epoch seconds. An unknown date must
+// stay unknown: assigning the fetch time would make an old highlight look new.
+static NSDate *ApolloHLPostCreationDate(id value) {
+    if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return nil;
+    NSTimeInterval seconds = [value doubleValue];
+    return isfinite(seconds) && seconds > 0 ? [NSDate dateWithTimeIntervalSince1970:seconds] : nil;
+}
+
+static BOOL ApolloHLReadCommentCount(id value, long long *count) {
+    if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return NO;
+    double number = [value doubleValue];
+    if (!isfinite(number) || number < 0 || number >= 0x1p63 || floor(number) != number) return NO;
+    if (count) *count = [value longLongValue];
+    return YES;
+}
+
 // Feed-ownership helpers, defined with the parse helpers below (the disk seed has
 // to apply the same split the fetch does).
 static NSArray<ApolloHLItem *> *ApolloHLCarouselItems(NSArray<ApolloHLItem *> *items);
@@ -482,7 +508,9 @@ static NSDictionary *ApolloHLItemToPlist(ApolloHLItem *it) {
     if (it.permalink) d[@"p"] = it.permalink;
     if (it.fullName) d[@"f"] = it.fullName;
     if (it.flairText) d[@"fl"] = it.flairText;
-    if (it.numComments) d[@"c"] = @(it.numComments);
+    if (it.hasFlairMetadata) d[@"flKnown"] = @YES;
+    if (it.hasCommentCount) d[@"c"] = @(it.numComments);
+    if (it.createdAt) d[@"createdUTC"] = @(it.createdAt.timeIntervalSince1970);
     if (it.thumbnailURL.absoluteString) d[@"u"] = it.thumbnailURL.absoluteString;
     if (it.isSpoiler) d[@"s"] = @YES;
     if (it.isInteractive) d[@"i"] = @YES;
@@ -510,7 +538,12 @@ static NSArray<ApolloHLItem *> *ApolloHLItemsFromPlist(id plist) {
         it.permalink = permalink;
         it.fullName = ApolloHLStringValue(d[@"f"]);
         it.flairText = ApolloHLStringValue(d[@"fl"]);
-        if ([d[@"c"] isKindOfClass:[NSNumber class]]) it.numComments = [d[@"c"] longLongValue];
+        it.hasFlairMetadata = it.flairText != nil ||
+            ([d[@"flKnown"] isKindOfClass:NSNumber.class] && [d[@"flKnown"] boolValue]);
+        long long count = 0;
+        it.hasCommentCount = ApolloHLReadCommentCount(d[@"c"], &count);
+        it.numComments = count;
+        it.createdAt = ApolloHLPostCreationDate(d[@"createdUTC"]);
         NSString *thumb = ApolloHLStringValue(d[@"u"]);
         if (thumb.length) it.thumbnailURL = [NSURL URLWithString:thumb];
         it.isSpoiler = [d[@"s"] isKindOfClass:[NSNumber class]] && [d[@"s"] boolValue];
@@ -735,9 +768,13 @@ static ApolloHLItem *ApolloHLItemFromPostData(NSDictionary *d) {
     item.title = title;
     item.permalink = permalink;
     item.fullName = ApolloHLStringValue(d[@"name"]);
-    item.flairText = ApolloHLStringValue(d[@"link_flair_text"]);
-    NSNumber *nc = d[@"num_comments"];
-    item.numComments = [nc isKindOfClass:[NSNumber class]] ? nc.longLongValue : 0;
+    id flair = d[@"link_flair_text"];
+    item.flairText = ApolloHLStringValue(flair);
+    item.hasFlairMetadata = item.flairText != nil || flair == NSNull.null;
+    long long count = 0;
+    item.hasCommentCount = ApolloHLReadCommentCount(d[@"num_comments"], &count);
+    item.numComments = count;
+    item.createdAt = ApolloHLPostCreationDate(d[@"created_utc"]);
     item.thumbnailURL = ApolloHLThumbnailFromPostData(d);
     item.isSpoiler = [d[@"spoiler"] respondsToSelector:@selector(boolValue)] && [d[@"spoiler"] boolValue];
     item.isInteractive = ApolloDevvitPostDataIsInteractive(d);
@@ -745,9 +782,15 @@ static ApolloHLItem *ApolloHLItemFromPostData(NSDictionary *d) {
     return item;
 }
 
+// An empty children array is a real answer; a 200 HTML/error response is not.
+static NSArray *ApolloHLListingChildren(id root) {
+    if (![root isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *data = [root[@"data"] isKindOfClass:NSDictionary.class] ? root[@"data"] : nil;
+    return [data[@"children"] isKindOfClass:NSArray.class] ? data[@"children"] : nil;
+}
+
 static NSArray<ApolloHLItem *> *ApolloHLParseListing(NSDictionary *root) {
-    NSDictionary *data = [root[@"data"] isKindOfClass:[NSDictionary class]] ? root[@"data"] : nil;
-    NSArray *children = [data[@"children"] isKindOfClass:[NSArray class]] ? data[@"children"] : nil;
+    NSArray *children = ApolloHLListingChildren(root);
     NSMutableArray<ApolloHLItem *> *items = [NSMutableArray array];
     for (NSDictionary *child in children) {
         if (![child isKindOfClass:[NSDictionary class]]) continue;
@@ -763,8 +806,7 @@ static NSArray<ApolloHLItem *> *ApolloHLParseListing(NSDictionary *root) {
 
 // Maps t3 fullname -> item for an /api/info Listing response (no stickied filter).
 static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDictionary *root) {
-    NSDictionary *data = [root[@"data"] isKindOfClass:[NSDictionary class]] ? root[@"data"] : nil;
-    NSArray *children = [data[@"children"] isKindOfClass:[NSArray class]] ? data[@"children"] : nil;
+    NSArray *children = ApolloHLListingChildren(root);
     NSMutableDictionary<NSString *, ApolloHLItem *> *map = [NSMutableDictionary dictionary];
     for (NSDictionary *child in children) {
         if (![child isKindOfClass:[NSDictionary class]]) continue;
@@ -1047,6 +1089,32 @@ static NSArray<ApolloHLItem *> *ApolloHLDropFeedOwned(NSString *sub, NSArray<Apo
 
 static NSString *ApolloHLItemsContentSig(NSArray<ApolloHLItem *> *items); // defined with ApolloHLSignature
 
+// Main queue, like the fetch entry points. Background traffic from another
+// account can leave the global bearer stale or owned by an OAuth account while
+// the foreground account is keyless. Match the gallery's account-scoped read
+// path: synthetic bearers select the active web session in the shared transport,
+// otherwise read the active client's current credential afresh for this request.
+static NSString *ApolloHLRequestBearerToken(void) {
+    if (ApolloWebJSONHasUsableSession()) {
+        return ApolloWebJSONSyntheticBearerTokenForUsername(ApolloActiveWebSessionUsername());
+    }
+    id client = ApolloActiveAccountClient();
+    if (client) {
+        SEL credentialSelector = NSSelectorFromString(@"authorizationCredential");
+        SEL tokenSelector = NSSelectorFromString(@"accessToken");
+        id credential = [client respondsToSelector:credentialSelector]
+            ? ((id (*)(id, SEL))objc_msgSend)(client, credentialSelector) : nil;
+        id accessToken = [credential respondsToSelector:tokenSelector]
+            ? ((id (*)(id, SEL))objc_msgSend)(credential, tokenSelector) : nil;
+        id token = [accessToken respondsToSelector:tokenSelector]
+            ? ((id (*)(id, SEL))objc_msgSend)(accessToken, tokenSelector) : nil;
+        return [token isKindOfClass:NSString.class] && [token length] > 0 ? [token copy] : nil;
+    }
+    // Before Apollo creates its client, retain the anonymous/read bearer its
+    // own request pipeline may already have captured.
+    return [sLatestRedditBearerToken copy];
+}
+
 // Fetches the subreddit's stickied posts and calls completion on the main queue
 // with the (possibly empty) item array. Caches the result. completion may be nil
 // (warm the cache only).
@@ -1066,7 +1134,7 @@ static void ApolloHLFetchHighlights(NSString *subredditName, BOOL force, void (^
     NSMutableCharacterSet *allowed = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
     [allowed addCharactersInString:@"_-"];
     NSString *escaped = [subredditName stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: subredditName;
-    NSString *token = [sLatestRedditBearerToken copy];
+    NSString *token = ApolloHLRequestBearerToken();
     NSString *urlString = token.length > 0
         ? [NSString stringWithFormat:@"https://oauth.reddit.com/r/%@/hot?limit=%ld&raw_json=1", escaped, (long)kApolloHLFetchLimit]
         : [NSString stringWithFormat:@"https://www.reddit.com/r/%@/hot.json?limit=%ld&raw_json=1", escaped, (long)kApolloHLFetchLimit];
@@ -1079,11 +1147,12 @@ static void ApolloHLFetchHighlights(NSString *subredditName, BOOL force, void (^
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : -1;
         id json = data.length > 0 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        BOOL validListing = status == 200 && !error && ApolloHLListingChildren(json) != nil;
         // The stickies in listing order = the feed's leading rows. Split them here,
         // before anything downstream sees them: the row COUNT and the feed-owned
         // MASK describe those rows (the breaker rule needs both), while `items` —
         // what the carousel shows and every cache holds — is the rest.
-        NSArray<ApolloHLItem *> *stickies = [json isKindOfClass:[NSDictionary class]] ? ApolloHLParseListing(json) : @[];
+        NSArray<ApolloHLItem *> *stickies = validListing ? ApolloHLParseListing(json) : @[];
         NSUInteger stickyRows = stickies.count;
         NSUInteger feedOwnedMask = ApolloHLFeedOwnedStickyMask(stickies);
         NSSet<NSString *> *feedOwnedIDs = ApolloHLFeedOwnedIDsFromItems(stickies);
@@ -1100,7 +1169,7 @@ static void ApolloHLFetchHighlights(NSString *subredditName, BOOL force, void (^
             // set on display; the refresh caller rebuilds via ApplyItems only on a real
             // change, so a failed web re-run can't silently downgrade the carousel.
             NSArray<ApolloHLItem *> *completionItems = items;
-            if (!force && (status == 200 || items.count > 0)) {
+            if (!force && validListing) {
                 // The web page can now finish very quickly on a warm WebKit process.
                 // If it wins the race and has already installed the full set, do not
                 // let this slower REST response downgrade the cache/carousel to two.
@@ -1110,7 +1179,7 @@ static void ApolloHLFetchHighlights(NSString *subredditName, BOOL force, void (^
             }
             // Record the inline-sticky count (REST only) for the breaker rule + the
             // freshness timestamp/signature for the stale-while-revalidate re-poll.
-            if (status == 200) {
+            if (validListing) {
                 ApolloHLRestCache()[key] = items;
                 // N counts sticky ROWS (feed-owned ones included — they still occupy
                 // a row and a trailing separator), the mask says which of those rows
@@ -1130,7 +1199,7 @@ static void ApolloHLFetchHighlights(NSString *subredditName, BOOL force, void (^
             // it). Seen live: a stale OAuth token 401s on the first launch after a
             // couple of days away and the sub's carousel vanished until the next
             // successful refetch. Only a 200 may report an empty listing.
-            if (status != 200 && completionItems.count == 0) completionItems = nil;
+            if (!validListing && completionItems.count == 0) completionItems = nil;
             if (completion) completion(completionItems);
         });
     }] resume];
@@ -1184,6 +1253,26 @@ static UIImage *ApolloHLSpoilerBlur(UIImage *image) {
 
 #pragma mark - Card view
 
+// New describes the first day of the post itself, even if highlighted later.
+// Reading, refreshing metadata, reordering pins and relaunching never restart it.
+static NSTimeInterval const kApolloHLNewLifetime = 24.0 * 60.0 * 60.0;
+
+static NSString *ApolloHLItemPostID(ApolloHLItem *item) {
+    NSString *identifier = item.fullName;
+    if ([identifier hasPrefix:@"t3_"]) identifier = [identifier substringFromIndex:3];
+    return identifier.length ? identifier : ApolloHLPostIDFromPermalink(item.permalink);
+}
+
+static NSShadow *ApolloHLTextShadow(void);
+
+static NSString *ApolloHLCommentCountText(long long count) {
+    if (count < 1000) return [NSString stringWithFormat:@"%lld", MAX(0LL, count)];
+    double divisor = count >= 1000000 ? 1000000.0 : 1000.0;
+    NSString *number = [NSString stringWithFormat:@"%.1f", count / divisor];
+    if ([number hasSuffix:@".0"]) number = [number substringToIndex:number.length - 2];
+    return [number stringByAppendingString:count >= 1000000 ? @"m" : @"k"];
+}
+
 // Cards are plain UIViews driven by a tap GESTURE (not UIControls). A tap
 // recognizer coexists with the scroll view's pan, so a horizontal drag scrolls
 // the carousel; UIControls swallow the drag and the carousel can't move.
@@ -1191,8 +1280,113 @@ static UIImage *ApolloHLSpoilerBlur(UIImage *image) {
 @property (nonatomic, copy) NSString *permalink;
 @property (nonatomic, strong) UIImageView *thumbView;
 @property (nonatomic, copy) NSString *thumbToken; // guards async image reuse
+@property (nonatomic, strong) ApolloHLItem *item;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *flairLabel;
+@property (nonatomic, strong) UILabel *commentsLabel;
+@property (nonatomic, strong) UIImageView *commentsIcon;
+@property (nonatomic, strong) UIView *freshnessBadge;
+@property (nonatomic, strong) UILabel *freshnessLabel;
+@property (nonatomic, strong) UIView *freshnessUnreadDot;
+@property (nonatomic, strong) UIView *unreadDot;
+- (void)applyRead:(BOOL)read known:(BOOL)known commentBaseline:(NSNumber *)baseline now:(NSDate *)now;
 @end
-@implementation ApolloHLCardView @end
+@implementation ApolloHLCardView
+- (BOOL)accessibilityActivate {
+    NSString *full = [self.permalink hasPrefix:@"http"] ? self.permalink
+                   : [@"https://reddit.com" stringByAppendingString:self.permalink ?: @""];
+    NSURL *url = [NSURL URLWithString:full];
+    return self.permalink.length && url && ApolloRouteResolvedURLViaApolloScheme(url);
+}
+- (void)applyRead:(BOOL)read known:(BOOL)known commentBaseline:(NSNumber *)baseline now:(NSDate *)now {
+    BOOL hasImage = self.item.thumbnailURL != nil;
+    UIColor *accent = ApolloThemeAccentColor() ?: self.tintColor ?: UIColor.systemBlueColor;
+    long long total = MAX(0LL, self.item.numComments);
+    BOOL hasCommentCount = self.item.hasCommentCount;
+    long long delta = hasCommentCount && baseline ? MAX(0LL, total - baseline.longLongValue) : 0;
+    // Keep the entire card bright while either the post or its comments have
+    // unread activity. The post's unread dot still follows post read state only.
+    BOOL dimCard = read && delta == 0;
+    UIColor *contentColor = hasImage ? [UIColor colorWithWhite:(dimCard ? 0.72 : 1.0) alpha:1.0]
+                                    : (dimCard ? UIColor.secondaryLabelColor : UIColor.labelColor);
+    NSMutableAttributedString *title = [self.titleLabel.attributedText mutableCopy];
+    [title addAttribute:NSForegroundColorAttributeName value:contentColor range:NSMakeRange(0, title.length)];
+    self.titleLabel.attributedText = title;
+
+    NSMutableDictionary *attributes = [@{ NSFontAttributeName: [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold],
+        NSForegroundColorAttributeName: contentColor } mutableCopy];
+    if (hasImage) attributes[NSShadowAttributeName] = ApolloHLTextShadow();
+    NSString *commentText = hasCommentCount ? ApolloHLCommentCountText(total) : @"—";
+    NSMutableAttributedString *comments = [[NSMutableAttributedString alloc] initWithString:commentText attributes:attributes];
+    if (delta > 0) {
+        attributes[NSForegroundColorAttributeName] = accent;
+        [comments appendAttributedString:[[NSAttributedString alloc] initWithString:[@" +" stringByAppendingString:ApolloHLCommentCountText(delta)] attributes:attributes]];
+    }
+    self.commentsLabel.attributedText = comments;
+    self.commentsIcon.tintColor = contentColor;
+    NSMutableAttributedString *flair = [self.flairLabel.attributedText mutableCopy];
+    [flair addAttribute:NSForegroundColorAttributeName value:contentColor range:NSMakeRange(0, flair.length)];
+    self.flairLabel.attributedText = flair;
+    BOOL unread = known && !read;
+
+    NSTimeInterval age = self.item.createdAt ? [now timeIntervalSinceDate:self.item.createdAt] : kApolloHLNewLifetime;
+    BOOL isNew = age >= 0 && age < kApolloHLNewLifetime;
+    BOOL badgeWasVisible = !self.freshnessBadge.hidden;
+    self.freshnessBadge.hidden = !isNew;
+    self.freshnessBadge.backgroundColor = accent;
+    UIColor *resolvedAccent = [accent resolvedColorWithTraitCollection:self.traitCollection];
+    UIColor *badgeText = ApolloColorIsLight(resolvedAccent) ? UIColor.blackColor : UIColor.whiteColor;
+    self.freshnessLabel.textColor = badgeText;
+    self.freshnessUnreadDot.backgroundColor = badgeText;
+    self.freshnessUnreadDot.hidden = !unread;
+    self.unreadDot.backgroundColor = accent;
+    self.unreadDot.hidden = !unread || isNew;
+
+    // One combined badge: its right edge and the word New stay fixed while
+    // the fill grows left from 32pt to 44pt to contain the unread dot. Reading
+    // removes that dot and contracts the pill, without restarting its day.
+    // After New expires, an unread post keeps a standalone accent-colored dot.
+    // Prepare this two-row footer here, never from layoutSubviews.
+    CGFloat right = kApolloHLCardWidth - 10.0;
+    CGFloat badgeWidth = unread ? 44.0 : 32.0;
+    if (isNew) {
+        right -= badgeWidth + 6.0;
+    } else if (unread) {
+        self.unreadDot.frame = CGRectMake(right - 7.0, kApolloHLCardHeight - 22.0, 7.0, 7.0);
+        right -= 12.0;
+    }
+    BOOL animateResize = self.window && isNew && badgeWasVisible &&
+        self.freshnessBadge.bounds.size.width > 0 &&
+        fabs(self.freshnessBadge.bounds.size.width - badgeWidth) > 0.5 &&
+        !UIAccessibilityIsReduceMotionEnabled();
+    void (^updateFooter)(void) = ^{
+        self.freshnessBadge.frame = CGRectMake(kApolloHLCardWidth - 10.0 - badgeWidth,
+                                              kApolloHLCardHeight - 27.0, badgeWidth, 17.0);
+        // Preserve the original 32pt text area, including under Apollo's font
+        // scaling. Its center remains fixed while only the pill's left grows.
+        self.freshnessLabel.frame = CGRectMake(badgeWidth - 32.0, 0.0, 32.0, 17.0);
+        // Pin the inner dot in card coordinates too. In the 32pt pill it lies
+        // just outside the clipped bounds, so expansion reveals it through the
+        // fill instead of briefly drawing a white/black dot on the thumbnail.
+        self.freshnessUnreadDot.frame = CGRectMake(badgeWidth - 37.0, 6.0, 5.0, 5.0);
+        self.flairLabel.frame = CGRectMake(10.0, kApolloHLCardHeight - 26.0, MAX(0.0, right - 10.0), 16.0);
+    };
+    if (animateResize) {
+        [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:updateFooter completion:nil];
+    } else {
+        updateFooter();
+    }
+    self.accessibilityLabel = self.item.title;
+    NSMutableArray *details = [NSMutableArray array];
+    if (known) [details addObject:read ? @"Read" : @"Unread"];
+    if (isNew) [details addObject:@"New post, created less than 24 hours ago"];
+    if (self.flairLabel.text.length) [details addObject:self.flairLabel.text];
+    [details addObject:hasCommentCount ? [NSString stringWithFormat:@"%lld comments", total] : @"Comment count unavailable"];
+    if (delta > 0) [details addObject:[NSString stringWithFormat:@"%lld new since last read", delta]];
+    self.accessibilityValue = [details componentsJoinedByString:@", "];
+}
+@end
 
 static UIColor *ApolloHLCardFillColor(void) {
     return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
@@ -1214,6 +1408,10 @@ static ApolloHLCardView *ApolloHLBuildCard(ApolloHLItem *item) {
     CGFloat W = kApolloHLCardWidth, H = kApolloHLCardHeight, pad = 10.0;
     ApolloHLCardView *card = [[ApolloHLCardView alloc] initWithFrame:CGRectMake(0, 0, W, H)];
     card.permalink = item.permalink;
+    card.item = item;
+    card.isAccessibilityElement = YES;
+    card.accessibilityTraits = UIAccessibilityTraitButton;
+    card.accessibilityHint = @"Opens post";
     card.layer.cornerRadius = 14.0;
     card.layer.cornerCurve = kCACornerCurveContinuous;
     card.clipsToBounds = YES;
@@ -1312,6 +1510,7 @@ static ApolloHLCardView *ApolloHLBuildCard(ApolloHLItem *item) {
     // Title — top-aligned, white over an image, label color on a plain card.
     UILabel *title = [[UILabel alloc] init];
     title.numberOfLines = 4;
+    title.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
     title.userInteractionEnabled = NO;
     NSMutableDictionary *attrs = [@{
         NSFontAttributeName: [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold],
@@ -1319,40 +1518,66 @@ static ApolloHLCardView *ApolloHLBuildCard(ApolloHLItem *item) {
     } mutableCopy];
     if (hasImage) attrs[NSShadowAttributeName] = ApolloHLTextShadow();
     title.attributedText = [[NSAttributedString alloc] initWithString:item.title attributes:attrs];
-    CGSize tfit = [title sizeThatFits:CGSizeMake(W - pad * 2, H - titleTop - 16.0)];
-    title.frame = CGRectMake(pad, titleTop, W - pad * 2, MIN(tfit.height, H - titleTop - 16.0));
+    // Leave the bottom 36pt for comments above flair. Round down to complete
+    // title lines; spoiler cards retain their existing separate top badge.
+    CGFloat titleLimit = floor((H - pad - 36.0 - titleTop) / title.font.lineHeight) * title.font.lineHeight;
+    CGSize tfit = [title sizeThatFits:CGSizeMake(W - pad * 2, MAX(0.0, titleLimit))];
+    title.frame = CGRectMake(pad, titleTop, W - pad * 2, MIN(tfit.height, MAX(0.0, titleLimit)));
     [card addSubview:title];
+    card.titleLabel = title;
 
-    // Meta (flair or comment count) bottom-left.
+    // Comments above flair, with the combined New/unread badge at bottom-right. Keep
+    // the original 160x120 card size and always preserve the flair row.
+    UIImageView *commentsIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"bubble.right"]];
+    commentsIcon.frame = CGRectMake(pad, H - pad - 32.0, 12.0, 12.0);
+    commentsIcon.contentMode = UIViewContentModeScaleAspectFit;
+    [card addSubview:commentsIcon];
+    card.commentsIcon = commentsIcon;
+    UILabel *commentsLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 16.0, H - pad - 34.0, W - pad * 2 - 16.0, 16.0)];
+    [card addSubview:commentsLabel];
+    card.commentsLabel = commentsLabel;
     NSString *flair = ApolloHLStripEmojiTokens(item.flairText);
-    NSString *meta = flair.length ? flair
-                   : (item.numComments > 0 ? [NSString stringWithFormat:@"%lld comments", item.numComments] : nil);
-    if (meta.length) {
+    if (flair.length) {
         UILabel *metaLabel = [[UILabel alloc] init];
         metaLabel.userInteractionEnabled = NO;
         NSMutableDictionary *mattrs = [@{
             NSFontAttributeName: [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold],
-            NSForegroundColorAttributeName: hasImage ? [UIColor colorWithWhite:1.0 alpha:0.95] : UIColor.secondaryLabelColor,
+            NSForegroundColorAttributeName: hasImage ? UIColor.whiteColor : UIColor.labelColor,
         } mutableCopy];
         if (hasImage) mattrs[NSShadowAttributeName] = ApolloHLTextShadow();
-        metaLabel.attributedText = [[NSAttributedString alloc] initWithString:meta attributes:mattrs];
+        metaLabel.attributedText = [[NSAttributedString alloc] initWithString:flair attributes:mattrs];
+        metaLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         metaLabel.frame = CGRectMake(pad, H - pad - 15.0, W - pad * 2, 16.0);
         [card addSubview:metaLabel];
+        card.flairLabel = metaLabel;
     }
+    UIView *badge = [[UIView alloc] init];
+    badge.layer.cornerRadius = 5.0;
+    badge.clipsToBounds = YES;
+    UILabel *badgeLabel = [[UILabel alloc] init];
+    badgeLabel.text = @"New";
+    badgeLabel.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightSemibold];
+    badgeLabel.textAlignment = NSTextAlignmentCenter;
+    [badge addSubview:badgeLabel];
+    UIView *badgeDot = [[UIView alloc] init];
+    badgeDot.layer.cornerRadius = 2.5;
+    [badge addSubview:badgeDot];
+    [card addSubview:badge];
+    card.freshnessBadge = badge;
+    card.freshnessLabel = badgeLabel;
+    card.freshnessUnreadDot = badgeDot;
+    UIView *dot = [[UIView alloc] init];
+    dot.layer.cornerRadius = 3.5;
+    [card addSubview:dot];
+    card.unreadDot = dot;
     return card;
 }
 
 #pragma mark - Carousel view
 
-// The cards are UIControls; UIScrollView's default touchesShouldCancelInContentView:
-// returns NO for UIControl subviews, so a drag that starts on a card is swallowed
-// as a tap and the carousel never scrolls. Returning YES lets a drag take over.
-// A UIScrollView IS its own pan gesture's delegate (and forbids replacing it —
-// setting panGestureRecognizer.delegate throws). So we subclass and implement the
-// simultaneous-recognition delegate method here: it lets the carousel's horizontal
-// pan recognize ALONGSIDE the feed table's vertical pan, so a horizontal drag is
-// never swallowed by the table (the cause of the "only certain spots scroll"
-// flakiness). The other delegate methods stay UIScrollView's own.
+// UIScrollView owns its pan gesture's delegate, so simultaneous recognition must
+// be implemented in a subclass. Let the carousel's horizontal pan coexist with
+// the feed's vertical pan so the table doesn't swallow drags that start on cards.
 @interface ApolloHLCarouselScrollView : UIScrollView <UIGestureRecognizerDelegate, UIScrollViewDelegate>
 // The feed scroll view whose vertical pan we've paused for the duration of a
 // horizontal carousel drag (weak so a torn-down feed can't dangle).
@@ -1446,8 +1671,70 @@ static void ApolloHLToggleCollapsed(NSString *sub); // fwd (defined after ApplyI
 @property (nonatomic, copy) NSString *signature;
 @property (nonatomic, copy) NSString *subreddit; // for the collapse toggle
 @property (nonatomic, weak) UIViewController *hostViewController;
+@property (nonatomic, copy) NSArray<ApolloHLItem *> *items;
+@property (nonatomic, strong) NSTimer *badgeExpiryTimer;
+- (void)refreshReadState;
 @end
 @implementation ApolloHLCarouselView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        // No carousel rebuild on read/comment changes: preserve the horizontal
+        // position and the feed's header geometry on the return from comments.
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        [center addObserver:self selector:@selector(readStateChanged:) name:ApolloPostReadStateDidChangeNotification object:nil];
+        [center addObserver:self selector:@selector(readStateChanged:) name:UIApplicationDidBecomeActiveNotification object:nil];
+        [center addObserver:self selector:@selector(readStateChanged:) name:NSSystemClockDidChangeNotification object:nil];
+    }
+    return self;
+}
+- (void)dealloc {
+    [self.badgeExpiryTimer invalidate];
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    [self.badgeExpiryTimer invalidate];
+    self.badgeExpiryTimer = nil;
+    if (self.window) [self refreshReadState];
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (self.window) [self refreshReadState];
+}
+- (void)readStateChanged:(NSNotification *)notification {
+    if (self.window) [self refreshReadState];
+}
+- (void)refreshReadState {
+    if (![NSThread isMainThread]) {
+        __weak ApolloHLCarouselView *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf refreshReadState]; });
+        return;
+    }
+    [self.badgeExpiryTimer invalidate];
+    self.badgeExpiryTimer = nil;
+    if (!self.scrollView) return;
+    NSArray<NSString *> *readIDs = ApolloReadPostIDsSnapshot();
+    NSSet *readSet = readIDs ? [NSSet setWithArray:readIDs] : nil;
+    NSDictionary *commentTotals = ApolloLastReadCommentTotalsSnapshot();
+    NSDate *now = [NSDate date];
+    NSTimeInterval nextExpiry = kApolloHLNewLifetime + 1.0;
+    for (UIView *view in self.scrollView.subviews) {
+        if (![view isKindOfClass:ApolloHLCardView.class]) continue;
+        ApolloHLCardView *card = (ApolloHLCardView *)view;
+        NSString *pid = ApolloHLItemPostID(card.item);
+        BOOL read = pid.length && [readSet containsObject:pid];
+        NSNumber *baseline = pid.length ? commentTotals[pid] : nil;
+        [card applyRead:read known:(readIDs != nil) commentBaseline:baseline now:now];
+        NSTimeInterval remaining = card.item.createdAt ? kApolloHLNewLifetime - [now timeIntervalSinceDate:card.item.createdAt] : 0;
+        if (remaining > 0 && remaining <= kApolloHLNewLifetime) nextExpiry = MIN(nextExpiry, remaining);
+    }
+    if (self.window && nextExpiry <= kApolloHLNewLifetime) {
+        __weak ApolloHLCarouselView *weakSelf = self;
+        self.badgeExpiryTimer = [NSTimer scheduledTimerWithTimeInterval:MAX(0.1, nextExpiry + 0.1) repeats:NO block:^(__unused NSTimer *timer) {
+            [weakSelf refreshReadState];
+        }];
+    }
+}
 // Tapping the title row toggles (and persists) the collapsed state for this sub.
 - (void)headerTapped:(UITapGestureRecognizer *)gesture {
     if (self.subreddit.length) ApolloHLToggleCollapsed(self.subreddit);
@@ -1476,18 +1763,20 @@ static void ApolloHLToggleCollapsed(NSString *sub); // fwd (defined after ApplyI
 
 // Presentation signature includes metadata as well as post identity. The fast web
 // path intentionally paints titles/links before /api/info enrichment returns; once
-// thumbnails/flair/comment counts arrive, this signature makes the second ApplyItems
-// call rebuild those same cards with their richer presentation.
+// thumbnails, flair, counts and creation dates arrive, this signature makes the
+// second ApplyItems call rebuild those same cards with their richer presentation.
 static NSString *ApolloHLItemsPresentationSig(NSArray<ApolloHLItem *> *items) {
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     for (ApolloHLItem *it in items) {
-        [parts addObject:[NSString stringWithFormat:@"%@\x1F%@\x1F%@\x1F%@\x1F%lld\x1F%d",
+        [parts addObject:[NSString stringWithFormat:@"%@\x1F%@\x1F%@\x1F%@\x1F%lld\x1F%d\x1F%d\x1F%.3f",
                           it.fullName ?: it.permalink ?: @"?",
                           it.title ?: @"",
                           it.thumbnailURL.absoluteString ?: @"",
                           it.flairText ?: @"",
                           it.numComments,
-                          it.isSpoiler]];
+                          it.hasCommentCount,
+                          it.isSpoiler,
+                          it.createdAt.timeIntervalSince1970]];
     }
     return [parts componentsJoinedByString:@"\x1E"];
 }
@@ -1499,12 +1788,15 @@ static NSString *ApolloHLSignature(NSString *sub, NSArray<ApolloHLItem *> *items
     return [state stringByAppendingString:ApolloHLItemsPresentationSig(items)];
 }
 
-// Content-only signature (no collapse-state prefix) used to detect when a subreddit's
-// pinned set actually changes between fetches — so a background re-poll rebuilds only
-// on a real change, not on every poll.
+// Ordered post identities used to distinguish pin changes from metadata updates.
+// A changed set can require a new web harvest; metadata uses the presentation
+// signature to decide whether the displayed cards need rebuilding.
 static NSString *ApolloHLItemsContentSig(NSArray<ApolloHLItem *> *items) {
     NSMutableArray *ids = [NSMutableArray array];
-    for (ApolloHLItem *it in items) [ids addObject:(it.fullName ?: it.permalink ?: @"?")];
+    // REST/enriched items carry t3_ fullnames, while freshly scraped cards can
+    // have only permalinks. Compare their shared post identity so a metadata
+    // refresh cannot look like a new pin set or reset the carousel's position.
+    for (ApolloHLItem *it in items) [ids addObject:(ApolloHLItemPostID(it) ?: it.permalink ?: @"?")];
     return [ids componentsJoinedByString:@"|"];
 }
 
@@ -1522,6 +1814,7 @@ static ApolloHLCarouselView *ApolloHLBuildCarousel(NSString *sub, NSArray<Apollo
     ApolloHLCarouselView *view = [[ApolloHLCarouselView alloc] initWithFrame:CGRectMake(0, 0, width, height)];
     view.backgroundColor = [UIColor clearColor];
     view.subreddit = sub.lowercaseString;
+    view.items = items;
     view.signature = ApolloHLSignature(sub, items);
 
     // Section title row: pin glyph + "Community Highlights" + collapse chevron.
@@ -1575,8 +1868,20 @@ static ApolloHLCarouselView *ApolloHLBuildCarousel(NSString *sub, NSArray<Apollo
     }
     x = x - kApolloHLCardSpacing + kApolloHLSidePadding; // trailing inset
     scroll.contentSize = CGSizeMake(x, kApolloHLCardHeight);
+    [view refreshReadState];
 
     return view;
+}
+
+// Metadata refreshes need new labels/images, but their cards keep the same
+// order. Carry the horizontal position across those rebuilds in both header
+// modes; read state itself is refreshed in place above.
+static void ApolloHLPreserveCarouselPosition(UIView *oldView, ApolloHLCarouselView *newView) {
+    if (![oldView isKindOfClass:ApolloHLCarouselView.class]) return;
+    ApolloHLCarouselView *old = (ApolloHLCarouselView *)oldView;
+    if (![ApolloHLItemsContentSig(old.items) isEqualToString:ApolloHLItemsContentSig(newView.items)]) return;
+    CGFloat maxX = MAX(0.0, newView.scrollView.contentSize.width - newView.scrollView.bounds.size.width);
+    newView.scrollView.contentOffset = CGPointMake(MIN(MAX(0.0, old.scrollView.contentOffset.x), maxX), 0);
 }
 
 static void ApolloHLForEachPostsVC(void (^block)(UIViewController *postsVC)); // fwd
@@ -1632,6 +1937,7 @@ static void ApolloHLClearDeDup(NSString *subreddit) {
 }
 - (void)installCarousel:(UIView *)carousel {
     if (self.hlCarouselView == carousel) return;
+    if ([carousel isKindOfClass:ApolloHLCarouselView.class]) ApolloHLPreserveCarouselPosition(self.hlCarouselView, (ApolloHLCarouselView *)carousel);
     [self.hlCarouselView removeFromSuperview];
     self.hlCarouselView = carousel;
     if (carousel) [self addSubview:carousel];
@@ -1640,7 +1946,7 @@ static void ApolloHLClearDeDup(NSString *subreddit) {
 @end
 
 static void ApolloHLApplyStickyCountToTable(UIViewController *vc, NSString *subreddit); // defined near ApolloHLInstall
-static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingView, void (^apply)(void)); // defined with InstallCarousel
+static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *previousCarousel, UIView *appearingView, void (^apply)(void)); // defined with InstallCarousel
 
 UIView *ApolloHLHeaderOriginalSubstitute(NSString *subreddit, UIViewController *hostVC, UIView *realOriginalHeader, CGFloat width) {
     if (!sCommunityHighlights || subreddit.length == 0) return realOriginalHeader;
@@ -1689,7 +1995,7 @@ UIView *ApolloHLHeaderOriginalSubstitute(NSString *subreddit, UIViewController *
                 UITableView *tv = ApolloHLFindTableView(postsVC);
                 // Grow the header through the snap-free applier so a late arrival
                 // (posts already visible) slides in instead of shoving the feed (#909).
-                ApolloHLApplyHeaderChange(tv, newCarousel, ^{
+                ApolloHLApplyHeaderChange(tv, nil, newCarousel, ^{
                     [c installCarousel:newCarousel];
                     if (wrapper && tv && tv.tableHeaderView == wrapper) {
                         CGRect wf = wrapper.frame;
@@ -1821,11 +2127,26 @@ static void ApolloHLPinCarouselToTop(UITableView *tv, int attempt) {
 //    this table until the deferred apply lands.
 
 // The settled-table application: called only when no scroll is in flight.
-static void ApolloHLApplyHeaderChangeNow(UITableView *tableView, UIView *appearingView, void (^apply)(void)) {
+static void ApolloHLApplyHeaderChangeNow(UITableView *tableView, UIView *previousCarousel, UIView *appearingView, void (^apply)(void)) {
     CGFloat oldHeight = tableView.tableHeaderView.frame.size.height;
     CGFloat topY = -tableView.adjustedContentInset.top;
     BOOL atTop = (tableView.contentOffset.y - topY) <= 0.5;
     if (atTop) {
+        // REST, the fuller web list, and /api/info can each arrive separately.
+        // Once the carousel is visible, replacing its cards at the same height
+        // must not replay the entrance fade and briefly blank loaded content.
+        // Keep the slide/fade below for first insertion and collapse/expand.
+        BOOL sameHeight = previousCarousel &&
+            fabs(previousCarousel.frame.size.height - appearingView.frame.size.height) <= 0.5;
+        if (sameHeight) {
+            [UIView performWithoutAnimation:^{
+                appearingView.alpha = 1.0;
+                apply();
+                [tableView layoutIfNeeded];
+            }];
+            ApolloLog(@"[Highlights] updated existing carousel without fade (height %.0f)", appearingView.frame.size.height);
+            return;
+        }
         appearingView.alpha = 0.0;
         [UIView animateWithDuration:0.3 delay:0
                             options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction
@@ -1853,7 +2174,7 @@ static void ApolloHLApplyHeaderChangeNow(UITableView *tableView, UIView *appeari
     }
 }
 
-static void ApolloHLApplyHeaderChangeAttempt(UITableView *tableView, UIView *appearingView, void (^apply)(void), NSNumber *gen, int attempt) {
+static void ApolloHLApplyHeaderChangeAttempt(UITableView *tableView, UIView *previousCarousel, UIView *appearingView, void (^apply)(void), NSNumber *gen, int attempt) {
     if (!tableView) return; // table died while deferred → the change is moot
     NSNumber *current = objc_getAssociatedObject(tableView, kApolloHLHeaderChangeGenKey);
     if (gen && current && ![gen isEqualToNumber:current]) return; // superseded by a newer change
@@ -1862,7 +2183,7 @@ static void ApolloHLApplyHeaderChangeAttempt(UITableView *tableView, UIView *app
         objc_setAssociatedObject(tableView, kApolloHLHeaderChangePendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         __weak UITableView *weakTable = tableView;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            ApolloHLApplyHeaderChangeAttempt(weakTable, appearingView, apply, gen, attempt + 1);
+            ApolloHLApplyHeaderChangeAttempt(weakTable, previousCarousel, appearingView, apply, gen, attempt + 1);
         });
         return;
     }
@@ -1873,10 +2194,10 @@ static void ApolloHLApplyHeaderChangeAttempt(UITableView *tableView, UIView *app
         apply(); // nothing visible can shift
         return;
     }
-    ApolloHLApplyHeaderChangeNow(tableView, appearingView, apply);
+    ApolloHLApplyHeaderChangeNow(tableView, previousCarousel, appearingView, apply);
 }
 
-static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingView, void (^apply)(void)) {
+static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *previousCarousel, UIView *appearingView, void (^apply)(void)) {
     if (!apply) return;
     if (!tableView || !tableView.window || tableView.indexPathsForVisibleRows.count == 0) {
         apply();
@@ -1885,7 +2206,16 @@ static void ApolloHLApplyHeaderChange(UITableView *tableView, UIView *appearingV
     // New generation: any change still waiting on a scroll to settle is now stale.
     NSUInteger gen = [objc_getAssociatedObject(tableView, kApolloHLHeaderChangeGenKey) unsignedIntegerValue] + 1;
     objc_setAssociatedObject(tableView, kApolloHLHeaderChangeGenKey, @(gen), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    ApolloHLApplyHeaderChangeAttempt(tableView, appearingView, apply, @(gen), 0);
+    ApolloHLApplyHeaderChangeAttempt(tableView, previousCarousel, appearingView, apply, @(gen), 0);
+}
+
+static ApolloHLCarouselView *ApolloHLInstalledCarousel(UITableView *tableView) {
+    UIView *header = tableView.tableHeaderView;
+    if (!header || !objc_getAssociatedObject(header, kApolloHLWrapperMarkerKey)) return nil;
+    for (UIView *child in header.subviews) {
+        if ([child isKindOfClass:ApolloHLCarouselView.class]) return (ApolloHLCarouselView *)child;
+    }
+    return nil;
 }
 
 static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView, NSArray<ApolloHLItem *> *items, NSString *subreddit) {
@@ -1948,9 +2278,15 @@ static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView
         return;
     }
 
+    // Read the live header rather than the newest associated view: successive
+    // metadata responses can replace a pending build during an active scroll.
+    // A genuinely pending first insertion still has no installed carousel.
+    UIView *previousCarousel = ApolloHLInstalledCarousel(tableView);
+
     // Build fresh.
     ApolloHLCarouselView *carousel = ApolloHLBuildCarousel(subreddit, items, width);
     if (!carousel) return;
+    ApolloHLPreserveCarouselPosition(objc_getAssociatedObject(vc, kApolloHLCarouselKey), carousel);
     carousel.hostViewController = vc;
 
     UIView *currentHeader = tableView.tableHeaderView;
@@ -1972,9 +2308,9 @@ static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView
     objc_setAssociatedObject(tableView, kApolloHLCarouselKey, carousel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // Route through the snap-free applier: a cold late install (posts already on
-    // screen) slides in smoothly, and this also animates collapse/expand toggles
-    // (which rebuild through here via their signature change).
-    ApolloHLApplyHeaderChange(tableView, carousel, ^{
+    // screen) slides in smoothly, as do collapse/expand toggles. Same-height
+    // replacements keep their full opacity while the richer card data lands.
+    ApolloHLApplyHeaderChange(tableView, previousCarousel, carousel, ^{
         objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         tableView.tableHeaderView = newWrapper;
         objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2050,6 +2386,18 @@ static void ApolloHLWebChallengeReset(NSString *sub) {
     [ApolloHLWebChallengeLastTry() removeObjectForKey:sub];
 }
 
+// Main-queue request ordering. Identity equality does not establish freshness:
+// an older /api/info response can contain the same pins with older comment
+// totals. Refresh generations invalidate prior web/metadata work as soon as a
+// new refresh starts; info generations order requests within that refresh.
+static NSMutableDictionary<NSString *, NSNumber *> *ApolloHLRefreshGenerations(void) {
+    static NSMutableDictionary *d; static dispatch_once_t o; dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; }); return d;
+}
+static NSMutableDictionary<NSString *, NSNumber *> *ApolloHLInfoGenerations(void) {
+    static NSMutableDictionary *d; static dispatch_once_t o; dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; }); return d;
+}
+static NSUInteger sApolloHLModeGeneration = 0;
+
 // Rebuild the carousel(s) for `sub` with a new (fuller) item set — used when the
 // WebView upgrade lands. Handles both placement modes.
 static void ApolloHLApplyItems(NSString *sub, NSArray<ApolloHLItem *> *items) {
@@ -2069,9 +2417,9 @@ static void ApolloHLApplyItems(NSString *sub, NSArray<ApolloHLItem *> *items) {
             UIView *newCarousel = ApolloHLBuildCarousel(sub, items, w);
             UIView *wrapper = c.superview;
             UITableView *tv = ApolloHLFindTableView(postsVC);
-            // Same snap-free growth as the cold-fetch path: rebuilds that change
-            // height (collapse toggle, first web upgrade) slide instead of snap.
-            ApolloHLApplyHeaderChange(tv, newCarousel, ^{
+            // Animate real height changes, while replacing already-visible cards
+            // without fading them again for each web/metadata response.
+            ApolloHLApplyHeaderChange(tv, c.hlCarouselView, newCarousel, ^{
                 [c installCarousel:newCarousel];
                 if (wrapper && tv && tv.tableHeaderView == wrapper) {
                     CGRect wf = wrapper.frame; wf.size.height = CGRectGetMaxY(c.frame); wrapper.frame = wf;
@@ -2097,13 +2445,37 @@ static void ApolloHLToggleCollapsed(NSString *sub) {
     if (items.count > 0) ApolloHLApplyItems(key, items);
 }
 
-// The WebView reliably gives us the LIST of highlights (titles + permalinks, in
-// order) but its DOM thumbnails are lazy-loaded/unreliable for cards scrolled off
-// screen. So we don't trust the DOM image: we take the post ids from the web set
-// and batch-fetch each post's real data via the API's /api/info endpoint — the same
-// reliable source that gives the first 2 their crisp thumbnails. Thumbnail/flair/
-// comment-count are filled from /api/info, then the API stickied cache, then the
-// web DOM as a last resort. Web order is preserved. `completion` runs on main.
+// A web harvest supplies ordered titles/links but little metadata, especially
+// for off-screen cards. Keep their cached presentation until REST or /api/info
+// supplies a real replacement; never make the new DOM objects look empty first.
+static void ApolloHLRestoreCachedMetadata(NSArray<ApolloHLItem *> *webItems,
+                                          NSArray<ApolloHLItem *> *cachedItems) {
+    NSMutableDictionary<NSString *, ApolloHLItem *> *cachedByID = [NSMutableDictionary dictionary];
+    for (ApolloHLItem *cached in cachedItems) {
+        NSString *pid = ApolloHLItemPostID(cached);
+        if (pid.length) cachedByID[pid] = cached;
+    }
+    for (ApolloHLItem *item in webItems) {
+        ApolloHLItem *cached = cachedByID[ApolloHLItemPostID(item) ?: @""];
+        if (!cached) continue;
+        if (!item.fullName.length) item.fullName = cached.fullName;
+        if (!item.thumbnailURL) item.thumbnailURL = cached.thumbnailURL;
+        if (!item.hasFlairMetadata && !item.flairText.length) {
+            item.flairText = cached.flairText;
+            item.hasFlairMetadata = cached.hasFlairMetadata || cached.flairText != nil;
+        }
+        if (!item.hasCommentCount && cached.hasCommentCount) {
+            item.numComments = cached.numComments;
+            item.hasCommentCount = YES;
+        }
+        item.createdAt = item.createdAt ?: cached.createdAt;
+        // Retaining a spoiler mask is safe while metadata is unavailable. Pin
+        // and interactive flags deliberately come only from the fresh API set:
+        // stale feed-ownership flags could incorrectly remove a visible card.
+        item.isSpoiler |= cached.isSpoiler;
+    }
+}
+
 static void ApolloHLMergeMetadata(NSArray<ApolloHLItem *> *webItems,
                                   NSArray<ApolloHLItem *> *apiItems,
                                   NSDictionary<NSString *, ApolloHLItem *> *infoMap) {
@@ -2117,9 +2489,24 @@ static void ApolloHLMergeMetadata(NSArray<ApolloHLItem *> *webItems,
         ApolloHLItem *info = pid.length ? infoMap[[@"t3_" stringByAppendingString:pid]] : nil;
         ApolloHLItem *api = pid.length ? apiByID[pid] : nil;
         if (!w.fullName.length) w.fullName = info.fullName ?: api.fullName;
-        if (!w.thumbnailURL) w.thumbnailURL = info.thumbnailURL ?: api.thumbnailURL;
-        if (!w.flairText.length) w.flairText = info.flairText ?: api.flairText;
-        if (w.numComments == 0) w.numComments = info ? info.numComments : (api ? api.numComments : 0);
+        w.thumbnailURL = info.thumbnailURL ?: api.thumbnailURL ?: w.thumbnailURL;
+        // An explicit null from Reddit removes a flair. A missing field or a
+        // failed request leaves cached metadata intact until a real answer.
+        ApolloHLItem *flairSource = info.hasFlairMetadata ? info : (api.hasFlairMetadata ? api : nil);
+        if (flairSource) {
+            w.flairText = flairSource.flairText;
+            w.hasFlairMetadata = YES;
+        }
+        // Comment totals are live metadata, not a fill-once field. A stable pin
+        // can gain comments for weeks without its identity/title ever changing.
+        ApolloHLItem *countSource = info.hasCommentCount ? info : (api.hasCommentCount ? api : nil);
+        if (countSource) {
+            w.numComments = countSource.numComments;
+            w.hasCommentCount = YES;
+        }
+        // DOM-only cards wait for a real creation timestamp. Failed/partial
+        // enrichment must not erase a creation date we already know.
+        w.createdAt = info.createdAt ?: api.createdAt ?: w.createdAt;
         if (!w.isSpoiler) w.isSpoiler = info ? info.isSpoiler : (api ? api.isSpoiler : NO);
         // The DOM gives neither selftext nor pin state, so a web item only learns
         // it is a live interactive post — and whether it is one of the classic
@@ -2130,27 +2517,43 @@ static void ApolloHLMergeMetadata(NSArray<ApolloHLItem *> *webItems,
     }
 }
 
-static void ApolloHLEnrichViaInfo(NSArray<ApolloHLItem *> *webItems, NSArray<ApolloHLItem *> *apiItems, void (^completion)(NSArray<ApolloHLItem *> *)) {
+// Fetch reliable metadata for every web highlight, including the cards absent
+// from /hot. Merge into a private copy and deliver current results on main.
+static void ApolloHLEnrichViaInfo(NSString *sub, NSUInteger refreshGeneration,
+                                NSArray<ApolloHLItem *> *webItems, NSArray<ApolloHLItem *> *apiItems,
+                                void (^completion)(NSArray<ApolloHLItem *> *)) {
+    NSUInteger infoGeneration = [ApolloHLInfoGenerations()[sub] unsignedIntegerValue] + 1;
+    ApolloHLInfoGenerations()[sub] = @(infoGeneration);
+    NSUInteger modeGeneration = sApolloHLModeGeneration;
+    // The web fast path may already have installed these objects as the live
+    // cache/card models. Enrich a private copy so even an obsolete response can
+    // never change visible counts before its completion's freshness check.
+    NSArray<ApolloHLItem *> *workingItems = ApolloHLItemsFromPlist(ApolloHLItemsToPlist(webItems)) ?: @[];
     NSMutableArray<NSString *> *fullnames = [NSMutableArray array];
-    for (ApolloHLItem *w in webItems) {
+    for (ApolloHLItem *w in workingItems) {
         NSString *pid = ApolloHLPostIDFromPermalink(w.permalink);
         if (pid.length) [fullnames addObject:[@"t3_" stringByAppendingString:pid]];
     }
 
     void (^finish)(NSDictionary<NSString *, ApolloHLItem *> *) = ^(NSDictionary<NSString *, ApolloHLItem *> *infoMap) {
-        // `items` may already be the live main-queue cache because the fast path
-        // paints it before enrichment. Keep both mutation and callback on main.
         dispatch_async(dispatch_get_main_queue(), ^{
-            ApolloHLMergeMetadata(webItems, apiItems, infoMap);
-            completion(webItems);
+            if (!sCommunityHighlights || !sCommunityHighlightsWeb ||
+                modeGeneration != sApolloHLModeGeneration ||
+                refreshGeneration != [ApolloHLRefreshGenerations()[sub] unsignedIntegerValue] ||
+                infoGeneration != [ApolloHLInfoGenerations()[sub] unsignedIntegerValue]) {
+                ApolloLog(@"[Highlights] dropped superseded metadata response r/%@", sub);
+                return;
+            }
+            ApolloHLMergeMetadata(workingItems, apiItems, infoMap);
+            completion(workingItems);
         });
     };
 
     if (fullnames.count == 0) { finish(@{}); return; }
     NSString *idParam = [fullnames componentsJoinedByString:@","];
-    NSString *token = [sLatestRedditBearerToken copy];
+    NSString *token = ApolloHLRequestBearerToken();
     NSString *urlString = token.length > 0
-        ? [NSString stringWithFormat:@"https://oauth.reddit.com/api/info?id=%@&raw_json=1", idParam]
+        ? [NSString stringWithFormat:@"https://oauth.reddit.com/api/info.json?id=%@&raw_json=1", idParam]
         : [NSString stringWithFormat:@"https://www.reddit.com/api/info.json?id=%@&raw_json=1", idParam];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlString]];
     request.timeoutInterval = 15.0;
@@ -2159,8 +2562,11 @@ static void ApolloHLEnrichViaInfo(NSArray<ApolloHLItem *> *webItems, NSArray<Apo
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : -1;
         id json = data.length > 0 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-        NSDictionary<NSString *, ApolloHLItem *> *infoMap = [json isKindOfClass:[NSDictionary class]] ? ApolloHLParseInfoListing(json) : @{};
-        ApolloLog(@"[Highlights] info enrich status=%ld ids=%lu resolved=%lu", (long)status, (unsigned long)fullnames.count, (unsigned long)infoMap.count);
+        BOOL validListing = status == 200 && !error && ApolloHLListingChildren(json) != nil;
+        NSDictionary<NSString *, ApolloHLItem *> *infoMap = validListing ? ApolloHLParseInfoListing(json) : @{};
+        ApolloLog(@"[Highlights] info enrich status=%ld ids=%lu resolved=%lu listing=%d type=%@ err=%@",
+                  (long)status, (unsigned long)fullnames.count, (unsigned long)infoMap.count,
+                  validListing, response.MIMEType ?: @"unknown", error.localizedDescription ?: @"nil");
         finish(infoMap);
     }] resume];
 }
@@ -2172,10 +2578,9 @@ static void ApolloHLRemoveCarousel(NSString *subreddit); // defined with ApolloH
 // The web set contributed nothing the carousel may show (every scraped item is
 // feed-owned). Fall back to the REST set — it can still hold a pin the scrape
 // missed — and if that is empty too, take down whatever carousel is on display
-// (a stale disk seed, or the fast paint from this very upgrade) instead of
-// stranding it. One helper, called from BOTH zero-item exits of the web
-// upgrade: the pre-enrichment id-filter and the post-enrichment flag-filter.
-// Returning early from only one of them left the other stranded. Main queue.
+// (a stale disk seed, or the fast paint from this upgrade) instead of stranding
+// it. Both web upgrades and quiet metadata refreshes use this after filtering
+// out every feed-owned card. Main queue.
 static void ApolloHLWebSetAllFeedOwned(NSString *sub) {
     NSArray<ApolloHLItem *> *restOnly = ApolloHLCarouselItems(ApolloHLRestCache()[sub] ?: @[]);
     if (restOnly.count > 0) {
@@ -2199,13 +2604,20 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
     if ([ApolloHLWebChallengeStrikes()[sub] intValue] >= kApolloHLWebChallengeMaxStrikes) return;
     NSDate *lastTry = ApolloHLWebChallengeLastTry()[sub];
     if (lastTry && -lastTry.timeIntervalSinceNow < kApolloHLWebChallengeRetrySpacing) return;
+    NSUInteger refreshGeneration = [ApolloHLRefreshGenerations()[sub] unsignedIntegerValue];
+    NSUInteger modeGeneration = sApolloHLModeGeneration;
     ApolloHLWebFetch *fetch = [[ApolloHLWebFetch alloc] init];
     ApolloHLWebFetchers()[sub] = fetch;
     [fetch startForSub:sub completion:^(NSArray<ApolloHLItem *> *items) {
+        // A refresh can replace this fetch while its WebKit callback is queued.
+        // The old completion must not remove the replacement from the registry.
+        if (ApolloHLWebFetchers()[sub] != fetch) return;
         [ApolloHLWebFetchers() removeObjectForKey:sub];
         // The user may have changed Full to Partial/Off while WebKit was still
         // rendering. Never let that stale completion restore the full set.
-        if (!sCommunityHighlights || !sCommunityHighlightsWeb) return;
+        if (!sCommunityHighlights || !sCommunityHighlightsWeb ||
+            modeGeneration != sApolloHLModeGeneration ||
+            refreshGeneration != [ApolloHLRefreshGenerations()[sub] unsignedIntegerValue]) return;
         if (items.count == 0 && fetch.sawChallenge) {
             // Blocked, not empty — leave the sub eligible for a bounded retry.
             int strikes = [ApolloHLWebChallengeStrikes()[sub] intValue] + 1;
@@ -2225,6 +2637,11 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
         // whatever metadata the fast REST result already knows, then show the full
         // list immediately instead of blocking all extra cards on another network
         // round trip. Missing off-screen thumbnails/details arrive just below.
+        // Re-harvesting creates bare DOM items. Keep already-known presentation
+        // metadata until a real response replaces it, including the later cards
+        // absent from /hot. A failed /api/info must not turn them into false zero
+        // counts or remove their flair/images/New timestamps on every refresh.
+        ApolloHLRestoreCachedMetadata(items, ApolloHLCache()[sub]);
         ApolloHLMergeMetadata(items, apiItems, @{});
         // A pinned interactive post the feed is rendering live must not come back
         // as a card via the web set. The DOM scrape carries no selftext, so match
@@ -2240,22 +2657,22 @@ static void ApolloHLMaybeWebUpgrade(NSString *subreddit) {
             ApolloHLApplyItems(sub, items);
         }
 
-        NSString *preEnrichmentSig = ApolloHLItemsPresentationSig(items);
         // Enrich the already-visible list with reliable /api/info thumbnails. A
         // presentation-signature change rebuilds the cards, while an identical
         // response is a no-op and cannot cause a visible flash.
-        ApolloHLEnrichViaInfo(items, apiItems, ^(NSArray<ApolloHLItem *> *enrichedAll) {
+        ApolloHLEnrichViaInfo(sub, refreshGeneration, items, apiItems, ^(NSArray<ApolloHLItem *> *enrichedAll) {
             if (!sCommunityHighlights || !sCommunityHighlightsWeb) return;
             // /api/info fills in each item's selftext + pin state, so this is the
             // authoritative drop of anything the feed owns — including a post the
             // ids above couldn't cover because the REST fetch never landed.
             NSArray<ApolloHLItem *> *enriched = ApolloHLCarouselItems(enrichedAll);
             if (enriched.count == 0) { ApolloHLWebSetAllFeedOwned(sub); return; }
-            BOOL metadataChanged = ![ApolloHLItemsPresentationSig(enriched) isEqualToString:preEnrichmentSig];
             NSArray<ApolloHLItem *> *shown = ApolloHLCache()[sub];
-            BOOL setChanged = ![ApolloHLItemsContentSig(enriched) isEqualToString:ApolloHLItemsContentSig(shown)];
-            if (metadataChanged || setChanged) {
-                ApolloLog(@"[Highlights] web enrichment r/%@ applied (metadataChanged=%d setChanged=%d)", sub, metadataChanged, setChanged);
+            // Compare what is actually displayed: the fast path leaves the
+            // existing cards in place when the harvested IDs are unchanged.
+            BOOL presentationChanged = ![ApolloHLItemsPresentationSig(enriched) isEqualToString:ApolloHLItemsPresentationSig(shown)];
+            if (presentationChanged) {
+                ApolloLog(@"[Highlights] web enrichment r/%@ applied", sub);
                 ApolloHLApplyItems(sub, enriched);
             }
         });
@@ -2287,24 +2704,29 @@ static void ApolloHLRemoveCarousel(NSString *subreddit) {
     ApolloHLClearDeDup(subreddit);
 }
 
-// Re-fetch a subreddit's highlights and update the carousel ONLY when the pinned set
-// actually changed. Cheap REST re-poll; rebuilds on a content change; re-runs the heavy
-// web upgrade when the set changed (or always, for an explicit pull-to-refresh). If a
-// mod removed every highlight, tears the carousel down. `alwaysWeb` = an explicit
-// refresh (re-harvest the web set even if the REST stickies are unchanged).
+// Refresh pin membership and metadata, rebuilding only when the displayed cards
+// change. Full mode uses /api/info for quiet comment updates, and re-harvests the
+// web set when REST pins change or alwaysWeb requests an explicit pull-to-refresh.
 static void ApolloHLRefreshSub(NSString *subreddit, BOOL alwaysWeb) {
     if (!sCommunityHighlights) return;
     NSString *key = subreddit.lowercaseString;
     if (key.length == 0) return;
+    // Do not invalidate the request that the fetcher's in-flight guard would
+    // reuse/decline. Multiple visible VCs and layout passes can ask together.
+    if ([ApolloHLInFlight() containsObject:key]) return;
+    NSUInteger refreshGeneration = [ApolloHLRefreshGenerations()[key] unsignedIntegerValue] + 1;
+    ApolloHLRefreshGenerations()[key] = @(refreshGeneration);
+    NSUInteger modeGeneration = sApolloHLModeGeneration;
     NSString *oldSig = ApolloHLRestSig()[key];
     ApolloHLFetchHighlights(subreddit, YES, ^(NSArray<ApolloHLItem *> *freshREST) {
-        if (freshREST == nil) return; // an in-flight request is already refreshing this sub
+        if (!sCommunityHighlights || modeGeneration != sApolloHLModeGeneration ||
+            refreshGeneration != [ApolloHLRefreshGenerations()[key] unsignedIntegerValue]) return;
+        if (freshREST == nil) return; // failed request or in-flight dedupe; retain the displayed cards
         BOOL changed = oldSig && ![ApolloHLItemsContentSig(freshREST) isEqualToString:oldSig];
 
-        if (freshREST.count == 0) {
+        if (freshREST.count == 0 && changed) {
             // All highlights unpinned — remove the carousel (both placement modes) and
             // stop de-duping (the inline stickies, if any, return).
-            if (!changed) return;
             ApolloLog(@"[Highlights] r/%@ all highlights removed → tearing down carousel", subreddit);
             ApolloHLRemoveCarousel(subreddit);
             // Negative-cache the now-empty sub. The force fetch deliberately never
@@ -2315,16 +2737,42 @@ static void ApolloHLRefreshSub(NSString *subreddit, BOOL alwaysWeb) {
             ApolloHLCache()[key] = @[];
             ApolloHLRestCache()[key] = @[];
             ApolloHLPersistSub(key);
-            return;
         }
+        // An empty REST set says nothing about web-only highlights. Full mode
+        // must still refresh their metadata, or re-harvest on an explicit pull,
+        // even when the legacy pins were empty on the previous fetch too.
+        if (freshREST.count == 0 && !sCommunityHighlightsWeb) return;
 
         if (changed) {
             ApolloLog(@"[Highlights] r/%@ pinned set changed on refresh → rebuild", subreddit);
             ApolloHLApplyItems(subreddit, freshREST); // cache := fresh REST + rebuild (both modes)
+        } else if (!sCommunityHighlightsWeb) {
+            if (![ApolloHLItemsPresentationSig(freshREST) isEqualToString:ApolloHLItemsPresentationSig(ApolloHLCache()[key])]) {
+                ApolloHLApplyItems(key, freshREST);
+            }
+        } else if (!alwaysWeb && ApolloHLCache()[key].count) {
+            // Refresh totals for all Full-mode cards without reloading Reddit's
+            // web page just for new comments. Enrichment owns its private copy.
+            NSArray *items = ApolloHLCache()[key];
+            NSString *requestedIDs = ApolloHLItemsContentSig(items);
+            ApolloHLEnrichViaInfo(key, refreshGeneration, items, freshREST, ^(NSArray<ApolloHLItem *> *updated) {
+                if (!sCommunityHighlights || !sCommunityHighlightsWeb) return;
+                NSArray *current = ApolloHLCache()[key];
+                if (![ApolloHLItemsContentSig(current) isEqualToString:requestedIDs]) return;
+                // A web-only interactive highlight may become a classic sticky
+                // without changing the filtered REST set. Honor ownership from
+                // either fresh REST IDs or the enriched item's own flags.
+                NSArray *carouselItems = ApolloHLDropFeedOwned(key, ApolloHLCarouselItems(updated));
+                if (carouselItems.count == 0) { ApolloHLWebSetAllFeedOwned(key); return; }
+                if (![ApolloHLItemsPresentationSig(carouselItems) isEqualToString:ApolloHLItemsPresentationSig(current)]) {
+                    ApolloHLApplyItems(key, carouselItems);
+                }
+            });
         }
         if (sCommunityHighlightsWeb && (changed || alwaysWeb)) {
             // Re-harvest the full web set; it re-applies if it differs from what's shown.
             [ApolloHLWebDone() removeObject:key];
+            [ApolloHLWebFetchers()[key] cancel];
             [ApolloHLWebFetchers() removeObjectForKey:key];
             ApolloHLWebChallengeReset(key); // explicit refresh overrides the challenge backoff
             ApolloHLMaybeWebUpgrade(subreddit);
@@ -2954,6 +3402,9 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
+        // Covers Off -> On (or Full -> Partial -> Full) before an old network
+        // response returns; checking only the current booleans misses that case.
+        sApolloHLModeGeneration++;
         NSMutableSet<NSString *> *visibleSubs = [NSMutableSet set];
         ApolloHLForEachPostsVC(^(UIViewController *postsVC) {
             NSString *sub = ApolloHLSubredditName(postsVC);
