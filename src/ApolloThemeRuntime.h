@@ -23,6 +23,10 @@ __BEGIN_DECLS
 // YES while a custom theme is active and the table is compiled.
 BOOL ApolloThemeRuntimeIsActive(void);
 
+// Native adaptive label color for Liquid Glass navigation chrome, independent
+// of the custom theme's content palette.
+UIColor *ApolloNavigationChromeColor(void);
+
 // Cached dynamic colour for a token, or nil if inactive / out of range.
 UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token);
 
