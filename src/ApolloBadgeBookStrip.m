@@ -23,9 +23,12 @@ static CGFloat const kBBIconGap     = 6.0;
 @property(nonatomic, strong) NSMutableArray<UIImageView *> *iconViews;
 @property(nonatomic, strong) UILabel *overflowLabel;
 @property(nonatomic, strong) ApolloUserBadges *badges;
+@property(nonatomic, copy) NSArray<NSString *> *settingsPreviewTrophyTitles;
+@property(nonatomic, copy) NSArray<ApolloBadgeItem *> *settingsPreviewItems;
 @property(nonatomic, copy) NSString *loadedUsername;   // guards async completions
 @property(nonatomic) NSUInteger previewTotal;          // full count (icon views are capped)
 @property(nonatomic) NSUInteger iconGeneration;        // guards async icon decodes across rebuilds
+- (void)apollo_resolveSettingsPreviewItemsIfNeeded;
 @end
 
 @implementation ApolloBadgeBookStripView
@@ -107,6 +110,13 @@ static CGFloat const kBBIconGap     = 6.0;
     _username = [clean copy];
     self.badges = nil;
     self.loadedUsername = nil;
+    if (self.settingsPreviewTrophyTitles) {
+        self.loadedUsername = self.username;
+        [self apollo_resolveSettingsPreviewItemsIfNeeded];
+        [self setNeedsLayout];
+        if (self.heightChangedBlock) self.heightChangedBlock();
+        return;
+    }
     [self apollo_rebuildIcons];
     [self setNeedsLayout];
     if (self.heightChangedBlock) self.heightChangedBlock();
@@ -114,6 +124,7 @@ static CGFloat const kBBIconGap     = 6.0;
 }
 
 - (void)apollo_loadIfNeeded {
+    if (self.settingsPreviewTrophyTitles) return;
     if (!ApolloBadgeBookEnabled()) return;
     NSString *user = self.username;
     if (user.length == 0) return;
@@ -122,6 +133,7 @@ static CGFloat const kBBIconGap     = 6.0;
     __weak typeof(self) ws = self;
     ApolloBadgeBookFetch(user, ^(ApolloUserBadges *result) {
         typeof(self) ss = ws; if (!ss) return;
+        if (ss.settingsPreviewTrophyTitles) return;          // switched to a local fixture mid-fetch
         if (![ss.username isEqualToString:user]) return;   // moved on to another profile
         ss.loadedUsername = user;
         ss.badges = result;
@@ -133,6 +145,7 @@ static CGFloat const kBBIconGap     = 6.0;
 
 // Preview items: earned achievements first (all bundled → instant), then trophies.
 - (NSArray<ApolloBadgeItem *> *)apollo_previewItems {
+    if (self.settingsPreviewTrophyTitles) return self.settingsPreviewItems ?: @[];
     if (!self.badges) return @[];
     NSMutableArray<ApolloBadgeItem *> *items = [NSMutableArray array];
     if (self.badges.achievementsResolved && self.badges.earnedAchievementIDs.count) {
@@ -145,6 +158,32 @@ static CGFloat const kBBIconGap     = 6.0;
     return items;
 }
 
+- (void)apollo_useSettingsPreviewTrophyTitles:(NSArray<NSString *> *)titles {
+    if (!titles || [self.settingsPreviewTrophyTitles isEqualToArray:titles]) return;
+
+    self.settingsPreviewTrophyTitles = titles;
+    self.settingsPreviewItems = nil;
+    self.badges = nil;
+    self.loadedUsername = self.username;
+    [self apollo_resolveSettingsPreviewItemsIfNeeded];
+    [self apollo_rebuildIcons];
+    [self setNeedsLayout];
+    if (self.heightChangedBlock) self.heightChangedBlock();
+}
+
+- (void)apollo_resolveSettingsPreviewItemsIfNeeded {
+    if (!self.settingsPreviewTrophyTitles || self.settingsPreviewItems ||
+        !ApolloBadgeBookEnabled()) return;
+
+    ApolloBadgeBookCatalog *catalog = [ApolloBadgeBookCatalog shared];
+    NSMutableArray<ApolloBadgeItem *> *items = [NSMutableArray array];
+    for (NSString *title in self.settingsPreviewTrophyTitles) {
+        ApolloBadgeItem *item = [catalog trophyMatchingIconURL:nil title:title];
+        if (item) [items addObject:item];
+    }
+    self.settingsPreviewItems = [items copy];
+}
+
 - (void)apollo_rebuildIcons {
     for (UIImageView *v in self.iconViews) [v removeFromSuperview];
     [self.iconViews removeAllObjects];
@@ -154,7 +193,7 @@ static CGFloat const kBBIconGap     = 6.0;
     // heavily-decorated profile can have 90+). The "+N" chip covers the rest.
     NSArray<ApolloBadgeItem *> *preview = [self apollo_previewItems];
     self.previewTotal = preview.count;
-    if (preview.count) ApolloBadgeBookPrewarmImages();
+    if (preview.count && !self.settingsPreviewTrophyTitles) ApolloBadgeBookPrewarmImages();
     NSUInteger const kMaxIconViews = 16;
     if (preview.count > kMaxIconViews) {
         preview = [preview subarrayWithRange:NSMakeRange(0, kMaxIconViews)];
@@ -286,12 +325,22 @@ static CGFloat const kBBIconGap     = 6.0;
 }
 
 - (void)apollo_toggleChanged {
+    if (self.settingsPreviewTrophyTitles) {
+        if (ApolloBadgeBookEnabled() && !self.settingsPreviewItems) {
+            [self apollo_resolveSettingsPreviewItemsIfNeeded];
+            [self apollo_rebuildIcons];
+        }
+        [self setNeedsLayout];
+        if (self.heightChangedBlock) self.heightChangedBlock();
+        return;
+    }
     [self setNeedsLayout];
     if (self.heightChangedBlock) self.heightChangedBlock();
     [self apollo_loadIfNeeded];
 }
 
 - (void)apollo_userUpdated:(NSNotification *)note {
+    if (self.settingsPreviewTrophyTitles) return;
     NSString *user = [note.object isKindOfClass:[NSString class]] ? note.object : nil;
     if (![user.lowercaseString isEqualToString:self.username.lowercaseString]) return;
     self.loadedUsername = nil;    // re-pull from the (updated) cache
@@ -299,6 +348,14 @@ static CGFloat const kBBIconGap     = 6.0;
 }
 
 - (void)refresh {
+    if (self.settingsPreviewTrophyTitles) {
+        if (ApolloBadgeBookEnabled() && !self.settingsPreviewItems) {
+            [self apollo_resolveSettingsPreviewItemsIfNeeded];
+            [self apollo_rebuildIcons];
+        }
+        [self setNeedsLayout];
+        return;
+    }
     // Feature off or no user yet → nothing to invalidate. The username guard
     // matters: Invalidate(nil) means "wipe EVERY user's cache", and this is
     // called on every profile pull-to-refresh.

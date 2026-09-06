@@ -24,6 +24,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (CGFloat)preferredHeightForWidth:(CGFloat)width;
 // Pull-to-refresh: drop cached badges for the current user and re-scrape.
 - (void)refresh;
+// Permanently use bundled trophies for this settings preview; an empty array shows none.
+- (void)apollo_useSettingsPreviewTrophyTitles:(NSArray<NSString *> *)titles;
 @end
 
 // YES when the Badge Book feature is enabled (reads the cached sBadgeBookEnabled).

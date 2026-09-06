@@ -1209,11 +1209,12 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener);
 
     // Bundled glyph, else cached (already-normalized) favicon, else placeholder + async swap.
     // Every image lands in the cell's fixed icon box (aspect-fit), so all rows align.
+    UIImage *previewIcon = link.settingsPreviewIcon;
     UIImage *bundled = ApolloSLBundledIconForType(link.type);
     UIImage *favicon = ApolloSLFaviconCachedForHost(link.url.host);
-    cell.iconBox.image = bundled ?: (favicon ?: ApolloSLPlaceholderIcon());
-    cell.iconBox.tintColor = (bundled || favicon) ? nil : [UIColor secondaryLabelColor];
-    if (!bundled && !favicon) {
+    cell.iconBox.image = previewIcon ?: (bundled ?: (favicon ?: ApolloSLPlaceholderIcon()));
+    cell.iconBox.tintColor = (previewIcon || bundled || favicon) ? nil : [UIColor secondaryLabelColor];
+    if (!previewIcon && !bundled && !favicon) {
         NSString *wantHost = link.url.host;
         __weak typeof(self) weakSelf = self;  // don't keep the sheet alive past a dismiss
         __weak UITableView *weakTable = tableView;
@@ -1306,6 +1307,7 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 
 @interface ApolloProfileSocialLinksView ()
 @property (nonatomic, strong) NSArray<ApolloSocialLink *> *links;
+@property (nonatomic, copy) NSArray<ApolloSocialLink *> *settingsPreviewLinks;
 @property (nonatomic, copy) NSString *loadedUsername;   // username the current links/build belong to
 @property (nonatomic, strong) UILabel *headerLabel;     // "Social Links"
 @property (nonatomic, strong) NSMutableArray<ApolloSLPillView *> *pillViews;  // <=3 links
@@ -1360,6 +1362,13 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 }
 
 - (void)reload {
+    if (self.settingsPreviewLinks) {
+        self.links = self.username.length > 0 ? self.settingsPreviewLinks : @[];
+        self.loadedUsername = self.username;
+        [self rebuildContent];
+        [self notifyHeightChanged];
+        return;
+    }
     if (!ApolloProfileSocialLinksEnabled() || self.username.length == 0) {
         self.links = @[];
         self.loadedUsername = nil;
@@ -1376,6 +1385,7 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
     ApolloSLFetchLinks(want, ^(NSArray<ApolloSocialLink *> *links) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
+        if (strongSelf.settingsPreviewLinks) return;  // switched to a local fixture mid-fetch
         // Drop stale results if the band was reused for another profile meanwhile.
         if (![strongSelf.username isEqualToString:want]) return;
         strongSelf.links = links ?: @[];
@@ -1385,8 +1395,27 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
     });
 }
 
+- (void)apollo_useSettingsPreviewLinks:(NSArray<ApolloSocialLink *> *)links {
+    if (!links) return;
+    NSArray<ApolloSocialLink *> *resolvedLinks = [links copy];
+    if ([self.settingsPreviewLinks isEqualToArray:resolvedLinks] &&
+        [self.links isEqualToArray:resolvedLinks]) {
+        self.loadedUsername = self.username;
+        return;
+    }
+    self.settingsPreviewLinks = resolvedLinks;
+    self.links = resolvedLinks;
+    self.loadedUsername = self.username;
+    [self rebuildContent];
+    [self notifyHeightChanged];
+}
+
 // Pull-to-refresh: drop the cached links for this user (memory AND disk) and re-fetch.
 - (void)refresh {
+    if (self.settingsPreviewLinks) {
+        [self reload];
+        return;
+    }
     if (self.username.length == 0) return;
     NSString *key = self.username.lowercaseString;
     [ApolloSLLinksCache() removeObjectForKey:key];
@@ -1414,6 +1443,37 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
     CGFloat y = kSLHeaderHeight + kSLHeaderGap;
 
     if (self.links.count <= kSLPillThreshold) {
+        if (self.settingsPreviewLinks && self.pillViews.count > 1) {
+            // Keep the fixture pills on one line, compressing only when needed.
+            // buildPills lets their labels scale to the resulting widths.
+            CGFloat totalNaturalWidth = 0.0;
+            NSMutableArray<NSNumber *> *naturalWidths = [NSMutableArray array];
+            for (ApolloSLPillView *pill in self.pillViews) {
+                CGFloat naturalWidth = [pill preferredWidthForMaxWidth:width];
+                [naturalWidths addObject:@(naturalWidth)];
+                totalNaturalWidth += naturalWidth;
+            }
+            CGFloat totalGapWidth = (self.pillViews.count - 1) * kSLPillHGap;
+            BOOL needsCompression = totalNaturalWidth + totalGapWidth > width + 0.5;
+            CGFloat pillBudget = MAX(1.0, width - totalGapWidth);
+            CGFloat compression = needsCompression && totalNaturalWidth > 0.0
+                ? pillBudget / totalNaturalWidth : 1.0;
+            CGFloat x = 0.0;
+            for (NSUInteger index = 0; index < self.pillViews.count; index++) {
+                ApolloSLPillView *pill = self.pillViews[index];
+                CGFloat naturalWidth = naturalWidths[index].doubleValue;
+                CGFloat pillWidth = naturalWidth;
+                if (needsCompression) {
+                    pillWidth = index + 1 == self.pillViews.count
+                        ? MAX(1.0, width - x)
+                        : floor(naturalWidth * compression);
+                }
+                if (apply) pill.frame = CGRectMake(x, y, pillWidth, kSLPillHeight);
+                x += pillWidth + kSLPillHGap;
+            }
+            return y + kSLPillHeight;
+        }
+
         // Name pills, left-aligned, wrapping to more rows when they don't fit one line.
         CGFloat x = 0.0, rowTop = y;
         for (ApolloSLPillView *pill in self.pillViews) {
@@ -1465,6 +1525,12 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
         ApolloSLPillView *pill = [[ApolloSLPillView alloc] init];
         pill.link = link;
         pill.titleLabel.text = link.title;
+        if (self.settingsPreviewLinks) {
+            pill.titleLabel.adjustsFontSizeToFitWidth = YES;
+            // Allow both handles to fit on one row at 320pt widths.
+            pill.titleLabel.minimumScaleFactor = 0.70;
+            pill.titleLabel.allowsDefaultTighteningForTruncation = YES;
+        }
         [self applyIcon:pill.iconView forLink:link];
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_pillTapped:)];
         [pill addGestureRecognizer:tap];
@@ -1519,6 +1585,17 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 
 // Sets the best icon available now and, when needed, async-swaps in the favicon.
 - (void)applyIcon:(UIImageView *)icon forLink:(ApolloSocialLink *)link {
+    if (self.settingsPreviewLinks) {
+        UIImage *localIcon = link.settingsPreviewIcon ?: ApolloSLBundledIconForType(link.type);
+        icon.image = localIcon ?: ApolloSLPlaceholderIcon();
+        icon.tintColor = localIcon ? nil : [UIColor secondaryLabelColor];
+        return;
+    }
+    if (link.settingsPreviewIcon) {
+        icon.image = link.settingsPreviewIcon;
+        icon.tintColor = nil;
+        return;
+    }
     UIImage *bundled = ApolloSLBundledIconForType(link.type);
     if (bundled) { icon.image = bundled; icon.tintColor = nil; return; }
     UIImage *favicon = ApolloSLFaviconCachedForHost(link.url.host);
