@@ -3,6 +3,8 @@
 #import <os/log.h>
 #import <Security/SecBase.h>
 
+@class CASpringAnimation;
+
 // On iOS 26, NSLog redacts strings, so use os_log: https://developer.apple.com/documentation/ios-ipados-release-notes/ios-ipados-26-release-notes#NSLog
 // Uses a dedicated subsystem so OSLogStore can efficiently filter our entries.
 #define ApolloLogWithType(type, fmt, ...) do { \
@@ -64,31 +66,6 @@ NSURLSessionDataTask *ApolloStartBoundedDataRequest(
 
 BOOL IsLiquidGlass(void);
 
-// --- Liquid Glass trailing-cluster reservation ---
-// Some screens temporarily strip their right bar buttons while staying on the
-// SAME navigation item (the Inbox strips them whenever its in-place Chat hub
-// covers Notifications). The Liquid Glass title recenter in
-// ApolloLiquidGlass.xm would then re-balance the title against an empty
-// trailing side, visibly sliding it — in gap-centering mode because the gap
-// midpoint moves, and in screen-centering mode because the overlap clamp
-// relaxes. While a "hold" is set on the navigation item, the recenter keeps
-// using the trailing content edge it last measured for that item (stored as an
-// inset from the bar's trailing edge, so rotation keeps working), making the
-// title position identical whether the buttons are up or stripped. The
-// recenter itself records the live inset via
-// ApolloNavItemNoteTrailingContentInset on every pass that sees real trailing
-// content; holders only toggle the hold. The hold also covers a trailing side
-// that carries a STAND-IN rather than nothing (the comments find navigator
-// swaps Apollo's sort/more/globe group for its count + chevrons for the length
-// of a search): the recorded edge keeps standing in for the live one, the
-// stand-in's own edge is never recorded, and the recenter only defers to the
-// live edge if the parked title would otherwise touch the stand-in. All four
-// are no-ops off-glass (the recenter never runs there and nothing else reads
-// the values).
-void ApolloNavItemSetTrailingReservationHold(UINavigationItem *item, BOOL hold);
-BOOL ApolloNavItemTrailingReservationHold(UINavigationItem *item);
-void ApolloNavItemNoteTrailingContentInset(UINavigationItem *item, CGFloat inset);
-CGFloat ApolloNavItemTrailingContentInset(UINavigationItem *item);   // 0 = never captured
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url);
 BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL);
 void ApolloFlushReadPostIDsToDefaults(void);
@@ -158,9 +135,20 @@ BOOL ApolloRouteURLThroughApp(NSURL *url);
 // Returns all UIWindows across every connected UIWindowScene.
 // Use instead of the deprecated UIApplication.windows property.
 NSArray<UIWindow *> *ApolloAllWindows(void);
-// Re-centers every live nav bar title after the LG title-centering mode toggle
-// changes (defined in ApolloLiquidGlass.xm; no-op off Liquid Glass).
-void ApolloLGTitleCenteringModeChanged(void);
+// Refresh title geometry/capsules on one known bar after a local content or
+// action change. Never walks the window/page hierarchy (no-op off Liquid Glass).
+void ApolloNavigationTitlesRefreshBar(UINavigationBar *bar);
+// Global appearance changes (e.g. Header Style) must refresh every live bar.
+// Local title owners should use the bar-scoped entry point above instead.
+void ApolloNavigationTitlesRefresh(void);
+// Settle new content before display, preserving the control, width constraint
+// and same-host glass. sameItem also preserves the active action-avoidance spring.
+void ApolloNavigationTitleGlassRefreshContent(UIView *titleControl, BOOL sameItem);
+// Capture the currently displayed title before publishing action widths, then
+// settle collision geometry with the pill's spring. Nil spring means immediate
+// placement (Reduce Motion, page teardown or nonanimated updates).
+void ApolloNavigationTitleActionsWillChange(UINavigationBar *bar);
+void ApolloNavigationTitleActionsDidChange(UINavigationBar *bar, CASpringAnimation *spring);
 // Keeps the Liquid Glass title capsule in sync with a custom title view's
 // independently-faded content (defined in ApolloLiquidGlass.xm; no-op off LG).
 void ApolloNavigationTitleGlassSetContentAlpha(UIView *contentView, CGFloat alpha);

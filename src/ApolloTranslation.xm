@@ -10,6 +10,8 @@
 #include <string.h>
 
 #import "ApolloCommon.h"
+#import "ApolloNavigationActions.h"
+#import "ApolloNativeActionMenus.h"
 #import "ApolloDeletedCommentsData.h"
 #import "ApolloState.h"
 #import "ApolloToast.h"
@@ -58,7 +60,6 @@ static const void *kApolloThreadTranslatedModeKey = &kApolloThreadTranslatedMode
 // Set when the user explicitly toggled away from a translated thread (so we
 // don't clobber the user's preference when sAutoTranslateOnAppear is on).
 static const void *kApolloThreadOriginalModeKey = &kApolloThreadOriginalModeKey;
-static const void *kApolloTranslateBarButtonKey = &kApolloTranslateBarButtonKey;
 static const void *kApolloVisibleTranslationAppliedKey = &kApolloVisibleTranslationAppliedKey;
 static const void *kApolloAppliedTranslationFullNameKey = &kApolloAppliedTranslationFullNameKey;
 // Phase D — vote resilience. When we install a translated string into a text
@@ -87,13 +88,13 @@ static const void *kApolloCommentOwnedTextNodeKey = &kApolloCommentOwnedTextNode
 // The globe-installation code uses this to gate visibility on
 // sTranslatePostTitles in addition to sEnableBulkTranslation.
 static const void *kApolloFeedTranslationVCKey = &kApolloFeedTranslationVCKey;
-// Liquid Glass globe-merge: instead of adding the translation globe as a SEPARATE
-// trailing bar button item (which iOS 26 spaces apart from Apollo's mod/sort/more
-// container with a visible inter-group gap), we inject the globe button directly
-// into Apollo's existing trailing container so all icons form one evenly-spaced
-// group. kApolloGlobeMergeButtonKey holds the globe UIButton on the navigationItem;
-// sApplyingGlobeMerge guards the setRightBarButtonItem(s) re-injection hook.
+// Share the native action container to align the globe with taller moderator
+// buttons and avoid Liquid Glass's inter-item gap (#393). Track it on the nav
+// item; sApplyingGlobeMerge guards rebuild-hook recursion.
 static const void *kApolloGlobeMergeButtonKey = &kApolloGlobeMergeButtonKey;
+// A deferred removal is feature intent, not another layout request. Native
+// item setters must not turn it back into an insertion while the menu is open.
+static const void *kApolloGlobeRemovalPendingKey = &kApolloGlobeRemovalPendingKey;
 // Fallback for screens with no multi-button container to merge into: the globe
 // is shown as its own trailing bar button item (the pre-26 behavior).
 static const void *kApolloGlobeStandaloneItemKey = &kApolloGlobeStandaloneItemKey;
@@ -7010,23 +7011,16 @@ static BOOL ApolloRefreshFeedTitleTranslationAppliedForController(UIViewControll
     return YES;
 }
 
-// MARK: - Liquid Glass globe-merge helpers
+// MARK: - Navigation globe-merge helpers
 //
-// On iOS 26, each custom-view UIBarButtonItem is hosted in its own
-// NavigationButtonBar item wrapper, and the bar inserts ~16pt of inter-item
-// spacing between separate items — far more than the ~2-3pt Apollo gets by
-// hand-packing its mod/sort/more buttons into ONE combined custom-view
-// container (CGRectGetMaxX layout). Added as a separate item, the globe sits
-// visibly isolated with a big gap before Apollo's cluster (issue #393). The
-// fix: inject the globe button straight into Apollo's container so every icon
-// is one evenly-spaced group. Apollo rebuilds that container on various events,
-// so the setRightBarButtonItem(s) hook re-applies this after each rebuild.
+// Merge into Apollo's mod/sort/more row on both builds. Standard builds retain
+// native padding and never collapse; item-setter hooks reapply after rebuilds.
 
 // Find Apollo's combined trailing button container for this nav item: a
 // custom-view UIView that holds at least one UIButton OTHER than our globe.
 static UIView *ApolloFindTrailingButtonContainer(UINavigationItem *navItem, UIButton *globe) {
     for (UIBarButtonItem *item in navItem.rightBarButtonItems) {
-        UIView *cv = item.customView;
+        UIView *cv = ApolloNavigationActionsContentView(item);
         if (![cv isKindOfClass:[UIView class]]) continue;
         BOOL hasOtherButton = NO;
         for (UIView *sub in cv.subviews) {
@@ -7072,6 +7066,34 @@ static void ApolloDetachGlobeFromContainer(UIButton *globe) {
 
 static BOOL ApolloButtonGlyphPads(UIButton *btn, CGFloat *outLeft, CGFloat *outRight);
 
+// Match the live neighboring slot, not a stale standalone frame left by UIKit
+// after search or moderator-button updates.
+static void ApolloAlignGlobeInMergedContainer(UIButton *globe, UIView *container) {
+    UIButton *nextButton = nil;
+    for (UIView *sub in container.subviews) {
+        if (sub == globe || ![sub isKindOfClass:UIButton.class] ||
+            CGRectGetWidth(sub.frame) <= 1.0 || CGRectGetHeight(sub.frame) <= 1.0) continue;
+        if (!nextButton || CGRectGetMinX(sub.frame) < CGRectGetMinX(nextButton.frame)) {
+            nextButton = (UIButton *)sub;
+        }
+    }
+    if (!nextButton) return;
+    CGRect slot = nextButton.frame;
+    CGRect frame = CGRectMake(CGRectGetMinX(slot) - kApolloGlobeMergeSlotWidth,
+                              CGRectGetMinY(slot), kApolloGlobeMergeSlotWidth, CGRectGetHeight(slot));
+    if (!CGRectEqualToRect(globe.frame, frame)) globe.frame = frame;
+}
+
+// Freeze both source and destination during native menu morphs. Merge/removal
+// share a key so only the latest requested state replays.
+static BOOL ApolloDeferGlobeGeometry(UIButton *globe, UIView *container, dispatch_block_t update) {
+    UIView *currentSurface = ApolloNavigationActionsMenuSourceView(globe);
+    UIView *destinationSurface = ApolloNavigationActionsMenuSourceView(container);
+    if (ApolloNativeActionMenuDeferNavigationUpdate(currentSurface, @"translation-globe", update)) return YES;
+    return destinationSurface != currentSurface &&
+        ApolloNativeActionMenuDeferNavigationUpdate(destinationSurface, @"translation-globe", update);
+}
+
 // Place the globe correctly for this nav item (idempotent). If Apollo has a
 // multi-button trailing container, inject the globe as its leading button so
 // every icon is one evenly-spaced group (issue #393). Otherwise fall back to a
@@ -7080,6 +7102,7 @@ static BOOL ApolloButtonGlyphPads(UIButton *btn, CGFloat *outLeft, CGFloat *outR
 // setRightBarButtonItem(s) hook.
 static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     if (!navItem) return;
+    if ([objc_getAssociatedObject(navItem, kApolloGlobeRemovalPendingKey) boolValue]) return;
     // While a comments search has its match navigator in the trailing group
     // (ApolloFindInCommentsGlass.xm), Apollo's container is parked off the nav
     // item: neither merge into the navigator (it has buttons too) nor fall back
@@ -7090,11 +7113,26 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     if (!globe) return;
 
     UIView *container = ApolloFindTrailingButtonContainer(navItem, globe);
+    __weak UINavigationItem *weakItem = navItem;
+    if (ApolloDeferGlobeGeometry(globe, container, ^{
+        ApolloApplyGlobeMergeForNavItem(weakItem);
+    })) return;
+    // Host changes must update tint too: standalone glass uses native chrome,
+    // while a merged globe keeps the action group's accent and translated state.
+    id target = globe.allTargets.anyObject;
+    UIViewController *controller = [target isKindOfClass:UIViewController.class] ? target : nil;
+    BOOL visibleTranslationApplied = [objc_getAssociatedObject(controller, kApolloVisibleTranslationAppliedKey) boolValue];
+    UIColor *normalTint = IsLiquidGlass() && !container ? ApolloNavigationChromeColor()
+        : (ApolloThemeAccentColor() ?: controller.viewIfLoaded.tintColor ?: UIColor.systemBlueColor);
+    globe.tintColor = visibleTranslationApplied ? UIColor.systemGreenColor : normalTint;
     UIBarButtonItem *standalone = objc_getAssociatedObject(navItem, kApolloGlobeStandaloneItemKey);
 
     if (container) {
         // Prefer the merged layout — drop any standalone fallback we added.
         if (standalone) {
+            // Clear the retained adaptor before reparenting, or its delayed
+            // layout can resize the merged globe to the old standalone frame.
+            if (standalone.customView == globe) standalone.customView = nil;
             NSMutableArray<UIBarButtonItem *> *its = [navItem.rightBarButtonItems mutableCopy];
             if ([its containsObject:standalone]) {
                 [its removeObject:standalone];
@@ -7106,9 +7144,8 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
         }
 
         if (globe.superview == container) {
-            // The visual pill may have been rebuilt around the same custom
-            // view. Keep the title invalidation alive even though the button
-            // geometry itself is already merged.
+            ApolloAlignGlobeInMergedContainer(globe, container);
+            // The pill may have rebuilt around unchanged slots; refresh the title.
             ApolloSubredditRequestTitleRelayout(navItem);
             return;  // already merged — don't double-shift
         }
@@ -7163,10 +7200,12 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
         // the no-globe normalization below applies — by starting the globe
         // slot at the difference. Falls back to bare symmetric insets if
         // either glyph can't be measured.
-        CGFloat globeX = trailInset;
+        // Preserve standard-build insets; only glass needs capsule-edge padding.
+        BOOL liquidGlass = IsLiquidGlass();
+        CGFloat globeX = liquidGlass ? trailInset : leadingX;
         globe.frame = CGRectMake(0.0, 0.0, gw, h);  // size it so glyph pads resolve
         CGFloat gGlyphL = 0.0, gGlyphR = 0.0, lastGlyphL = 0.0, lastGlyphR = 0.0;
-        if (lastBtn &&
+        if (liquidGlass && lastBtn &&
             ApolloButtonGlyphPads(globe, &gGlyphL, &gGlyphR) &&
             ApolloButtonGlyphPads(lastBtn, &lastGlyphL, &lastGlyphR)) {
             CGFloat glyphAware = trailInset + lastGlyphR - gGlyphL;
@@ -7182,6 +7221,7 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
         }
         globe.frame = CGRectMake(globeX, 0.0, gw, h);
         [container insertSubview:globe atIndex:0];
+        ApolloAlignGlobeInMergedContainer(globe, container);
 
         // Resize so the bar item re-measures: content spans [globeX, rightEdge+
         // shift] with a matching trailing inset. Remember the shift for removal.
@@ -7228,7 +7268,11 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     if (standalone && standalone.customView == globe && [navItem.rightBarButtonItems containsObject:standalone]) {
         return;  // already hosted as its own item — leave UIKit's wrapper alone
     }
-    globe.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
+    // A standalone glass item has its own circular surface, with no neighboring
+    // moderator slot to nudge toward. Preserve legacy edge alignment outside glass.
+    globe.contentHorizontalAlignment = IsLiquidGlass()
+        ? UIControlContentHorizontalAlignmentCenter : UIControlContentHorizontalAlignmentRight;
+    globe.imageEdgeInsets = UIEdgeInsetsZero;
     globe.frame = CGRectMake(0.0, 0.0, kApolloGlobeMergeSlotWidth, 32.0);
     if (!standalone) {
         standalone = [[UIBarButtonItem alloc] initWithCustomView:globe];
@@ -7253,7 +7297,15 @@ static void ApolloNormalizeTrailingPillPaddingForNavItem(UINavigationItem *navIt
 // drop any standalone item, and clear tracking.
 static void ApolloRemoveGlobeMergeForNavItem(UINavigationItem *navItem) {
     if (!navItem) return;
+    objc_setAssociatedObject(navItem, kApolloGlobeRemovalPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UIButton *globe = objc_getAssociatedObject(navItem, kApolloGlobeMergeButtonKey);
+    __weak UINavigationItem *weakItem = navItem;
+    if (ApolloDeferGlobeGeometry(globe, ApolloFindTrailingButtonContainer(navItem, globe), ^{
+        UINavigationItem *item = weakItem;
+        if ([objc_getAssociatedObject(item, kApolloGlobeRemovalPendingKey) boolValue]) {
+            ApolloRemoveGlobeMergeForNavItem(item);
+        }
+    })) return;
     ApolloDetachGlobeFromContainer(globe);
     UIBarButtonItem *standalone = objc_getAssociatedObject(navItem, kApolloGlobeStandaloneItemKey);
     if (standalone) {
@@ -7270,6 +7322,7 @@ static void ApolloRemoveGlobeMergeForNavItem(UINavigationItem *navItem) {
     [globe removeFromSuperview];
     objc_setAssociatedObject(navItem, kApolloGlobeStandaloneItemKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(navItem, kApolloGlobeMergeButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(navItem, kApolloGlobeRemovalPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // The stock container is asymmetric inside the glass capsule; with the
     // globe gone, give it the same symmetric padding treatment.
     if (IsLiquidGlass()) ApolloNormalizeTrailingPillPaddingForNavItem(navItem);
@@ -7324,9 +7377,16 @@ static const void *kApolloTrailingPadNormalizedKey = &kApolloTrailingPadNormaliz
 
 static void ApolloNormalizeTrailingPillPaddingForNavItem(UINavigationItem *navItem) {
     if (!navItem) return;
+    // A late no-globe request must not overwrite merged-globe padding.
+    if (objc_getAssociatedObject(navItem, kApolloGlobeMergeButtonKey)) return;
     UIView *container = ApolloFindTrailingButtonContainer(navItem, nil);
     if (!container) return;
     if (objc_getAssociatedObject(container, kApolloTrailingPadNormalizedKey)) return;
+    __weak UINavigationItem *weakItem = navItem;
+    if (ApolloNativeActionMenuDeferNavigationUpdate(ApolloNavigationActionsMenuSourceView(container),
+            @"translation-padding", ^{
+        ApolloNormalizeTrailingPillPaddingForNavItem(weakItem);
+    })) return;
 
     // Locate the first and last button by geometry (Apollo chains slots with
     // CGRectGetMaxX, so subview order matches, but don't rely on it).
@@ -7380,8 +7440,6 @@ static void ApolloUpdateTranslationUIForController(id controller) {
     if (!sEnableBulkTranslation) return;
 
     BOOL isFeedVC = [objc_getAssociatedObject(controller, kApolloFeedTranslationVCKey) boolValue];
-    UIBarButtonItem *translationItem = objc_getAssociatedObject(controller, kApolloTranslateBarButtonKey);
-    NSMutableArray<UIBarButtonItem *> *items = [vc.navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
     // Comments VCs require sEnableBulkTranslation.
     // Feed VCs additionally require sTranslatePostTitles — the only thing
     // they translate is post titles, so when titles are disabled the globe
@@ -7398,82 +7456,32 @@ static void ApolloUpdateTranslationUIForController(id controller) {
         objc_setAssociatedObject(controller, kApolloThreadTranslatedModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(controller, kApolloThreadOriginalModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-        if (translationItem) {
-            [items removeObject:translationItem];
-            vc.navigationItem.rightBarButtonItems = items;
-            objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        // Liquid Glass: also pull the globe back out of Apollo's merged container.
         ApolloRemoveGlobeMergeForNavItem(vc.navigationItem);
         ApolloHideAllPostInfoMarkers();
         return;
     }
 
     BOOL translatedMode = ApolloControllerIsInTranslatedMode(vc);
-    BOOL visibleTranslationApplied = [objc_getAssociatedObject(vc, kApolloVisibleTranslationAppliedKey) boolValue];
     NSString *targetName = ApolloLocalizedTargetLanguageName();
-
-    // Globe icon — a UIButton hosted either inside Apollo's trailing container
-    // (Liquid Glass, so it groups evenly with mod/sort/more — issue #393) or as
-    // our own separate bar button item (pre-26, where that's the tuned layout).
-    BOOL liquidGlass = IsLiquidGlass();
 
     UIImage *globeImage = [[UIImage systemImageNamed:@"globe"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 
-    UIButton *globeButton = nil;
-    if (liquidGlass) {
-        globeButton = objc_getAssociatedObject(vc.navigationItem, kApolloGlobeMergeButtonKey);
-    }
-    if (!globeButton && translationItem && [translationItem.customView isKindOfClass:[UIButton class]]) {
-        globeButton = (UIButton *)translationItem.customView;
-    }
+    UIButton *globeButton = objc_getAssociatedObject(vc.navigationItem, kApolloGlobeMergeButtonKey);
     if (!globeButton) {
         globeButton = [UIButton buttonWithType:UIButtonTypeSystem];
         globeButton.frame = CGRectMake(0.0, 0.0, 36.0, 32.0);
-        // Pre-26: right-align so the glyph tucks against Apollo's adjacent pill.
-        // Liquid Glass: ApolloApplyGlobeMergeForNavItem re-centers it in the slot.
-        globeButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
         [globeButton addTarget:controller action:@selector(apollo_translationGlobeTapped) forControlEvents:UIControlEventTouchUpInside];
     }
     [globeButton setImage:globeImage forState:UIControlStateNormal];
 
-    UIColor *themeTintColor = ApolloThemeAccentColor() ?: vc.view.tintColor ?: [UIColor systemBlueColor];
-    UIColor *resolvedTint = visibleTranslationApplied ? [UIColor systemGreenColor] : themeTintColor;
-    globeButton.tintColor = resolvedTint;
     globeButton.accessibilityLabel = translatedMode
         ? @"Translation: showing translated. Tap to show original."
         : [NSString stringWithFormat:@"Translation: showing original. Tap to translate to %@.", targetName];
 
-    if (liquidGlass) {
-        // Merge the globe into Apollo's combined trailing container so all icons
-        // share one evenly-spaced group. Track the button on the nav item so the
-        // setRightBarButtonItem(s) hook re-injects it after Apollo rebuilds.
-        objc_setAssociatedObject(vc.navigationItem, kApolloGlobeMergeButtonKey, globeButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        // Drop any separate bar item from a prior pre-26 run (migration safety).
-        if (translationItem && [items containsObject:translationItem]) {
-            [items removeObject:translationItem];
-            vc.navigationItem.rightBarButtonItems = items;
-            objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        ApolloApplyGlobeMergeForNavItem(vc.navigationItem);
-    } else {
-        if (!translationItem) {
-            translationItem = [[UIBarButtonItem alloc] initWithCustomView:globeButton];
-            objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, translationItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        } else if (translationItem.customView != globeButton) {
-            translationItem.customView = globeButton;
-        }
-        translationItem.menu = nil;
-        translationItem.tintColor = resolvedTint;
-        translationItem.accessibilityLabel = globeButton.accessibilityLabel;
-        if (![items containsObject:translationItem]) {
-            // Apollo's rightBarButtonItems are laid out right-to-left. Adding to
-            // the end places the globe just to the left of Apollo's sort/3-dots
-            // pill — same bubble, tighter spacing thanks to the narrower frame.
-            [items addObject:translationItem];
-        }
-        vc.navigationItem.rightBarButtonItems = items;
-    }
+    // Both builds share this layout; only Liquid Glass collapses the actions.
+    objc_setAssociatedObject(vc.navigationItem, kApolloGlobeRemovalPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(vc.navigationItem, kApolloGlobeMergeButtonKey, globeButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloApplyGlobeMergeForNavItem(vc.navigationItem);
 }
 
 static void ApolloToggleThreadTranslationForController(UIViewController *vc) {
@@ -9953,7 +9961,7 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     }
 }
 
-// Liquid Glass trailing-container upkeep. Apollo rebuilds its combined trailing
+// Trailing-container upkeep in both builds. Apollo rebuilds its combined trailing
 // button container on various events (mod-status load, trait changes, etc.) and
 // re-sets it via setRightBarButtonItem(s):. When a nav item is flagged for the
 // globe merge, re-inject the globe into the freshly-built container after each
@@ -9972,7 +9980,7 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     if (ApolloFindInCommentsGlassOwnsRightItems(self)) return; // comments find navigator holds the group
     if (objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);
-    } else {
+    } else if (IsLiquidGlass()) {
         // No globe on this nav item — still make the stock container sit
         // symmetrically in its glass capsule.
         ApolloNormalizeTrailingPillPaddingForNavItem(self);
@@ -9987,7 +9995,7 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     if (ApolloFindInCommentsGlassOwnsRightItems(self)) return; // comments find navigator holds the group
     if (objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);
-    } else {
+    } else if (IsLiquidGlass()) {
         ApolloNormalizeTrailingPillPaddingForNavItem(self);
     }
 }
