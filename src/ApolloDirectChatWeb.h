@@ -71,7 +71,9 @@ void ApolloModernChatControllerOpenConversationPath(UIViewController *controller
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller);
 // YES while `controller` (a modern Chat controller) is inside a conversation
 // (/chat/room/… or a /chat/threads/<id> reply thread) rather than one of the
-// list surfaces. The Inbox hub's back-swipe tracker checks this to decide
+// list surfaces — by the web view's route, or by the page's own report of a
+// conversation pane on screen when a same-document room open delivered no
+// URL change. The Inbox hub's back-swipe tracker checks this to decide
 // which level of the hierarchy one gesture climbs: out of the conversation
 // while one is open, otherwise Chat -> Notifications.
 BOOL ApolloModernChatControllerIsOnConversationRoute(UIViewController * _Nullable controller);
