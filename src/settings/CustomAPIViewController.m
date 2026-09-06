@@ -38,6 +38,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <SafariServices/SafariServices.h>
 #import "B64ImageEncodings.h"
 // Relative path on purpose: a plain "Version.h" can resolve to theos's
 // vendored lowercase version.h from this subdirectory.
@@ -2608,11 +2609,10 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             NSString *currentURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL] ?: @"";
             UITableViewCell *cell = [weakSelf stackedTextFieldCellWithIdentifier:@"Cell_NotifBackend_URL"
-                                                                           label:@"Backend URL"
+                                                                           label:@"Self-hosted Backend URL"
                                                                      placeholder:@"https://apollo.example.com"
                                                                             text:currentURL
-                                                                             tag:TagNotificationBackendURL
-                                                                          detail:@"Self-hosted only. Leave empty to disable."];
+                                                                             tag:TagNotificationBackendURL];
             for (UIView *subview in cell.contentView.subviews) {
                 if ([subview isKindOfClass:[UITextField class]]) {
                     UITextField *tf = (UITextField *)subview;
@@ -2625,6 +2625,66 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }
                                   onSelect:nil];
 
+    // Setup Instructions
+    ApolloSettingsRow *setupInstructions =
+            [ApolloSettingsRow customRowWithID:@"notif.setup"
+                                        cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
+                UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_NotifBackend_Setup"];
+                if (!cell) {
+                    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_NotifBackend_Setup"];
+                    cell.textLabel.textAlignment = NSTextAlignmentCenter;
+                    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                }
+                cell.textLabel.text = @"Setup Instructions";
+                [weakSelf apollo_applyAccentActionTextColorToCell:cell];
+                return cell;
+            }
+                                    onSelect:^{
+                                        NSURL *url = [NSURL URLWithString:@"https://github.com/nickclyde/apollo-backend"];
+                                        SFSafariViewController *safariVC = [[SFSafariViewController alloc] initWithURL:url];
+                                        [weakSelf presentViewController:safariVC animated:YES completion:nil];
+}];
+    
+    ApolloSettingsRow *installBark = nil;
+    if (![[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"bark://"]]) {
+        installBark =
+            [ApolloSettingsRow customRowWithID:@"notif.install-bark"
+                                        cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
+                UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_NotifBackend_InstallBark"];
+                if (!cell) {
+                    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_NotifBackend_InstallBark"];
+                    cell.textLabel.textAlignment = NSTextAlignmentCenter;
+                    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                }
+                cell.textLabel.text = @"Install Bark";
+                [weakSelf apollo_applyAccentActionTextColorToCell:cell];
+                return cell;
+            }
+                                    onSelect:^{
+                                        NSURL *url = [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"];
+                                        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+                                    }];
+    }                                
+                                        
+    ApolloSettingsRow *testConnection =
+            [ApolloSettingsRow customRowWithID:@"notif.test"
+                                        cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
+                UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_NotifBackend_Test"];
+                if (!cell) {
+                    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_NotifBackend_Test"];
+                    cell.textLabel.textAlignment = NSTextAlignmentCenter;
+                    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                }
+                cell.textLabel.text = @"Test Backend Connection";
+                [weakSelf apollo_applyAccentActionTextColorToCell:cell];
+                return cell;
+            }
+                                    onSelect:^{ [weakSelf testNotificationBackendConnection]; }];
+    testConnection.visible = ^BOOL {
+        NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL];
+        return url.length > 0;
+};
+                                    
     ApolloSettingsRow *registrationToken =
         [ApolloSettingsRow customRowWithID:@"notif.token"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -2655,6 +2715,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }
                                   onSelect:nil];
 
+    barkSwitch.visible = ^BOOL {
+        NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL];
+        return url.length > 0;
+};
+
     ApolloSettingsRow *barkURL =
         [ApolloSettingsRow customRowWithID:@"notif.barkURL"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -2664,7 +2729,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                                                      placeholder:@"https://api.day.app/yourdevicekey"
                                                                             text:currentURL
                                                                              tag:TagBarkPushURL
-                                                                          detail:@"From the Bark app's server list. Treat the key like a password."];
+                                                                          detail:@"In Bark, open the Service tab, tap the cloud icon in the top right, select your server and choose Copy Address and Key. Paste the copied value here. Keep your key private."];
             for (UIView *subview in cell.contentView.subviews) {
                 if ([subview isKindOfClass:[UITextField class]]) {
                     UITextField *tf = (UITextField *)subview;
@@ -2676,6 +2741,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         }
                                   onSelect:nil];
+    barkURL.visible = ^BOOL {
+    NSString *backendURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL];
+    return backendURL.length > 0 &&
+           [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBarkNotificationsEnabled];
+};
 
     ApolloSettingsRow *testBark =
         [ApolloSettingsRow customRowWithID:@"notif.testBark"
@@ -2691,27 +2761,19 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return cell;
         }
                                   onSelect:^{ [weakSelf testBarkNotification]; }];
+    testBark.visible = ^BOOL {
+        NSString *barkURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyBarkPushURL];
+        return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBarkNotificationsEnabled] &&
+            barkURL.length > 0 &&
+            [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"bark://"]];
+    };
 
     // Custom rather than a button row: the label is centered, which the shared
     // button-row cell doesn't do.
-    ApolloSettingsRow *testConnection =
-        [ApolloSettingsRow customRowWithID:@"notif.test"
-                                      cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_NotifBackend_Test"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_NotifBackend_Test"];
-                cell.textLabel.textAlignment = NSTextAlignmentCenter;
-                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            }
-            cell.textLabel.text = @"Test Connection";
-            [weakSelf apollo_applyAccentActionTextColorToCell:cell];
-            return cell;
-        }
-                                  onSelect:^{ [weakSelf testNotificationBackendConnection]; }];
-
+    
     return [ApolloSettingsSection sectionWithTitle:@"Notification Backend"
                                             footer:nil
-                                              rows:@[ backendURL, registrationToken, barkSwitch, barkURL,
+                                              rows:@[ backendURL, registrationToken, setupInstructions, installBark, barkSwitch, barkURL,
                                                       testConnection, testBark ]];
 }
 
@@ -3260,25 +3322,48 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             initWithString:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still show where Imgur is blocked (like the UK).\n\nDuckDuckGo can't fetch an album's list of images, so Album Fallback Proxies gets it through public text proxies (r.jina.ai, allorigins.win, codetabs.com) instead. Only the album's Imgur address is sent to them. Turn it off and albums won't load while Imgur is blocked.\n\nVideos and uploads can't be proxied."
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Notification Backend"]) {
-        text = [[NSMutableAttributedString alloc]
-            initWithString:@"For users running their own "
-            attributes:plainAttrs];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"forked apollo-backend"
-            attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/nickclyde/apollo-backend"]}]];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" instance. APNs delivery requires a paid Apple Developer account on the signing side. Leave empty to disable."
+    text = [[NSMutableAttributedString alloc]
+        initWithString:@""
+        attributes:plainAttrs];
+
+    if (ApolloPushNotificationsSupported()) {
+        [text appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"Bark Delivery is optional. Enable it if you'd prefer to receive notifications through the free "
             attributes:plainAttrs]];
-        NSString *barkLead = ApolloPushNotificationsSupported()
-            ? @"\n\nThis build has working native push, but Bark Delivery can reroute notifications through the free "
-            : @"\n\nThis build has no push entitlement, so APNs can never deliver — Bark Delivery works around that: install the free ";
-        NSString *barkTail = ApolloPushNotificationsSupported()
-            ? @" instead; toggling flips the delivery transport immediately, and native push resumes when turned off. Note: notification content passes through the Bark relay unencrypted."
-            : @", copy its push URL, and notifications arrive via Bark with a tap-through back into Apollo (after setup, open Apollo's Notifications settings once to finish registering). Note: notification content passes through the Bark relay unencrypted.";
-        barkTail = [barkTail stringByAppendingString:@" Notifications show your selected app icon automatically; to also hear Apollo's notification sounds, import the matching .caf from the project's assets/bark-sounds via the Bark app's Service tab → Alert Sound → view all sounds → Upload Sound."];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:barkLead attributes:plainAttrs]];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"Bark app"
-            attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]}]];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:barkTail attributes:plainAttrs]];
-    } else if ([sectionTitle isEqualToString:@"Privacy"]) {
+    } else {
+        [text appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"This build can't receive native push notifications because it isn't signed with a paid Apple Developer account. Enable Bark Delivery to receive notifications through the free "
+            attributes:plainAttrs]];
+    }
+
+    [text appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@"Bark app"
+        attributes:@{
+            NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],
+            NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]
+        }]];
+
+    [text appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@".\n\n"
+        attributes:plainAttrs]];
+
+    NSMutableDictionary *boldAttrs = [plainAttrs mutableCopy];
+    boldAttrs[NSFontAttributeName] = [UIFont boldSystemFontOfSize:
+        [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote].pointSize];
+
+    [text appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@"Note:"
+        attributes:boldAttrs]];
+
+    [text appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@" Notification content passes through the Bark relay unencrypted.\n\n"
+        attributes:plainAttrs]];
+
+    [text appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@"To use one of Apollo's notification sounds, import the matching .caf from the project's "
+        @"assets/Bark Sounds via Bark's Service tab → Alert Sound → View All Sounds → Upload Sound."
+        attributes:plainAttrs]];
+} else if ([sectionTitle isEqualToString:@"Privacy"]) {
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Sends one anonymous heartbeat so we can estimate active Apollo Reborn installs. No Reddit activity, account details, or feature usage is collected. More details can be found in our "
             attributes:plainAttrs];
@@ -3757,6 +3842,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }
         textField.text = trimmed;
         [[NSUserDefaults standardUserDefaults] setValue:trimmed forKey:UDKeyNotificationBackendURL];
+        [self visibilityDidChange];
         textField.textColor = [self isNotificationBackendURLValid:trimmed] ? [UIColor labelColor] : [UIColor systemRedColor];
     } else if (textField.tag == TagNotificationBackendRegistrationToken) {
         NSString *trimmed = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -3769,6 +3855,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }
         textField.text = trimmed;
         [[NSUserDefaults standardUserDefaults] setValue:trimmed forKey:UDKeyBarkPushURL];
+        [self visibilityDidChange];
         textField.textColor = [self isNotificationBackendURLValid:trimmed] ? [UIColor labelColor] : [UIColor systemRedColor];
         if (ApolloBarkModeActive()) {
             // Bark is on and the URL is usable — sync the backend device row
@@ -3789,6 +3876,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 - (void)barkNotificationsSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyBarkNotificationsEnabled];
+    [self visibilityDidChange];
 
     if (sender.isOn) {
         // Flip the backend device row to transport=bark right away. With no
