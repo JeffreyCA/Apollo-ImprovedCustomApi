@@ -10,6 +10,11 @@ UIView *ApolloNavigationActionsMenuSourceView(UIView *action);
 
 // Defers measurement, so calling from a layout callback is safe.
 void ApolloNavigationActionsRefresh(UINavigationBar *navigationBar);
+// Collapse this item's action pill at once (no animation). For screens that
+// replace their trailing items in place for a while (the comments find
+// navigator) so the pill neither stays expanded under the stand-in nor comes
+// back expanded when the items return.
+void ApolloNavigationActionsCollapse(UINavigationItem *item);
 
 // Physical bar coordinates. Keep the collapsed reservation for stable title
 // width; the expanded edge is used only for optional collision displacement.

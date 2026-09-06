@@ -120,6 +120,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloCommentsCollapse.xm \
     $(SRC_DIR)/ApolloInboxCommentScroll.xm \
     $(SRC_DIR)/ApolloFindInComments.xm \
+    $(SRC_DIR)/ApolloFindInCommentsGlass.xm \
     $(SRC_DIR)/ApolloStatsRowTouch.xm \
     $(SRC_DIR)/ApolloCommentVoteFlicker.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \

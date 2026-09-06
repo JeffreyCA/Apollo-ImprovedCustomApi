@@ -17,6 +17,7 @@
 #import "ApolloToast.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloTranslation.h"
+#import "ApolloFindInCommentsGlass.h"
 #import "Tweak.h"
 #import "settings/ApolloSettingsGeneralTable.h"
 
@@ -7102,6 +7103,12 @@ static BOOL ApolloDeferGlobeGeometry(UIButton *globe, UIView *container, dispatc
 static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     if (!navItem) return;
     if ([objc_getAssociatedObject(navItem, kApolloGlobeRemovalPendingKey) boolValue]) return;
+    // While a comments search has its match navigator in the trailing group
+    // (ApolloFindInCommentsGlass.xm), Apollo's container is parked off the nav
+    // item: neither merge into the navigator (it has buttons too) nor fall back
+    // to a standalone globe beside it. The items come back after the search and
+    // this re-runs from the setter hook.
+    if (ApolloFindInCommentsGlassOwnsRightItems(navItem)) return;
     UIButton *globe = objc_getAssociatedObject(navItem, kApolloGlobeMergeButtonKey);
     if (!globe) return;
 
@@ -9969,6 +9976,8 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     // cluster. The owner association makes this a small, local invalidation.
     if (sShowSubredditHeaders && !sApplyingGlobeMerge) ApolloSubredditRequestTitleRelayout(self);
     if (sApplyingGlobeMerge) return;
+    if (!IsLiquidGlass()) return;
+    if (ApolloFindInCommentsGlassOwnsRightItems(self)) return; // comments find navigator holds the group
     if (objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);
     } else if (IsLiquidGlass()) {
@@ -9982,6 +9991,8 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     %orig(item, animated);
     if (sShowSubredditHeaders && !sApplyingGlobeMerge) ApolloSubredditRequestTitleRelayout(self);
     if (sApplyingGlobeMerge) return;
+    if (!IsLiquidGlass()) return;
+    if (ApolloFindInCommentsGlassOwnsRightItems(self)) return; // comments find navigator holds the group
     if (objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);
     } else if (IsLiquidGlass()) {
