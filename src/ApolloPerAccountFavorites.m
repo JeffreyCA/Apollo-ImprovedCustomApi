@@ -1,6 +1,7 @@
 #import "ApolloPerAccountFavorites.h"
 
 #import "ApolloAccountCredentials.h"
+#import "ApolloFavoritesSorting.h"
 #ifdef APOLLO_PER_ACCOUNT_FAVORITES_TESTING
 // Keep the state-machine regression harness Foundation-only on the build host.
 #define ApolloLog(fmt, ...) NSLog((fmt), ##__VA_ARGS__)
@@ -214,6 +215,15 @@ static void ApolloPerAccountFavoritesFailClosedForStoreStatus(
     sApolloPerAccountFavoritesIdentityUnknown = NO;
     sApolloPerAccountFavoritesNativeMutationWhileUnknown = NO;
     ApolloPerAccountFavoritesCancelIdentityRetries();
+    // The retained native projection can still be an account's manually
+    // ordered list, not the saved shared list. Return ownership to the shared
+    // scope, but leave sorting effectively off until the user enables it.
+    // Merely canceling the outgoing sort generation is insufficient: the
+    // defaults setter / native notification that detected this failure will
+    // schedule another pass after this function returns. Keep the saved
+    // shared preference intact while preserving this recoverable order.
+    ApolloFavoritesSortingSetScope(kApolloPerAccountFavoritesSharedIdentity);
+    ApolloFavoritesSortingPreserveNativeOrder();
     ApolloLog(@"[PerAccountFavorites] disabled because the favorites store cannot be read safely");
 }
 
@@ -286,6 +296,10 @@ ApolloPerAccountFavoritesBucketsForIdentity(NSString *activeIdentity,
 
 static BOOL ApolloPerAccountFavoritesInstallNativeList(NSArray<NSString *> *favorites) {
     NSArray<NSString *> *safeFavorites = ApolloPerAccountFavoritesSanitizeNativeArray(favorites) ?: @[];
+    // Scope is selected before every projection. Unlike Apollo's star-button
+    // append/delete flow, replacing a whole account projection has no pending
+    // row animation, so its first native refresh can already show sorted rows.
+    safeFavorites = ApolloFavoritesSortingApplyToList(safeFavorites);
     if ([ApolloPerAccountFavoritesNativeList() isEqualToArray:safeFavorites]) return NO;
 
     sApolloPerAccountFavoritesInstallingProjection = YES;
@@ -328,7 +342,10 @@ static void ApolloPerAccountFavoritesSnapshotMaterializedList(void) {
         return;
     }
 
-    NSArray<NSString *> *favorites = ApolloPerAccountFavoritesNativeList();
+    // The visible native list may still be awaiting its post-animation sort.
+    // Persist this account's order now so a quick switch cannot save an append
+    // in the wrong position, without altering the in-flight native row model.
+    NSArray<NSString *> *favorites = ApolloFavoritesSortingApplyToList(ApolloPerAccountFavoritesNativeList());
     if ([buckets[sApolloPerAccountFavoritesMaterializedIdentity] isEqualToArray:favorites]) return;
     buckets[sApolloPerAccountFavoritesMaterializedIdentity] = favorites;
     ApolloPerAccountFavoritesSaveBuckets(buckets);
@@ -427,6 +444,9 @@ static void ApolloPerAccountFavoritesEnterUnknownIdentity(NSString *reason, BOOL
         sApolloPerAccountFavoritesNativeMutationWhileUnknown = NO;
     }
     sApolloPerAccountFavoritesIdentityUnknown = YES;
+    // Retain the last list while identity is quarantined, but do not let a
+    // queued sorting pass or a setting edit attribute it to the wrong user.
+    ApolloFavoritesSortingSetScope(nil);
     if (mayRetry) ApolloPerAccountFavoritesScheduleIdentityRetry(reason);
     if (firstUnknownEntry) {
         ApolloLog(@"[PerAccountFavorites] account identity temporarily unavailable; projection unchanged");
@@ -458,12 +478,14 @@ static void ApolloPerAccountFavoritesReconcileIdentity(NSString *incomingIdentit
     if ([sApolloPerAccountFavoritesMaterializedIdentity isEqualToString:incomingIdentity]) {
         sApolloPerAccountFavoritesIdentityUnknown = NO;
         sApolloPerAccountFavoritesNativeMutationWhileUnknown = NO;
+        ApolloFavoritesSortingSetScope(incomingIdentity);
         if (wasUnknown && nativeMutatedWhileUnknown) {
             // The authoritative resolution returned to the same account, so
             // the native write made during quarantine can now be safely saved.
             ApolloPerAccountFavoritesSnapshotMaterializedList();
         }
         ApolloPerAccountFavoritesCancelIdentityRetries();
+        ApolloFavoritesSortingSchedule();
         return;
     }
 
@@ -480,6 +502,7 @@ static void ApolloPerAccountFavoritesReconcileIdentity(NSString *incomingIdentit
             return;
         }
         sApolloPerAccountFavoritesIdentityUnknown = YES;
+        ApolloFavoritesSortingSetScope(nil);
         // Keep NativeMutationWhileUnknown intact: losing it here would let a
         // later retry cross-write an ambiguous list into the outgoing bucket.
         if (retryable && mayRetry) ApolloPerAccountFavoritesScheduleIdentityRetry(reason);
@@ -494,7 +517,7 @@ static void ApolloPerAccountFavoritesReconcileIdentity(NSString *incomingIdentit
         buckets[kApolloPerAccountFavoritesSharedIdentity] = outgoingFavorites;
         ApolloLog(@"[PerAccountFavorites] preserved an unattributed favorites edit in the shared scope");
     } else if (sApolloPerAccountFavoritesMaterializedIdentity.length > 0) {
-        buckets[sApolloPerAccountFavoritesMaterializedIdentity] = outgoingFavorites;
+        buckets[sApolloPerAccountFavoritesMaterializedIdentity] = ApolloFavoritesSortingApplyToList(outgoingFavorites);
     }
 
     NSArray<NSString *> *incomingFavorites = buckets[incomingIdentity];
@@ -510,6 +533,7 @@ static void ApolloPerAccountFavoritesReconcileIdentity(NSString *incomingIdentit
     sApolloPerAccountFavoritesIdentityUnknown = NO;
     sApolloPerAccountFavoritesNativeMutationWhileUnknown = NO;
     ApolloPerAccountFavoritesCancelIdentityRetries();
+    ApolloFavoritesSortingSetScope(incomingIdentity);
     BOOL changed = ApolloPerAccountFavoritesInstallNativeList(incomingFavorites);
     ApolloPerAccountFavoritesScheduleNativeRefresh();
     ApolloLog(@"[PerAccountFavorites] switched scope (%lu -> %lu favorites, projectionChanged=%d, reason=%@%@)",
@@ -683,9 +707,10 @@ ApolloPerAccountFavoritesSetResult ApolloPerAccountFavoritesSetEnabled(BOOL enab
         sApolloPerAccountFavoritesIdentityUnknown = NO;
         sApolloPerAccountFavoritesNativeMutationWhileUnknown = NO;
         ApolloPerAccountFavoritesCancelIdentityRetries();
-        if (sharedFavorites && ApolloPerAccountFavoritesInstallNativeList(sharedFavorites)) {
-            ApolloPerAccountFavoritesScheduleNativeRefresh();
-        }
+        ApolloFavoritesSortingSetScope(kApolloPerAccountFavoritesSharedIdentity);
+        if (sharedFavorites) ApolloPerAccountFavoritesInstallNativeList(sharedFavorites);
+        // Even identical lists can have different sort policies/reorder handles.
+        ApolloPerAccountFavoritesScheduleNativeRefresh();
         ApolloLog(@"[PerAccountFavorites] disabled; restored Apollo's shared favorites list");
         return ApolloPerAccountFavoritesSetResultApplied;
     }
@@ -741,6 +766,7 @@ ApolloPerAccountFavoritesSetResult ApolloPerAccountFavoritesSetEnabled(BOOL enab
     sApolloPerAccountFavoritesIdentityUnknown = NO;
     sApolloPerAccountFavoritesNativeMutationWhileUnknown = NO;
     ApolloPerAccountFavoritesCancelIdentityRetries();
+    ApolloFavoritesSortingSetScope(activeIdentity);
     ApolloPerAccountFavoritesInstallNativeList(activeFavorites);
     ApolloPerAccountFavoritesScheduleNativeRefresh();
     ApolloLog(@"[PerAccountFavorites] enabled (%@ store, %lu active favorites)",
@@ -854,6 +880,7 @@ void ApolloPerAccountFavoritesSuspendForPreferencesRestore(void) {
         return;
     }
     sApolloPerAccountFavoritesSuspendedForRestore = YES;
+    ApolloFavoritesSortingSuspendForPreferencesRestore();
     ApolloPerAccountFavoritesCancelIdentityRetries();
     ApolloLog(@"[PerAccountFavorites] suspended for preferences restore until relaunch");
 }
@@ -865,6 +892,8 @@ void ApolloPerAccountFavoritesStart(void) {
     }
     if (sApolloPerAccountFavoritesStarted) return;
     sApolloPerAccountFavoritesStarted = YES;
+    ApolloFavoritesSortingSetScope(sPerAccountFavoritesEnabled
+        ? nil : kApolloPerAccountFavoritesSharedIdentity);
 
     // The pre-post NSNotificationCenter hook handles quick switching before any
     // native observer can read the old projection. This observer remains as a
@@ -891,9 +920,13 @@ void ApolloPerAccountFavoritesStart(void) {
         // defaults write from another observer must still be captured.
         if ([note.userInfo[kApolloPerAccountFavoritesProjectionRefreshKey] isEqual:@YES]) return;
         ApolloPerAccountFavoritesNativeFavoritesDidChange();
+        ApolloFavoritesSortingSchedule();
     }];
 
-    if (!sPerAccountFavoritesEnabled) return;
+    if (!sPerAccountFavoritesEnabled) {
+        ApolloFavoritesSortingSchedule();
+        return;
+    }
 
     NSMutableDictionary<NSString *, NSArray<NSString *> *> *preflightBuckets = nil;
     ApolloPerAccountFavoritesStoreStatus preflightStatus =
@@ -935,6 +968,7 @@ void ApolloPerAccountFavoritesStart(void) {
     }
     sApolloPerAccountFavoritesMaterializedIdentity = [activeIdentity copy];
     sApolloPerAccountFavoritesIdentityUnknown = NO;
+    ApolloFavoritesSortingSetScope(activeIdentity);
     if (ApolloPerAccountFavoritesInstallNativeList(activeFavorites)) {
         ApolloPerAccountFavoritesScheduleNativeRefresh();
     }

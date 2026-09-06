@@ -18,6 +18,7 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloPerAccountFavorites.h"
+#import "ApolloFavoritesSorting.h"
 #import "ApolloState.h"
 #import "ApolloTabBarHideStyle.h"
 #import "ApolloTagFilters.h"
@@ -2516,10 +2517,19 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                      title:@"Per-Account Favorites"
                                       isOn:^BOOL { return sPerAccountFavoritesEnabled; }
                                   onToggle:^(UISwitch *sender) { [weakSelf perAccountFavoritesSwitchToggled:sender]; }];
+    ApolloSettingsRow *sortFavoritesAlphabetically =
+        [ApolloSettingsRow switchRowWithID:@"sub.sortFavoritesAlphabetically"
+                                     title:@"Sort Favorites Alphabetically"
+                                      isOn:^BOOL { return sSortFavoritesAlphabetically; }
+                                  onToggle:^(UISwitch *sender) {
+                                      ApolloFavoritesSortingSetEnabled(sender.isOn);
+                                      [sender setOn:sSortFavoritesAlphabetically animated:YES];
+                                  }];
+    sortFavoritesAlphabetically.enabled = ^BOOL { return ApolloFavoritesSortingIsAvailable(); };
 
     return [ApolloSettingsSection sectionWithTitle:@"Favorites"
-                                            footer:@"Keeps an independent Favorites list for each account. First enable copies the current list to existing accounts; new accounts start empty. Turning it off restores Apollo's shared list."
-                                              rows:@[ perAccountFavorites ]];
+                                            footer:@"Per-Account Favorites saves a separate list and sorting preference for each account. First enable copies the current list to existing accounts; new accounts start empty. Turning it off restores the shared list.\nAlphabetical sorting keeps existing and new favorites in order. Turn it off to rearrange them manually while editing the subreddit list."
+                                              rows:@[ perAccountFavorites, sortFavoritesAlphabetically ]];
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -3980,7 +3990,10 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (void)perAccountFavoritesSwitchToggled:(UISwitch *)sender {
     ApolloPerAccountFavoritesSetResult result =
         ApolloPerAccountFavoritesSetEnabled(sender.isOn);
-    if (result == ApolloPerAccountFavoritesSetResultApplied) return;
+    if (result == ApolloPerAccountFavoritesSetResultApplied) {
+        [self reloadRowWithID:@"sub.sortFavoritesAlphabetically"];
+        return;
+    }
 
     [sender setOn:sPerAccountFavoritesEnabled animated:YES];
     if (result == ApolloPerAccountFavoritesSetResultUnsupportedStore) {
@@ -4393,6 +4406,21 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 @implementation ApolloSubredditsSettingsViewController
 - (NSString *)apollo_screenTitle { return @"Subreddits"; }
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    // The quick account switcher leaves this controller on screen, so it does
+    // not get another viewWillAppear. Also refresh when a loading account's
+    // identity resolves and the sorting control becomes available again.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(apollo_favoritesSortingStateDidChange:)
+                                                 name:ApolloFavoritesSortingStateDidChangeNotification
+                                               object:nil];
+}
+- (void)apollo_favoritesSortingStateDidChange:(NSNotification *)notification {
+    (void)notification;
+    [self reloadRowWithID:@"sub.perAccountFavorites"];
+    [self reloadRowWithID:@"sub.sortFavoritesAlphabetically"];
+}
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildSubredditsMainSection],
               [self buildSubredditsFavoritesSection],
@@ -4403,6 +4431,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     // Refresh the Subreddit Sections summary after returning from that screen
     // (the order / Following toggle may have just changed).
     [self reloadRowWithID:@"sub.sections"];
+    // Account changes can select a different alphabetical-sorting preference.
+    [self reloadRowWithID:@"sub.sortFavoritesAlphabetically"];
 }
 @end
 

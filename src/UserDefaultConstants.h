@@ -55,6 +55,11 @@ static NSString *const ApolloFeedShortcutsChangedNotification = @"ApolloFeedShor
 // account's bucket back through Apollo's native FavoriteSubreddits key so every
 // stock reader/mutator continues to work unchanged.
 static NSString *const UDKeyPerAccountFavoritesEnabled = @"PerAccountFavoritesEnabled";
+// Alphabetize shared favorites and disable manual reordering. Default NO.
+static NSString *const UDKeySortFavoritesAlphabetically = @"SortFavoritesAlphabetically";
+// Per-account sorting preferences, keyed by the per-account favorites identity
+// (u:name / anonymous). Missing entries default OFF; shared preference is above.
+static NSString *const UDKeyFavoriteSortingByAccount = @"FavoriteSortingByAccount";
 // Versioned envelope: { "version": 1, "buckets": { "u:name": [subreddits],
 // "anonymous": [subreddits] } }. Missing bucket and explicit empty bucket are
 // intentionally distinct; accounts created after the first migration start empty.
