@@ -38,6 +38,8 @@ static NSInteger (*sEditingStyleOrig)(id, SEL, UITableView *, NSIndexPath *);
 static NSInteger (*sIndentOrig)(id, SEL, UITableView *, NSIndexPath *);
 static UISwipeActionsConfiguration *(*sLeadingSwipeOrig)(id, SEL, UITableView *, NSIndexPath *);
 static UISwipeActionsConfiguration *(*sTrailingSwipeOrig)(id, SEL, UITableView *, NSIndexPath *);
+static CGFloat (*sHeightForHeaderOrig)(id, SEL, UITableView *, NSInteger);
+static void (*sWillDisplayHeaderOrig)(id, SEL, UITableView *, UIView *, NSInteger);
 
 static inline BOOL IsThemesRow(NSIndexPath *ip) { return ip.section == 0 && ip.row == 0; }
 
@@ -268,28 +270,69 @@ static NSInteger Rows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     return n;
 }
 
-// Apollo's Appearance screen builds this row with a UIListContentConfiguration
-// (iOS 14+ cell content API) — the cell renders from that, not from
-// .textLabel, so setting .textLabel.text alone silently no-ops on it and
-// only the legacy label (invisible) changes. Rewrite the content
-// configuration's text when present, and set .textLabel too for the
-// legacy-cell fallback case.
+// The Themes row is a Eureka LabelRow: its cell (Eureka.LabelCellOf<String>)
+// renders through the legacy .textLabel, and Eureka re-renders it FROM THE ROW
+// MODEL (textLabel.text = row.title, i.e. "Themes", then Apollo's cellUpdate
+// re-applies its medium-weight font) on every Cell.update(). Our rewrite runs
+// from cellForRow and willDisplay, which covers dequeues, reloads and the
+// scroll-back-into-view case — but Eureka also calls row.updateCell() from
+// Cell.tintColorDidChange(), and that path never touches the table view's
+// delegate. UIKit dims the presenting view's tint while a UIAlertController is
+// up, so presenting the Post Size action sheet reverted the label to "Themes"
+// and dismissing it (another tint change → another re-render) left it there;
+// only picking an option reloaded the table and healed it (#993). So the cell
+// is marked and its own runtime class gets a tintColorDidChange override that
+// re-asserts our label after Eureka's re-render. The class is taken from the
+// live cell rather than a hardcoded mangled generic name, so it follows
+// whatever Eureka hands us.
 //
-// Cell-time isn't the only place this needs to run: UIKit's cell state
-// machine (automaticallyUpdatesContentConfiguration, on by default) can
-// reapply the cell's ORIGINAL base configuration — Apollo's, not ours —
-// whenever the cell's configuration state changes, which fires again on
-// scroll, selection, or simply the row scrolling back into view after a
-// push/pop. Observed as the label reverting once you leave and return to
-// this screen. Re-assert from willDisplay too, which fires on every one of
-// those passes, not just the initial dequeue.
+// The content-configuration branch stays for the case where a future Apollo
+// build moves this row onto UIListContentConfiguration: there .textLabel is the
+// invisible legacy label and only the configuration's text renders.
+static const void *kThemesRowCellKey = &kThemesRowCellKey;
+
+// The cell class carrying our tintColorDidChange override, and the IMP it
+// displaced (Eureka.Cell's). Resolved from the first Themes cell we see.
+static Class sThemesCellClass = Nil;
+static void (*sThemesCellTintOrig)(id, SEL) = NULL;
+
+static void RewriteThemesRowLabel(UITableViewCell *cell);
+
+static void ThemesCellTintColorDidChange(UITableViewCell *self, SEL _cmd) {
+    if (sThemesCellTintOrig) sThemesCellTintOrig(self, _cmd);   // Eureka: row.updateCell() → "Themes" + medium font
+    if (objc_getAssociatedObject(self, kThemesRowCellKey)) RewriteThemesRowLabel(self);
+}
+
+static void InstallThemesCellTintHook(Class cls) {
+    if (!cls || sThemesCellClass) return;
+    // A KVO/isa-swizzled cell reports a dynamic subclass; hook the class that
+    // actually owns the Eureka override chain, not the ephemeral subclass.
+    while (cls && strncmp(class_getName(cls), "NSKVONotifying_", 15) == 0) cls = class_getSuperclass(cls);
+    SEL sel = @selector(tintColorDidChange);
+    Method m = class_getInstanceMethod(cls, sel);              // inherited Eureka.Cell override (or UIView's)
+    if (!m) return;
+    sThemesCellClass = cls;
+    sThemesCellTintOrig = (void (*)(id, SEL))method_getImplementation(m);
+    class_replaceMethod(cls, sel, (IMP)ThemesCellTintColorDidChange, "v@:");
+    ApolloLog(@"ThemeManager: Themes row tint hook installed on %@", NSStringFromClass(cls));
+}
+
 static void RewriteThemesRowLabel(UITableViewCell *cell) {
+    if (!objc_getAssociatedObject(cell, kThemesRowCellKey)) {
+        objc_setAssociatedObject(cell, kThemesRowCellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        InstallThemesCellTintHook(object_getClass(cell));
+    }
     if ([cell.contentConfiguration isKindOfClass:[UIListContentConfiguration class]]) {
         UIListContentConfiguration *config = [(UIListContentConfiguration *)cell.contentConfiguration copy];
         config.text = @"Theme Manager";
         cell.contentConfiguration = config;
     }
     cell.textLabel.text = @"Theme Manager";
+    // Apollo gives its Themes row a medium-weight face; every other row on this
+    // screen is regular. The row is ours now, so match its neighbours — same
+    // size (tracks Apollo's own text-size slider), regular weight (#993).
+    UIFont *font = cell.textLabel.font;
+    if (font.pointSize > 0) cell.textLabel.font = [UIFont systemFontOfSize:font.pointSize weight:UIFontWeightRegular];
 }
 
 static UITableViewCell *Cell(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
@@ -390,6 +433,54 @@ static UISwipeActionsConfiguration *TrailingSwipe(id self, SEL _cmd, UITableView
     return sTrailingSwipeOrig ? sTrailingSwipeOrig(self, _cmd, tv, ip) : nil;
 }
 
+// ---------------------------------------------------------------------------
+// Keep the first section header ("Themes") the height it first displayed at.
+//
+// Eureka answers heightForHeaderInSection: with UITableViewAutomaticDimension,
+// so UIKit self-sizes the header view — and for the FIRST section that
+// measurement includes an extra ~17pt of top padding whenever UIKit considers
+// the header the table's "top header". That decision isn't stable: UIKit ties
+// it to the navigation controller's scroll-view observation state
+// (UIScrollView._shouldAdjustLayoutToCollapseTopSpacing — the iOS 26 name; the
+// same flip reproduces on iOS 17), which is on while the bar is observing this
+// table (first display → unpadded, 38pt at default size) and off after any
+// UIAlertController has been presented over it. The next reload then measures
+// the reused header WITH the padding (55.33pt) and the whole table jumps down
+// by 17pt: change Post Size, toggle Use System Text Size. Stock Apollo does
+// this too (verified against main), it just went unnoticed until the label fix
+// had people watching this exact row.
+//
+// Rather than chase UIKit's private flag, pin the section 0 header to the
+// height UIKit gave it the first time it was displayed, per screen instance and
+// per content size category (the only input that legitimately changes it —
+// Apollo restyles the header font in willDisplayHeaderView, AFTER UIKit has
+// measured, so Apollo's own text-size slider never affected the height). The
+// label sits identically inside the pinned frame whether or not UIKit later
+// flags the header as "top", so nothing visible moves.
+// ---------------------------------------------------------------------------
+static const void *kThemesHeaderPinKey = &kThemesHeaderPinKey;   // @{@"category": NSString, @"height": NSNumber}
+
+static CGFloat HeightForHeader(id self, SEL _cmd, UITableView *tv, NSInteger section) {
+    if (section == 0) {
+        NSDictionary *pin = objc_getAssociatedObject(self, kThemesHeaderPinKey);
+        NSString *category = tv.traitCollection.preferredContentSizeCategory ?: @"";
+        if (pin && [pin[@"category"] isEqualToString:category]) return [pin[@"height"] doubleValue];
+    }
+    return sHeightForHeaderOrig ? sHeightForHeaderOrig(self, _cmd, tv, section) : UITableViewAutomaticDimension;
+}
+
+static void WillDisplayHeader(id self, SEL _cmd, UITableView *tv, UIView *view, NSInteger section) {
+    if (sWillDisplayHeaderOrig) sWillDisplayHeaderOrig(self, _cmd, tv, view, section);
+    if (section != 0 || view.bounds.size.height <= 0) return;
+    NSString *category = tv.traitCollection.preferredContentSizeCategory ?: @"";
+    NSDictionary *pin = objc_getAssociatedObject(self, kThemesHeaderPinKey);
+    if (!pin || ![pin[@"category"] isEqualToString:category]) {
+        objc_setAssociatedObject(self, kThemesHeaderPinKey,
+                                 @{@"category": category, @"height": @(view.bounds.size.height)},
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
 #define SAVE_AND_REPLACE(sel, var, fn, sig) do { \
     Method m = class_getInstanceMethod(cls, sel); \
     var = m ? (typeof(var))class_getMethodImplementation(cls, sel) : NULL; \
@@ -402,6 +493,8 @@ static void InstallAppearanceHooks(void) {
     Class cls = objc_getClass("_TtC6Apollo32SettingsAppearanceViewController");
     if (!cls) { ApolloLog(@"ThemeManager: SettingsAppearanceViewController missing"); return; }
 
+    SAVE_AND_REPLACE(@selector(tableView:heightForHeaderInSection:), sHeightForHeaderOrig, HeightForHeader, "d@:@q");
+    SAVE_AND_REPLACE(@selector(tableView:willDisplayHeaderView:forSection:), sWillDisplayHeaderOrig, WillDisplayHeader, "v@:@@q");
     SAVE_AND_REPLACE(@selector(tableView:numberOfRowsInSection:), sRowsOrig, Rows, "q@:@q");
     SAVE_AND_REPLACE(@selector(tableView:cellForRowAtIndexPath:), sCellOrig, Cell, "@@:@@");
     SAVE_AND_REPLACE(@selector(tableView:heightForRowAtIndexPath:), sHeightOrig, Height, "d@:@@");
