@@ -309,6 +309,8 @@ extern NSInteger sSubredditFeedLayout;
 // Opt-in per-account FavoriteSubreddits projection. Defaults OFF; see
 // ApolloPerAccountFavorites.{h,m}.
 extern BOOL sPerAccountFavoritesEnabled;
+// Effective sorting preference for the materialized favorites scope.
+extern BOOL sSortFavoritesAlphabetically;
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;

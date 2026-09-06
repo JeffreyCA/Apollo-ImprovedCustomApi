@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 
 #import "ApolloAccountCredentials.h"
+#import "ApolloFavoritesSorting.h"
 #import "ApolloPerAccountFavorites.h"
 #import "UserDefaultConstants.h"
 
@@ -10,12 +11,15 @@
 // suite, so it needs neither a production reset API nor the simulator's data.
 // The three identity providers stand in for AccountManager's runtime state.
 BOOL sPerAccountFavoritesEnabled = NO;
+BOOL sSortFavoritesAlphabetically = NO;
 static ApolloPersistedAccountIdentityStatus sTestLiveStatus = ApolloPersistedAccountIdentitySignedIn;
 static ApolloPersistedAccountIdentityStatus sTestPersistedStatus = ApolloPersistedAccountIdentitySignedIn;
 static NSString *sTestLiveUsername = @"a";
 static NSString *sTestPersistedUsername = @"a";
 static NSUInteger sTestIdentityLookups = 0;
 static NSUserDefaults *sTestDefaults = nil;
+static NSUInteger sTestNativeFavoritesWrites = 0;
+static NSUInteger sTestBucketWrites = 0;
 
 ApolloPersistedAccountIdentityStatus ApolloResolveLiveActiveAccountIdentity(
     NSString **outNormalizedUsername) {
@@ -49,7 +53,20 @@ BOOL ApolloResolvePersistedAccountUsernames(NSSet<NSString *> **outUsernames) {
     // the public mutation entry point, including writes during a notification.
     // Production projection writes must suppress themselves in the real module.
     if ([key isEqualToString:UDKeyApolloFavoriteSubreddits]) {
+        sTestNativeFavoritesWrites++;
         ApolloPerAccountFavoritesNativeFavoritesDidChange();
+        ApolloFavoritesSortingSchedule();
+    } else if ([key isEqualToString:UDKeyPerAccountFavoriteSubreddits]) {
+        sTestBucketWrites++;
+    }
+}
+
+- (void)removeObjectForKey:(NSString *)key {
+    [super removeObjectForKey:key];
+    if ([key isEqualToString:UDKeyApolloFavoriteSubreddits]) {
+        sTestNativeFavoritesWrites++;
+        ApolloPerAccountFavoritesNativeFavoritesDidChange();
+        ApolloFavoritesSortingSchedule();
     }
 }
 
@@ -254,6 +271,413 @@ static void TestFirstEnableClonesSharedFavorites(void) {
     Require(sPerAccountFavoritesEnabled, @"the explicit opt-in enables the feature");
 }
 
+static void StartSortingStore(void) {
+    SeedReadyStore();
+    NSMutableDictionary *store = [[sTestDefaults objectForKey:UDKeyPerAccountFavoriteSubreddits] mutableCopy];
+    store[@"buckets"] = @{
+        @"anonymous": @[@"anonymousZulu", @"anonymousAlpha"],
+        @"shared": @[@"sharedZulu", @"sharedAlpha"],
+        @"u:a": @[@"Zulu", @"sub10", @"Bravo", @"Sub2", @"alpha"],
+        @"u:b": @[@"bZulu", @"bAlpha"],
+    };
+    [sTestDefaults setObject:store forKey:UDKeyPerAccountFavoriteSubreddits];
+    [sTestDefaults setObject:store[@"buckets"][@"shared"] forKey:UDKeyApolloFavoriteSubreddits];
+    ApolloPerAccountFavoritesStart();
+    DrainMainQueue();
+}
+
+static void ResolveAccountA(void) {
+    sTestLiveStatus = ApolloPersistedAccountIdentitySignedIn;
+    sTestLiveUsername = @"a";
+    ApolloPerAccountFavoritesLiveAccountStateDidChange();
+}
+
+static void TestSortingToggle(void) {
+    StartSortingStore();
+    NSArray *original = @[@"Zulu", @"sub10", @"Bravo", @"Sub2", @"alpha"];
+    NSArray *ordered = @[@"alpha", @"Bravo", @"Sub2", @"sub10", @"Zulu"];
+    Require(!sSortFavoritesAlphabetically, @"sorting is off by default for an account");
+    Require(ApolloFavoritesSortingIsAvailable(), @"sorting is available for the active account");
+    RequireList(ApolloFavoritesSortingApplyToList(original), original,
+                @"disabled sorting preserves the original manual order");
+
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    Require(sSortFavoritesAlphabetically, @"enabling updates the current sorting flag");
+    RequireList(NativeFavorites(), ordered,
+                @"enabling sorts names naturally without changing their spelling or case");
+    RequireList(Buckets()[@"u:a"], ordered, @"the sorted order persists in A's bucket");
+    RequireList(ApolloFavoritesSortingApplyToList(original), ordered,
+                @"the public ordering helper uses the current scope preference");
+    Require([sTestDefaults objectForKey:UDKeyFavoriteSortingByAccount][@"u:a"] != nil,
+            @"the account sorting preference is persisted");
+
+    ApolloFavoritesSortingSetEnabled(NO);
+    DrainMainQueue();
+    Require(!sSortFavoritesAlphabetically, @"disabling permits manual favorites order again");
+    RequireList(NativeFavorites(), ordered, @"disabling leaves the current order intact");
+    [sTestDefaults setObject:original forKey:UDKeyApolloFavoriteSubreddits];
+    DrainMainQueue();
+    RequireList(NativeFavorites(), original, @"manual reordering remains intact while off");
+    RequireList(Buckets()[@"u:a"], original, @"manual reordering persists in A's bucket");
+}
+
+static void TestSortingNativeAddAndRemove(void) {
+    StartSortingStore();
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+
+    NSArray *added = @[@"alpha", @"Bravo", @"Sub2", @"sub10", @"Zulu", @"aardvark"];
+    NSArray *ordered = @[@"aardvark", @"alpha", @"Bravo", @"Sub2", @"sub10", @"Zulu"];
+    [sTestDefaults setObject:added forKey:UDKeyApolloFavoriteSubreddits];
+    RequireList(NativeFavorites(), added,
+                @"native additions finish their original setter before deferred reordering");
+    DrainMainQueue();
+    RequireList(NativeFavorites(), ordered, @"new favorites move into alphabetical order");
+    RequireList(Buckets()[@"u:a"], ordered, @"a new favorite persists in sorted account order");
+
+    NSArray *removed = @[@"aardvark", @"alpha", @"Sub2", @"sub10", @"Zulu"];
+    [sTestDefaults setObject:removed forKey:UDKeyApolloFavoriteSubreddits];
+    DrainMainQueue();
+    RequireList(NativeFavorites(), removed, @"removing a favorite preserves sorted survivors");
+    RequireList(Buckets()[@"u:a"], removed, @"favorite removal persists in the account bucket");
+
+    [sTestDefaults removeObjectForKey:UDKeyApolloFavoriteSubreddits];
+    DrainMainQueue();
+    Require(NativeFavorites() == nil || NativeFavorites().count == 0,
+            @"removing the native key leaves no favorites");
+    RequireList(Buckets()[@"u:a"], @[], @"removing all favorites clears the account bucket");
+}
+
+static void TestSortingAccountSwitchWithPendingWrite(void) {
+    StartSortingStore();
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    NSArray *aAdded = @[@"alpha", @"Bravo", @"Sub2", @"sub10", @"Zulu", @"aardvark"];
+    NSArray *aOrdered = @[@"aardvark", @"alpha", @"Bravo", @"Sub2", @"sub10", @"Zulu"];
+    [sTestDefaults setObject:aAdded forKey:UDKeyApolloFavoriteSubreddits];
+    // Switch before the native setter's deferred sorting callback executes.
+    ResolveAccountB();
+    DrainMainQueue();
+    Require(!sSortFavoritesAlphabetically, @"B's missing sorting preference defaults to off");
+    RequireList(NativeFavorites(), @[@"bZulu", @"bAlpha"],
+                @"A's pending sorting work cannot reorder B's manual list");
+    RequireList(Buckets()[@"u:b"], @[@"bZulu", @"bAlpha"],
+                @"A's pending addition cannot enter B's bucket");
+    RequireList(Buckets()[@"u:a"], aOrdered,
+                @"switching away preserves A's newest favorite in sorted order");
+
+    [sTestDefaults setObject:@[@"bZulu", @"bAlpha", @"bMiddle"]
+                     forKey:UDKeyApolloFavoriteSubreddits];
+    DrainMainQueue();
+    ResolveAccountA();
+    DrainMainQueue();
+    Require(sSortFavoritesAlphabetically, @"returning to A restores its enabled preference");
+    RequireList(NativeFavorites(), aOrdered, @"returning to A restores its sorted additions");
+    RequireList(Buckets()[@"u:b"], @[@"bZulu", @"bAlpha", @"bMiddle"],
+                @"B's additions remain in manual order across account switches");
+}
+
+static void TestSortingSharedPreferenceIsSeparate(void) {
+    StartSortingStore();
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    DisableFavorites();
+    DrainMainQueue();
+    Require(!sSortFavoritesAlphabetically, @"shared sorting has its own default-off preference");
+    RequireList(NativeFavorites(), @[@"sharedZulu", @"sharedAlpha"],
+                @"A's enabled preference cannot sort the shared list");
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    Require([sTestDefaults boolForKey:UDKeySortFavoritesAlphabetically],
+            @"shared sorting persists in the shared preference");
+    RequireList(NativeFavorites(), @[@"sharedAlpha", @"sharedZulu"], @"shared sorting is applied");
+    Require(ApolloPerAccountFavoritesSetEnabled(YES) == ApolloPerAccountFavoritesSetResultApplied,
+            @"per-account favorites can resume after shared sorting");
+    ResolveAccountB();
+    DrainMainQueue();
+    Require(!sSortFavoritesAlphabetically, @"shared sorting cannot enable B's preference");
+    RequireList(NativeFavorites(), @[@"bZulu", @"bAlpha"], @"B retains manual order");
+    DisableFavorites();
+    DrainMainQueue();
+    Require(sSortFavoritesAlphabetically, @"returning to shared favorites restores shared sorting");
+    RequireList(NativeFavorites(), @[@"sharedAlpha", @"sharedZulu"],
+                @"shared favorites retain their sorted order");
+    ResolveAccountA();
+    Require(ApolloPerAccountFavoritesSetEnabled(YES) == ApolloPerAccountFavoritesSetResultApplied,
+            @"A's account scope can resume");
+    DrainMainQueue();
+    Require(sSortFavoritesAlphabetically, @"A's preference survived shared and B transitions");
+}
+
+static void TestSortingUnknownIdentityCannotWrite(void) {
+    StartSortingStore();
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    [sTestDefaults setObject:@[@"Zulu", @"alpha"] forKey:UDKeyApolloFavoriteSubreddits];
+    sTestLiveStatus = ApolloPersistedAccountIdentityUnknown;
+    sTestLiveUsername = nil;
+    ApolloPerAccountFavoritesLiveAccountStateDidChange();
+    Require(!ApolloFavoritesSortingIsAvailable(), @"sorting is unavailable while identity is unknown");
+    NSDictionary *savedPreferences = [[sTestDefaults objectForKey:UDKeyFavoriteSortingByAccount] copy];
+    NSUInteger nativeWrites = sTestNativeFavoritesWrites;
+    ApolloFavoritesSortingSetEnabled(NO);
+    ApolloFavoritesSortingSetEnabled(YES);
+    ApolloFavoritesSortingSchedule();
+    DrainMainQueue();
+    Require(sTestNativeFavoritesWrites == nativeWrites,
+            @"pending sorting cannot rewrite favorites while account identity is unknown");
+    RequireList(NativeFavorites(), @[@"Zulu", @"alpha"],
+                @"the unknown account's native list remains untouched");
+    Require([[sTestDefaults objectForKey:UDKeyFavoriteSortingByAccount] isEqual:savedPreferences],
+            @"unknown identity cannot save a sorting preference for the prior account");
+    ResolveAccountB();
+    DrainMainQueue();
+    Require(ApolloFavoritesSortingIsAvailable(), @"sorting becomes available when identity resolves");
+    Require(!sSortFavoritesAlphabetically, @"B still has sorting off after identity recovery");
+    RequireList(NativeFavorites(), @[@"bZulu", @"bAlpha"],
+                @"resolving B installs B's manual list without stale A work");
+}
+
+static void TestSortingRestoreCancelsPendingWork(void) {
+    StartSortingStore();
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    [sTestDefaults setObject:@[@"Zulu", @"alpha"] forKey:UDKeyApolloFavoriteSubreddits];
+    ApolloPerAccountFavoritesSuspendForPreferencesRestore();
+    Require(!ApolloFavoritesSortingIsAvailable(), @"sorting is unavailable during preferences restore");
+    NSDictionary *restoredPreferences = @{@"u:a": @NO, @"u:b": @YES};
+    [sTestDefaults setObject:restoredPreferences forKey:UDKeyFavoriteSortingByAccount];
+    [sTestDefaults setObject:@[@"restoreZulu", @"restoreAlpha"] forKey:UDKeyApolloFavoriteSubreddits];
+    NSDictionary *restoredStore = @{
+        @"version": @1,
+        @"buckets": @{@"shared": @[@"restored"], @"u:b": @[@"restoreZulu", @"restoreAlpha"]},
+    };
+    [sTestDefaults setObject:restoredStore forKey:UDKeyPerAccountFavoriteSubreddits];
+    NSUInteger nativeWrites = sTestNativeFavoritesWrites;
+    NSUInteger bucketWrites = sTestBucketWrites;
+    ApolloFavoritesSortingSetEnabled(YES);
+    ApolloFavoritesSortingSchedule();
+    DrainMainQueue();
+    Require(sTestNativeFavoritesWrites == nativeWrites && sTestBucketWrites == bucketWrites,
+            @"queued sorting and projection work cannot write during restore replay");
+    RequireList(NativeFavorites(), @[@"restoreZulu", @"restoreAlpha"],
+                @"restored favorites preserve the order supplied by the backup");
+    Require([[sTestDefaults objectForKey:UDKeyPerAccountFavoriteSubreddits] isEqual:restoredStore],
+            @"sorting cannot write the pre-restore account into the restored bucket envelope");
+    Require([[sTestDefaults objectForKey:UDKeyFavoriteSortingByAccount] isEqual:restoredPreferences],
+            @"sorting cannot overwrite restored account preferences");
+}
+
+static void TestSortingRefreshIsIdempotent(void) {
+    StartSortingStore();
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    DrainMainQueue();
+    NSUInteger nativeWrites = sTestNativeFavoritesWrites;
+    NSUInteger bucketWrites = sTestBucketWrites;
+    __block NSUInteger delivered = 0;
+    id observer = [[NSNotificationCenter defaultCenter]
+        addObserverForName:ApolloFavoriteSubredditsUpdatedNotification
+                    object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
+        delivered++;
+    }];
+    for (NSUInteger i = 0; i < 5; i++) {
+        ApolloFavoritesSortingSetEnabled(YES);
+        ApolloFavoritesSortingSchedule();
+        ApolloPerAccountFavoritesLiveAccountStateDidChange();
+    }
+    DrainMainQueue();
+    DrainMainQueue();
+    [[NSNotificationCenter defaultCenter] removeObserver:observer];
+    Require(sTestNativeFavoritesWrites == nativeWrites && sTestBucketWrites == bucketWrites,
+            @"repeated sorting and account refreshes do not rewrite an already sorted list");
+    Require(delivered == 0, @"already sorted refreshes do not emit redundant native list updates");
+}
+
+static void TestSortingUnmarkedNativeNotification(void) {
+    StartSortingStore();
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    [(ApolloFavoritesTestDefaults *)sTestDefaults
+        setNativeFavoritesWithoutSetterHook:@[@"Zulu", @"alpha", @"middle"]];
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:ApolloFavoriteSubredditsUpdatedNotification object:nil];
+    DrainMainQueue();
+    RequireList(NativeFavorites(), @[@"alpha", @"middle", @"Zulu"],
+                @"ordinary native notifications alphabetize writes from an alternate persistence path");
+    RequireList(Buckets()[@"u:a"], @[@"alpha", @"middle", @"Zulu"],
+                @"unmarked native notifications persist the sorted account list");
+}
+
+static id ObserveSortingSettings(NSMutableArray<NSArray<NSNumber *> *> *snapshots) {
+    // Stand in for a settings screen that stays open throughout a quick account
+    // switch. Read the same public state as the row when its refresh arrives.
+    return [[NSNotificationCenter defaultCenter]
+        addObserverForName:ApolloFavoritesSortingStateDidChangeNotification
+                    object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
+        Require([NSThread isMainThread], @"sorting settings refresh arrives on the main thread");
+        [snapshots addObject:@[@(sSortFavoritesAlphabetically), @(ApolloFavoritesSortingIsAvailable())]];
+    }];
+}
+
+static void TestSortingSettingsFollowQuickAccountSwitch(void) {
+    [sTestDefaults setObject:@{@"u:a": @NO, @"u:b": @YES}
+                     forKey:UDKeyFavoriteSortingByAccount];
+    StartSortingStore();
+    Require(!sSortFavoritesAlphabetically, @"the settings screen initially shows A's disabled sorting");
+    NSMutableArray *snapshots = [NSMutableArray array];
+    id observer = ObserveSortingSettings(snapshots);
+
+    ResolveAccountB();
+    DrainMainQueue();
+    RequireList(snapshots, @[@[@YES, @YES]],
+                @"the open settings screen refreshes to B's enabled sorting");
+    ResolveAccountA();
+    DrainMainQueue();
+    RequireList(snapshots, @[@[@YES, @YES], @[@NO, @YES]],
+                @"the same settings observer refreshes back to A's disabled sorting");
+
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    ApolloFavoritesSortingSetEnabled(NO);
+    DrainMainQueue();
+    RequireList(snapshots, @[@[@YES, @YES], @[@NO, @YES], @[@YES, @YES], @[@NO, @YES]],
+                @"changes to the active account's sorting preference also refresh the settings row");
+    [[NSNotificationCenter defaultCenter] removeObserver:observer];
+}
+
+static void TestSortingSettingsFollowIdentityAvailability(void) {
+    StartSortingStore();
+    NSMutableArray *snapshots = [NSMutableArray array];
+    id observer = ObserveSortingSettings(snapshots);
+
+    // Both accounts have sorting off, so observing only the effective on/off
+    // value would miss the control becoming unavailable and available again.
+    sTestLiveStatus = ApolloPersistedAccountIdentityUnknown;
+    sTestLiveUsername = nil;
+    ApolloPerAccountFavoritesLiveAccountStateDidChange();
+    DrainMainQueue();
+    RequireList(snapshots, @[@[@NO, @NO]],
+                @"the open settings screen disables its switch while account identity is unknown");
+    ResolveAccountB();
+    DrainMainQueue();
+    RequireList(snapshots, @[@[@NO, @NO], @[@NO, @YES]],
+                @"identity recovery re-enables the visible switch even when both sorting preferences are off");
+    [[NSNotificationCenter defaultCenter] removeObserver:observer];
+}
+
+static void TestSortingSettingsCoalesceQuickAccountSwitches(void) {
+    [sTestDefaults setObject:@{@"u:a": @NO, @"u:b": @YES}
+                     forKey:UDKeyFavoriteSortingByAccount];
+    StartSortingStore();
+    NSMutableArray *snapshots = [NSMutableArray array];
+    id observer = ObserveSortingSettings(snapshots);
+
+    ResolveAccountB();
+    ResolveAccountA();
+    ResolveAccountB();
+    Require(snapshots.count == 0, @"account changes defer settings refresh until the current turn completes");
+    DrainMainQueue();
+    DrainMainQueue();
+    RequireList(snapshots, @[@[@YES, @YES]],
+                @"rapid account changes deliver one refresh containing the final account's state");
+    [[NSNotificationCenter defaultCenter] removeObserver:observer];
+}
+
+static void TestSortingSettingsIgnoreUnchangedScope(void) {
+    [sTestDefaults setObject:@{@"u:a": @NO, @"u:b": @YES}
+                     forKey:UDKeyFavoriteSortingByAccount];
+    StartSortingStore();
+    NSMutableArray *snapshots = [NSMutableArray array];
+    id observer = ObserveSortingSettings(snapshots);
+
+    for (NSUInteger i = 0; i < 5; i++) {
+        ResolveAccountA();
+        ApolloFavoritesSortingSetScope(@"u:a");
+        ApolloFavoritesSortingSetEnabled(NO);
+    }
+    DrainMainQueue();
+    Require(snapshots.count == 0, @"repeated calls for unchanged A settings do not refresh the row");
+    ResolveAccountB();
+    DrainMainQueue();
+    for (NSUInteger i = 0; i < 5; i++) {
+        ResolveAccountB();
+        ApolloFavoritesSortingSetScope(@"u:b");
+        ApolloFavoritesSortingSetEnabled(YES);
+    }
+    DrainMainQueue();
+    DrainMainQueue();
+    RequireList(snapshots, @[@[@YES, @YES]],
+                @"repeated calls for unchanged B settings do not duplicate its account-change refresh");
+    [[NSNotificationCenter defaultCenter] removeObserver:observer];
+}
+
+static void TestSortingStoreFailurePreservesManualOrder(BOOL unsupportedVersion, BOOL unmarkedNotification) {
+    StartSortingStore();
+    [sTestDefaults setBool:YES forKey:UDKeySortFavoritesAlphabetically];
+    Require(!sSortFavoritesAlphabetically, @"A's sorting is off while the saved shared preference is on");
+    NSDictionary *unreadableStore = unsupportedVersion
+        ? @{@"version": @99, @"buckets": @{@"futureData": @[@"retained"]}}
+        : @{@"version": @1, @"buckets": @{@"u:a": @[@"retained"]}};
+    [sTestDefaults setObject:unreadableStore forKey:UDKeyPerAccountFavoriteSubreddits];
+    NSUInteger bucketWrites = sTestBucketWrites;
+    NSMutableArray *snapshots = [NSMutableArray array];
+    id observer = ObserveSortingSettings(snapshots);
+    NSArray *manual = @[@"Zebra", @"Apple", @"banana"];
+    if (unmarkedNotification) {
+        [(ApolloFavoritesTestDefaults *)sTestDefaults setNativeFavoritesWithoutSetterHook:manual];
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:ApolloFavoriteSubredditsUpdatedNotification object:nil];
+    } else {
+        [sTestDefaults setObject:manual forKey:UDKeyApolloFavoriteSubreddits];
+    }
+    Require(!sPerAccountFavoritesEnabled && ![sTestDefaults boolForKey:UDKeyPerAccountFavoritesEnabled],
+            @"an unreadable account store disables per-account favorites");
+    NSUInteger nativeWrites = sTestNativeFavoritesWrites;
+    DrainMainQueue();
+    DrainMainQueue();
+    Require(sTestNativeFavoritesWrites == nativeWrites,
+            @"the mutation detecting the unreadable store cannot schedule a shared-sort rewrite");
+    RequireList(NativeFavorites(), manual, @"store failure preserves the native list's manual order");
+    Require(!sSortFavoritesAlphabetically && ApolloFavoritesSortingIsAvailable(),
+            @"sorting remains available but effectively off after store failure");
+    Require([sTestDefaults boolForKey:UDKeySortFavoritesAlphabetically],
+            @"preserving manual order does not overwrite the saved shared sorting preference");
+    RequireList(snapshots, @[@[@NO, @YES]],
+                @"the visible settings row receives the final manual sorting state after store failure");
+
+    // The defaults setter and ordinary native notifications may both follow
+    // the failed mutation. Repeated reconciliation must also keep this order.
+    ApolloFavoritesSortingSetScope(@"shared");
+    NSArray *edited = @[@"Zebra", @"Apple", @"banana", @"aardvark"];
+    [sTestDefaults setObject:edited forKey:UDKeyApolloFavoriteSubreddits];
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:ApolloFavoriteSubredditsUpdatedNotification object:nil];
+    nativeWrites = sTestNativeFavoritesWrites;
+    DrainMainQueue();
+    DrainMainQueue();
+    Require(sTestNativeFavoritesWrites == nativeWrites,
+            @"subsequent native mutations cannot bypass manual order preservation");
+    RequireList(NativeFavorites(), edited, @"favorites remain manually ordered until the user enables sorting");
+    RequireList(snapshots, @[@[@NO, @YES]],
+                @"reconciling the same shared scope keeps the effective off state without redundant refreshes");
+    Require(sTestBucketWrites == bucketWrites &&
+            [[sTestDefaults objectForKey:UDKeyPerAccountFavoriteSubreddits] isEqual:unreadableStore],
+            @"neither failure recovery nor later mutations overwrite the unreadable account envelope");
+
+    ApolloFavoritesSortingSetEnabled(YES);
+    DrainMainQueue();
+    Require(sSortFavoritesAlphabetically, @"an explicit user choice resumes sorting after store failure");
+    RequireList(NativeFavorites(), @[@"aardvark", @"Apple", @"banana", @"Zebra"],
+                @"explicitly enabling sorting alphabetizes the retained favorites");
+    RequireList(snapshots, @[@[@NO, @YES], @[@YES, @YES]],
+                @"the visible switch reflects the user's explicit sorting choice after recovery");
+    Require([[sTestDefaults objectForKey:UDKeyPerAccountFavoriteSubreddits] isEqual:unreadableStore],
+            @"resuming shared sorting leaves the unreadable account envelope intact");
+    [[NSNotificationCenter defaultCenter] removeObserver:observer];
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc != 2) {
@@ -285,6 +709,38 @@ int main(int argc, const char *argv[]) {
                 TestFeatureOffIsDormant();
             } else if ([scenario isEqualToString:@"first-enable"]) {
                 TestFirstEnableClonesSharedFavorites();
+            } else if ([scenario isEqualToString:@"sorting-toggle"]) {
+                TestSortingToggle();
+            } else if ([scenario isEqualToString:@"sorting-native-add-remove"]) {
+                TestSortingNativeAddAndRemove();
+            } else if ([scenario isEqualToString:@"sorting-account-switch-pending"]) {
+                TestSortingAccountSwitchWithPendingWrite();
+            } else if ([scenario isEqualToString:@"sorting-shared-preference"]) {
+                TestSortingSharedPreferenceIsSeparate();
+            } else if ([scenario isEqualToString:@"sorting-unknown-identity"]) {
+                TestSortingUnknownIdentityCannotWrite();
+            } else if ([scenario isEqualToString:@"sorting-restore-pending"]) {
+                TestSortingRestoreCancelsPendingWork();
+            } else if ([scenario isEqualToString:@"sorting-refresh-idempotent"]) {
+                TestSortingRefreshIsIdempotent();
+            } else if ([scenario isEqualToString:@"sorting-unmarked-notification"]) {
+                TestSortingUnmarkedNativeNotification();
+            } else if ([scenario isEqualToString:@"sorting-settings-account-switch"]) {
+                TestSortingSettingsFollowQuickAccountSwitch();
+            } else if ([scenario isEqualToString:@"sorting-settings-identity-availability"]) {
+                TestSortingSettingsFollowIdentityAvailability();
+            } else if ([scenario isEqualToString:@"sorting-settings-coalesced-switches"]) {
+                TestSortingSettingsCoalesceQuickAccountSwitches();
+            } else if ([scenario isEqualToString:@"sorting-settings-unchanged-scope"]) {
+                TestSortingSettingsIgnoreUnchangedScope();
+            } else if ([scenario isEqualToString:@"sorting-invalid-store-native-write"]) {
+                TestSortingStoreFailurePreservesManualOrder(NO, NO);
+            } else if ([scenario isEqualToString:@"sorting-invalid-store-native-notification"]) {
+                TestSortingStoreFailurePreservesManualOrder(NO, YES);
+            } else if ([scenario isEqualToString:@"sorting-unsupported-store-native-write"]) {
+                TestSortingStoreFailurePreservesManualOrder(YES, NO);
+            } else if ([scenario isEqualToString:@"sorting-unsupported-store-native-notification"]) {
+                TestSortingStoreFailurePreservesManualOrder(YES, YES);
             } else {
                 Require(NO, [@"unknown scenario: " stringByAppendingString:scenario]);
             }
