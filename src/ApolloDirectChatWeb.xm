@@ -462,6 +462,7 @@ static NSString *ApolloDirectChatEnhancementScript(NSDictionary *palette) {
         // judged under) changes, from the enhancement sweep: every pane flip is
         // a DOM mutation, so the observers deliver it within a frame.
         "const compactChatBackControlVisible=()=>{for(const r of roots())for(const node of r.querySelectorAll('button,[role=button],a')){if(!isChatBackControl(node))continue;const rect=node.getBoundingClientRect();if(rect.width<=120&&rect.height<=80)return true;}return false;};"
+        "window.__apolloChatBackControlVisible=compactChatBackControlVisible;"
         "window.__apolloChatReportSurface=()=>{if(mailRoute())return;const path=location.pathname;const judged=/^\\/chat\\/?$/.test(path)||path.startsWith('/chat/room/')||path.startsWith('/chat/user/')||/^\\/chat\\/threads\\/[^/]+/.test(path);const room=judged&&compactChatBackControlVisible();const key=(room?'1':'0')+path;if(window.__apolloChatSurfaceKey===key)return;window.__apolloChatSurfaceKey=key;try{window.webkit?.messageHandlers?.apolloChatSurface?.postMessage({room,path});}catch(e){}};"
         // Native swipe-back driver. A back gesture inside a conversation must
         // do exactly what tapping that control does — Reddit's own pane flip
@@ -487,7 +488,10 @@ static NSString *ApolloDirectChatEnhancementScript(NSDictionary *palette) {
         // repaired.
         "setTimeout(()=>{if(location.pathname!==from)return;for(const r of roots())for(const node of r.querySelectorAll('button,[role=button],a'))if(isChatBackControl(node))return;if(!from.startsWith('/chat/room/')&&!from.startsWith('/chat/user/')&&!/^\\/chat\\/threads\\/[^/]+/.test(from))return;history.back();},90);"
         "return 'clicked';};"
-        "const redirectEmbeddedRoomBack=event=>{if(mailRoute()||!window.__apolloEmbeddedInboxMessages)return;if((window.__apolloEmbeddedSection||'messages')!=='messages')return;if(!location.pathname.startsWith('/chat/room/'))return;for(const node of event.composedPath?.()||[]){if(!isChatBackControl(node))continue;"
+        // The new-chat pane (/chat/user/<id>, reached from a profile's
+        // envelope when there is no room yet) has the same Back control and
+        // the same pane flip, and its URL stayed put in exactly the same way.
+        "const redirectEmbeddedRoomBack=event=>{if(mailRoute()||!window.__apolloEmbeddedInboxMessages)return;if((window.__apolloEmbeddedSection||'messages')!=='messages')return;if(!location.pathname.startsWith('/chat/room/')&&!location.pathname.startsWith('/chat/user/'))return;for(const node of event.composedPath?.()||[]){if(!isChatBackControl(node))continue;"
         "const from=location.pathname;"
         // The pass-through branch cannot stopImmediatePropagation (that would
         // also swallow Reddit's own pane-flip handler), so the same tap
@@ -852,6 +856,7 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
 - (void)apollo_reconcilePageSurfaceReportedPath:(NSString *)reportedPath;
 - (void)apollo_noteTouchBeganOnPage;
 - (void)apollo_resettleEmbeddedListForPath:(NSString *)path;
+- (void)apollo_repairRouteAfterPageLeftConversation:(NSString *)routePath;
 - (void)apollo_openPendingInPlaceConversationIfReady;
 - (void)apollo_openQueuedConversation:(NSString *)pending attempt:(NSUInteger)attempt;
 - (void)apollo_releaseLoadingCoverIfHeld;
@@ -2257,7 +2262,20 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
     // repair (or the fallback list load) delivers the list treatments through
     // the observer; only a room the page alone knew about has nobody else to
     // do it.
-    if (!self.pageConversationTreatmentsApplied) return;
+    if (!self.pageConversationTreatmentsApplied) {
+        // Unless the route never follows: Reddit's Back control flips the
+        // pane and leaves the URL on the conversation. The page script's
+        // click interception repairs that URL for a room or new-chat pane
+        // entered from the list, but a tap that slipped past it (a control
+        // it did not hook, a conversation with no list entry behind it)
+        // would leave every route treatment — the hidden tab bar, the room
+        // geometry, Reddit's list chrome — in place over the list. Repair
+        // the URL here once the page has settled.
+        if (routeSaysConversation && !self.chatTransitionPending && !self.webView.loading) {
+            [self apollo_repairRouteAfterPageLeftConversation:[self apollo_currentChatPath]];
+        }
+        return;
+    }
     self.pageConversationTreatmentsApplied = NO;
     NSURL *url = self.webView.URL;
     NSString *path = url.path ?: @"";
@@ -2266,6 +2284,43 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
     [self apollo_updateTabBarVisibilityForURL:url animated:NO];
     [self apollo_updateEmbeddedWebChromeForURL:url];
     [self apollo_resettleEmbeddedListForPath:path];
+}
+
+// The page reported a list while the route still reads `routePath`, and no
+// route change followed on its own. A beat later — the page's own repair
+// (redirectEmbeddedRoomBack's history.back()) runs 60 ms after the tap, and a
+// room whose header is still rendering must not be mistaken for a list — if
+// the page is still on that URL with no Back control on screen, pop the
+// conversation entry when the list is behind it (__apolloChatRoomFromList),
+// else rewrite the URL in place. Either drives the URL observer, which owns
+// every list treatment, and the sweep is poked so Reddit's list chrome hides
+// without waiting for the next DOM mutation.
+- (void)apollo_repairRouteAfterPageLeftConversation:(NSString *)routePath {
+    if (![self apollo_isChatConversationPath:routePath]) return;
+    NSUInteger generation = self.readinessGeneration;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self || generation != self.readinessGeneration) return;
+        // Back in a room, or the route moved on its own meanwhile.
+        if (self.pageConversationVisible) return;
+        if (![[self apollo_currentChatPath] isEqualToString:routePath]) return;
+        if (self.chatTransitionPending || self.webView.loading) return;
+        NSString *script = [NSString stringWithFormat:
+            @"(()=>{const route=%@;let here=location.pathname;try{here=decodeURIComponent(here);}catch(e){}"
+             "if(here!==route)return 'moved:'+here;"
+             "if(window.__apolloChatBackControlVisible?.())return 'conversation still on screen';"
+             "const poke=()=>{for(const ms of [60,300])setTimeout(()=>window.__apolloChatEnhancementSweep?.(),ms);};"
+             "if(window.__apolloChatRoomFromList){history.back();poke();return 'popped the conversation entry';}"
+             "history.replaceState(null,'','/chat');poke();return 'rewrote the URL to /chat';})()",
+            ApolloDirectChatJSStringLiteral(routePath)];
+        [self.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+            ApolloLog(@"[DirectChatWeb] Page left %@ without a route change; URL repair: %@",
+                      routePath, error ? error.localizedDescription
+                                       : ([result isKindOfClass:[NSString class]] ? result : @"(no result)"));
+        }];
+    });
 }
 
 // Every touch that lands on the page while a list is showing refreshes the
