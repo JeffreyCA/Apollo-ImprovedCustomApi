@@ -266,12 +266,6 @@ static NSString *const UDKeyTabBarCollapseSide = @"TabBarCollapseSide";
 // "search takeover" (nav slides away + fades, field docks to the top and grows). Mutually
 // exclusive with the default nav-hide mode. Liquid Glass only. Default NO. See ApolloSearchInPlace.xm.
 static NSString *const UDKeyKeepSearchBarInPlace = @"KeepSearchBarInPlace";
-// Liquid Glass nav bar title placement. ON (default): center the title in the
-// gap between the back pill and the trailing pill so it reads balanced whatever
-// the trailing cluster holds (translation globe on or off). OFF: center it on
-// the screen itself, nudged just enough to clear a pill it would overlap.
-// See ApolloRecenterTitleControl in ApolloLiquidGlass.xm.
-static NSString *const UDKeyLGTitleGapCentering = @"LGTitleGapCentering";
 // iPad only, Liquid Glass only. When ON, forces the iOS 26 floating tab bar to
 // dock at the BOTTOM (classic tab bar) instead of the top-center pill, which on
 // iPad overlaps Apollo's search bar. Temporary stopgap for issue #387 until the

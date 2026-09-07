@@ -1,6 +1,7 @@
 #import "ApolloActionMenu.h"
 #import "ApolloCommon.h"
 #import "ApolloNativeActionMenus.h"
+#import "ApolloNavigationActions.h"
 #import "ApolloNativeActionMetadata.h"
 #import "ApolloSwiftRuntime.h"
 #import "ApolloThemeRuntime.h"
@@ -17,6 +18,9 @@ static char kApolloNativeActionMenuLifecycleFallbackKey;
 static char kApolloNativeActionMenuPresenterKey;
 static char kApolloNativeActionMenuSourceViewKey;
 static char kApolloNativeActionMenuWrappedSourceActionKey;
+static char kApolloNativeActionMenuWindowPresenterKey;
+static char kApolloNativeActionMenuWindowRequestKey;
+static char kApolloNativeActionMenuSurfaceStateKey;
 
 static __weak UIView *sApolloNativeActionMenuSourceView = nil;
 static __weak UIView *sApolloNativeActionMenuConfigurationSourceView = nil;
@@ -27,34 +31,181 @@ static NSUInteger sApolloNativeActionMenuCaptureDepth = 0;
 static BOOL sApolloNativeActionMenuModeratorStyleStack[32];
 static BOOL sApolloNativeActionMenuNextPresentationModeratorStyle = NO;
 
+// Rapid handoffs can share a source across presenters. Track each session's
+// identity without retaining its presenter or source view.
+@interface ApolloNativeActionMenuSurfaceState : NSObject
+@property (nonatomic, weak) UIView *surface;
+@property (nonatomic, weak) UIWindow *window;
+@property (nonatomic) NSUInteger requestGeneration;
+@property (nonatomic, strong) NSMutableSet<NSObject *> *identities;
+@property (nonatomic, strong) NSMutableOrderedSet<NSString *> *updateKeys;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, dispatch_block_t> *updates;
+@end
+
+@implementation ApolloNativeActionMenuSurfaceState
+- (instancetype)init {
+    if ((self = [super init])) {
+        _identities = [NSMutableSet set];
+        _updateKeys = [NSMutableOrderedSet orderedSet];
+        _updates = [NSMutableDictionary dictionary];
+    }
+    return self;
+}
+@end
+
+static void ApolloNativeActionMenuReleaseSurface(ApolloNativeActionMenuSurfaceState *state,
+                                                   NSObject *identity) {
+    if (![state.identities containsObject:identity]) return;
+    [state.identities removeObject:identity];
+    // Remove before invoking, then recheck: callbacks can open menus or replace keys.
+    while (state.identities.count == 0 && state.updateKeys.count) {
+        if (!state.surface) {
+            [state.updateKeys removeAllObjects];
+            [state.updates removeAllObjects];
+            break;
+        }
+        NSString *key = state.updateKeys.firstObject;
+        dispatch_block_t update = state.updates[key];
+        [state.updateKeys removeObjectAtIndex:0];
+        [state.updates removeObjectForKey:key];
+        if (update) update();
+    }
+    UIView *surface = state.surface;
+    if (!state.identities.count && !state.updateKeys.count &&
+        objc_getAssociatedObject(surface, &kApolloNativeActionMenuSurfaceStateKey) == state) {
+        objc_setAssociatedObject(surface, &kApolloNativeActionMenuSurfaceStateKey, nil,
+                                 OBJC_ASSOCIATION_ASSIGN);
+    }
+}
+
+@interface ApolloNativeActionMenuSurfaceLease : NSObject
+@property (nonatomic, strong) ApolloNativeActionMenuSurfaceState *state;
+@property (nonatomic, strong) NSObject *identity;
+- (void)invalidate;
+@end
+
+@implementation ApolloNativeActionMenuSurfaceLease
+- (void)invalidate {
+    if (!_identity) return;
+    // UIKit releases render assertions after our completion. Schedule release
+    // before the selected action's next-turn callback; autorelease-delayed
+    // deallocation must not change that order.
+    ApolloNativeActionMenuSurfaceState *state = _state;
+    NSObject *identity = _identity;
+    _state = nil;
+    _identity = nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloNativeActionMenuReleaseSurface(state, identity);
+    });
+}
+- (void)dealloc {
+    // Release abandoned sessions too; invalidation is idempotent.
+    [self invalidate];
+}
+@end
+
+static ApolloNativeActionMenuSurfaceLease *ApolloNativeActionMenuAcquireSurface(UIView *surface,
+                                                                                 NSUInteger generation) {
+    if (!surface) return nil;
+    ApolloNativeActionMenuSurfaceState *state = objc_getAssociatedObject(surface, &kApolloNativeActionMenuSurfaceStateKey);
+    if (!state) {
+        state = [ApolloNativeActionMenuSurfaceState new];
+        state.surface = surface;
+        objc_setAssociatedObject(surface, &kApolloNativeActionMenuSurfaceStateKey, state,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    state.window = surface.window;
+    state.requestGeneration = generation;
+    ApolloNativeActionMenuSurfaceLease *lease = [ApolloNativeActionMenuSurfaceLease new];
+    lease.state = state;
+    lease.identity = [NSObject new];
+    [state.identities addObject:lease.identity];
+    return lease;
+}
+
+BOOL ApolloNativeActionMenuOwnsNavigationSurface(UIView *surface) {
+    ApolloNativeActionMenuSurfaceState *state = objc_getAssociatedObject(surface, &kApolloNativeActionMenuSurfaceStateKey);
+    return state.identities.count > 0;
+}
+
+BOOL ApolloNativeActionMenuDeferNavigationUpdate(UIView *surface, NSString *key, dispatch_block_t update) {
+    ApolloNativeActionMenuSurfaceState *state = objc_getAssociatedObject(surface, &kApolloNativeActionMenuSurfaceStateKey);
+    if (!state.identities.count || !key.length || !update) return NO;
+    [state.updateKeys addObject:key];
+    state.updates[key] = [update copy];
+    return YES;
+}
+
 @interface ApolloNativeActionMenuPresenter : NSObject <UIContextMenuInteractionDelegate>
 @property (nonatomic, strong) UIMenu *menu;
 @property (nonatomic, weak) UIView *sourceView;
-// Issue #249: the REAL tapped control (sort/ellipsis bar button, cell "..."
-// button). The interaction stays on the invisible proxy anchor, but the
-// highlight/dismiss previews target this view so the iOS 26 liquid-glass
-// "magic morph" has a visible source to bloom out of.
+// The tapped control supplies its strip's entire glass surface when owned;
+// otherwise it supplies only geometry, never an arbitrary ancestor.
 @property (nonatomic, weak) UIView *morphSourceView;
 @property (nonatomic, strong) UIContextMenuInteraction *interaction;
 @property (nonatomic, assign) BOOL removeSourceViewOnEnd;
 @property (nonatomic, weak) id actionController;
 @property (nonatomic, copy) dispatch_block_t afterDismissalAction;
+@property (nonatomic, strong) ApolloNativeActionMenuSurfaceLease *surfaceLease;
 // Keep the presentation window and anchor point for the menu's short lifetime.
 // A selected action may push another controller before UIKit asks for its
 // dismissal preview, detaching the nav-bar proxy from the window on iOS 27.
 @property (nonatomic, strong) UIWindow *presentationWindow;
 @property (nonatomic, assign) CGPoint presentationAnchorCenter;
-@property (nonatomic, strong) UIView *dismissalFallbackView;
-// Empty throwaway view pinned over morphSourceView; this is what UIKit portals
-// into the glass platter, so the real control keeps drawing. See
-// ApolloNativeActionMenuCreateMorphStandIn().
+// Reuse the preview in both directions; its window-backed target survives detachment.
 @property (nonatomic, strong) UIView *morphStandInView;
+@property (nonatomic, strong) UIView *morphHostView;
+@property (nonatomic, strong) UITargetedPreview *morphPreview;
+@property (nonatomic, assign) BOOL didBeginPresentation;
+@property (nonatomic, assign) BOOL didRequestConfiguration;
+@property (nonatomic, assign) BOOL dismissing;
+@property (nonatomic, assign) BOOL ended;
+@property (nonatomic, copy) dispatch_block_t pendingPresentationAction;
+@property (nonatomic, weak) UIWindow *requestWindow;
+@property (nonatomic, assign) NSUInteger requestGeneration;
+@property (nonatomic, strong) id nativePresentation;
+- (BOOL)presentFromView:(UIView *)source completion:(dispatch_block_t)completion;
+- (id)nativeHandoffPresentationForSource:(UIView *)source;
+- (void)captureNativePresentation;
+- (void)finishPresentation;
 @end
 
-// The anchor view owns the presenter for exactly as long as the menu can use
-// it. Keep the reverse lookup from ActionController non-owning: the presenter's
-// UIMenu actions retain that controller, so a direct RETAIN association here
-// would close a cycle and prevent the aborted-presentation -dealloc cleanup.
+// Track the latest request separately from retiring sessions, which still own
+// their sources. A weak reference avoids a window/presenter retain cycle.
+static ApolloNativeActionMenuPresenter *ApolloNativeActionMenuActivePresenter(UIWindow *window) {
+    NSHashTable *holder = objc_getAssociatedObject(window, &kApolloNativeActionMenuWindowPresenterKey);
+    return holder.anyObject;
+}
+
+static void ApolloNativeActionMenuSetActivePresenter(UIWindow *window, ApolloNativeActionMenuPresenter *presenter) {
+    if (!window) return;
+    NSHashTable *holder = presenter ? [NSHashTable weakObjectsHashTable] : nil;
+    if (presenter) [holder addObject:presenter];
+    objc_setAssociatedObject(window, &kApolloNativeActionMenuWindowPresenterKey, holder, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+BOOL ApolloNativeActionMenuDeferNavigationCollapse(UIView *surface, dispatch_block_t collapse) {
+    ApolloNativeActionMenuSurfaceState *state = objc_getAssociatedObject(surface, &kApolloNativeActionMenuSurfaceStateKey);
+    if (!state.identities.count || !collapse) return NO;
+    __weak UIWindow *weakWindow = state.window;
+    NSUInteger generation = state.requestGeneration;
+    ApolloNativeActionMenuDeferNavigationUpdate(surface, @"native-menu.collapse", ^{
+        UIWindow *window = weakWindow;
+        NSUInteger latest = [objc_getAssociatedObject(window, &kApolloNativeActionMenuWindowRequestKey) unsignedIntegerValue];
+        ApolloNativeActionMenuPresenter *active = ApolloNativeActionMenuActivePresenter(window);
+        if (window && latest == generation && (!active || active.ended)) collapse();
+    });
+    // Ownership includes the completion-to-release gap. Reopening cancels only
+    // this collapse by generation, preserving unrelated geometry updates.
+    ApolloNativeActionMenuPresenter *presenter = ApolloNativeActionMenuActivePresenter(state.window);
+    if (presenter.surfaceLease.state == state && !presenter.ended && !presenter.dismissing) {
+        [presenter.interaction dismissMenu];
+    }
+    return YES;
+}
+
+// The anchor owns the presenter; its menu actions retain ActionController.
+// Keep this reverse lookup weak to avoid a cycle after session cleanup.
 static ApolloNativeActionMenuPresenter *ApolloNativeActionMenuPresenterForController(id actionController) {
     NSHashTable *holder = objc_getAssociatedObject(actionController,
                                                     &kApolloNativeActionMenuPresenterKey);
@@ -901,73 +1052,21 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     return [UIMenu menuWithTitle:title children:children];
 }
 
-// Keep the tapped "..." control on screen for the whole menu lifecycle.
-//
-// UIKit builds the liquid-glass platter by portaling the morph preview's view
-// (a CAPortalLayer pointed at its layer). CoreAnimation stops drawing a
-// portaled layer in its original position for as long as the portal is alive —
-// a render-server effect, so from the app's side the control still looks
-// perfectly healthy (hidden NO, alpha 1, contents set) while its *presentation*
-// layer reads opacity 0. Clearing the portal's hidesSourceLayer does not undo
-// it; only the portal going away does. And the portal outlives the dismissal
-// animation — by ~1s on device — so the control sat blank long after the menu
-// was gone, which reads as the dots vanishing and slowly popping back.
-//
-// So don't let UIKit portal the real thing. This pins an empty throwaway view
-// over the control, exactly its size, and hands UIKit that as the preview: the
-// stand-in absorbs the portaling and the control itself never stops drawing.
-//
-// The stand-in is deliberately *blank* rather than a snapshot. The preview's
-// frame is all the morph needs — it drives where the glass platter blooms from
-// and collapses back to — while any pixels in it get carried inside the platter
-// as a second copy of the icon that animates with the morph. With the control
-// now permanently visible underneath, that copy showed up as a duplicate set of
-// dots sliding into place at the end of the dismissal. Empty stand-in, empty
-// platter: the glass shape blooms out of the control and the control is the
-// only thing ever drawing the icon.
-static UIView *ApolloNativeActionMenuCreateMorphStandIn(UIView *sourceView) {
-    UIView *container = sourceView.superview;
-    if (!container || !sourceView.window || CGRectIsEmpty(sourceView.bounds)) return nil;
-
-    UIView *standIn = [[UIView alloc] initWithFrame:sourceView.frame];
-    standIn.backgroundColor = UIColor.clearColor;
-    standIn.opaque = NO;
-    standIn.userInteractionEnabled = NO;
-    standIn.accessibilityElementsHidden = YES;
-    [container insertSubview:standIn aboveSubview:sourceView];
-    ApolloLog(@"[NativeActionMenu] Morphing from a stand-in over %@ so it stays drawn", sourceView);
-    return standIn;
-}
-
-// Matches the treatment the invisible proxy anchor gets below: a contentless
-// preview must not pick up UIPreviewParameters' default platter background or
-// drop shadow, or the empty stand-in would render as a grey box.
-static UITargetedPreview *ApolloNativeActionMenuStandInPreview(UIView *standIn) {
-    UIPreviewParameters *parameters = [UIPreviewParameters new];
-    parameters.backgroundColor = UIColor.clearColor;
-    parameters.visiblePath = [UIBezierPath bezierPathWithRect:standIn.bounds];
-    SEL setAppliesShadowSelector = NSSelectorFromString(@"setAppliesShadow:");
-    if ([parameters respondsToSelector:setAppliesShadowSelector]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(parameters, setAppliesShadowSelector, NO);
-    }
-    return [[UITargetedPreview alloc] initWithView:standIn parameters:parameters];
-}
+// Use the owned glass surface for both morph directions; a blank stand-in
+// leaves two visible lenses and warped glyphs. Non-owned controls use only geometry.
+// All targets need a stable window-hosted view: iOS 27 AnimationKit requires a
+// superview, so UIWindow itself is invalid, even when the source page detaches.
 
 @implementation ApolloNativeActionMenuPresenter
 
-// Normally the teardown in -willEndForConfiguration: takes the stand-in out.
-// This catches the presentation that never got a dismissal (aborted before it
-// opened), so a stale copy can't ride along on a recycled cell.
-- (void)dealloc {
-    [_morphStandInView removeFromSuperview];
-    [_dismissalFallbackView removeFromSuperview];
-}
+// End ownership explicitly, including aborts: the anchor retains its presenter.
 
 - (UIContextMenuConfiguration *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(__unused CGPoint)location {
     UIMenu *menu = self.menu;
-    if (!menu) return nil;
+    if (!menu || self.ended) return nil;
+    self.didRequestConfiguration = YES;
 
-    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(__unused NSArray<UIMenuElement *> *suggestedActions) {
+    return [UIContextMenuConfiguration configurationWithIdentifier:NSUUID.UUID previewProvider:nil actionProvider:^UIMenu *(__unused NSArray<UIMenuElement *> *suggestedActions) {
         return menu;
     }];
 }
@@ -1004,173 +1103,243 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
     return ApolloNativeActionMenuCompactMenuStyle();
 }
 
+- (UITargetedPreview *)previewForCurrentSource {
+    if (self.ended) return nil;
+    UIWindow *window = self.presentationWindow ?: self.sourceView.window;
+    if (!window) return nil;
+
+    // Preserve a detached source's last target, not the proxy button's 1pt center.
+    UIView *source = self.morphSourceView ?: (self.morphPreview ? nil : self.sourceView);
+    UIView *ownedSurface = ApolloNavigationActionsMenuSourceView(source);
+    UIView *geometry = ownedSurface ?: source;
+    // For non-owned controls, copy native geometry without portaling the live view.
+    if (geometry == source && self.morphSourceView) {
+        SEL selector = NSSelectorFromString(@"_morphView");
+        if ([source respondsToSelector:selector]) {
+            UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(source, selector);
+            if (resolved.window == window) geometry = resolved;
+        }
+    }
+    CGPoint center = self.presentationAnchorCenter;
+    CGSize size = self.morphPreview ? self.morphPreview.view.bounds.size : CGSizeMake(1, 1);
+    if (geometry.window == window && !CGRectIsEmpty(geometry.bounds)) {
+        CGRect rect = [geometry convertRect:geometry.bounds toView:window];
+        center = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
+        if (!self.morphPreview) size = rect.size;
+    }
+    if (!self.morphPreview) {
+        UIView *host = [[UIView alloc] initWithFrame:window.bounds];
+        host.backgroundColor = UIColor.clearColor;
+        host.opaque = NO;
+        host.userInteractionEnabled = NO;
+        host.accessibilityElementsHidden = YES;
+        host.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [window addSubview:host];
+        self.morphHostView = host;
+        CGPoint targetCenter = [window convertPoint:center toView:host];
+        UIView *previewSource = ownedSurface;
+        if (!previewSource) {
+            UIView *placeholder = [[UIView alloc] initWithFrame:(CGRect){CGPointZero, size}];
+            placeholder.backgroundColor = UIColor.clearColor;
+            placeholder.opaque = NO;
+            placeholder.userInteractionEnabled = NO;
+            placeholder.accessibilityElementsHidden = YES;
+            placeholder.center = targetCenter;
+            [host addSubview:placeholder];
+            self.morphStandInView = placeholder;
+            previewSource = placeholder;
+        }
+        UIPreviewParameters *parameters = [UIPreviewParameters new];
+        parameters.backgroundColor = UIColor.clearColor;
+        parameters.visiblePath = [UIBezierPath bezierPathWithRoundedRect:previewSource.bounds
+            cornerRadius:MIN(size.width, size.height) / 2];
+        parameters.shadowPath = [UIBezierPath bezierPath];
+        UIPreviewTarget *target = [[UIPreviewTarget alloc] initWithContainer:host center:targetCenter];
+        self.morphPreview = [[UITargetedPreview alloc] initWithView:previewSource parameters:parameters target:target];
+    } else if (hypot(self.presentationAnchorCenter.x - center.x,
+                      self.presentationAnchorCenter.y - center.y) > 0.5) {
+        // Follow a live source; retain the last window-backed target if detached.
+        CGPoint targetCenter = [window convertPoint:center toView:self.morphHostView];
+        UIPreviewTarget *target = [[UIPreviewTarget alloc] initWithContainer:self.morphHostView center:targetCenter];
+        [UIView performWithoutAnimation:^{ self.morphStandInView.center = targetCenter; }];
+        self.morphPreview = [self.morphPreview retargetedPreviewWithTarget:target];
+    }
+    self.presentationAnchorCenter = center;
+    return self.morphPreview;
+}
+
 - (UITargetedPreview *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction previewForHighlightingMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
-    // Issue #249: give the liquid morph a visible source. UIKit swaps this
-    // preview for -[UITargetedPreview _resolvedMorphablePreview] and blooms
-    // the menu out of it; the native button path builds it over the control's
-    // _morphView (the glass background platter when there is one, else the
-    // control itself) — see _UIControlMenuSupportTargetedPreviewOverViews().
-    UIView *morphSource = self.morphSourceView;
-    if (morphSource.window) {
-        UIView *morphView = morphSource;
-        SEL morphViewSelector = NSSelectorFromString(@"_morphView");
-        if ([morphSource respondsToSelector:morphViewSelector]) {
-            UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(morphSource, morphViewSelector);
-            if (resolved.window) morphView = resolved;
-        }
-
-        // Hand UIKit a stand-in instead of the control itself, so the control
-        // survives being portaled (see ApolloNativeActionMenuCreateMorphStandIn).
-        // Both the highlight and the dismiss preview reuse the same stand-in;
-        // the teardown in -willEndForConfiguration: takes it back out.
-        UIView *standIn = self.morphStandInView;
-        if (!standIn.window) {
-            [standIn removeFromSuperview];
-            standIn = ApolloNativeActionMenuCreateMorphStandIn(morphView);
-            self.morphStandInView = standIn;
-        }
-        if (standIn) {
-            return ApolloNativeActionMenuStandInPreview(standIn);
-        }
-        return [[UITargetedPreview alloc] initWithView:morphView];
-    }
-
-    // Fallback (real control gone/windowless): the invisible proxy anchor.
-    // No morph in this case, but the menu still appears anchored correctly.
-    UIView *sourceView = self.sourceView;
-    if (!sourceView) return nil;
-
-    UIPreviewParameters *parameters = [UIPreviewParameters new];
-    parameters.backgroundColor = UIColor.clearColor;
-    parameters.visiblePath = [UIBezierPath bezierPathWithRect:sourceView.bounds];
-    SEL setAppliesShadowSelector = NSSelectorFromString(@"setAppliesShadow:");
-    if ([parameters respondsToSelector:setAppliesShadowSelector]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(parameters, setAppliesShadowSelector, NO);
-    }
-    return [[UITargetedPreview alloc] initWithView:sourceView parameters:parameters];
+    return [self previewForCurrentSource];
 }
 
 - (UITargetedPreview *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction previewForDismissingMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
-    // Dismissal deliberately does NOT reuse the morph-view preview: UIKit
-    // snapshots that view and flies it from the collapsed menu's anchor back to
-    // the control's frame, so the "..." button visibly glides back into its row
-    // after every menu dismissal. Returning an invisible preview anchored on
-    // the proxy keeps the menu's own fade-out and lets the real control simply
-    // reappear in place (restored in willEndForConfiguration below) with no
-    // flight. Do not return nil here — nil makes UIKit fall back to the
-    // presentation (morph) preview and the glide comes back.
-    UIView *sourceView = self.sourceView;
-    if (!sourceView) return nil;
+    return [self previewForCurrentSource];
+}
 
-    // iOS 27 throws if initWithView:parameters: is handed a view that is no
-    // longer in a window. A menu action can legitimately navigate before UIKit
-    // requests this dismissal preview, which detaches a nav-bar source and its
-    // proxy. Preserve the invisible-preview behavior by substituting a
-    // temporary 1pt anchor in the original presentation window.
-    if (!sourceView.window) {
-        UIWindow *window = self.presentationWindow;
-        if (!window) {
-            for (UIWindow *candidate in ApolloAllWindows()) {
-                if (candidate.isKeyWindow) {
-                    window = candidate;
-                    break;
-                }
-            }
-        }
-        if (!window) {
-            ApolloLog(@"[NativeActionMenu] No window for dismissal preview");
-            return nil;
-        }
-
-        UIView *fallback = self.dismissalFallbackView;
-        if (!fallback.window) {
-            [fallback removeFromSuperview];
-            CGPoint center = self.presentationAnchorCenter;
-            fallback = [[UIView alloc] initWithFrame:CGRectMake(center.x - 0.5,
-                                                                center.y - 0.5,
-                                                                1.0,
-                                                                1.0)];
-            fallback.backgroundColor = UIColor.clearColor;
-            fallback.opaque = NO;
-            fallback.userInteractionEnabled = NO;
-            fallback.accessibilityElementsHidden = YES;
-            [window addSubview:fallback];
-            self.dismissalFallbackView = fallback;
-            ApolloLog(@"[NativeActionMenu] Original dismissal anchor detached; using window fallback");
-        }
-        sourceView = fallback;
-    }
-
-    UIPreviewParameters *parameters = [UIPreviewParameters new];
-    parameters.backgroundColor = UIColor.clearColor;
-    parameters.visiblePath = [UIBezierPath bezierPathWithRect:CGRectZero];
-    SEL setAppliesShadowSelector = NSSelectorFromString(@"setAppliesShadow:");
-    if ([parameters respondsToSelector:setAppliesShadowSelector]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(parameters, setAppliesShadowSelector, NO);
-    }
-    return [[UITargetedPreview alloc] initWithView:sourceView parameters:parameters];
+- (void)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction willDisplayMenuForConfiguration:(__unused UIContextMenuConfiguration *)configuration animator:(__unused id<UIContextMenuInteractionAnimating>)animator {
+    self.didBeginPresentation = YES;
+    [self captureNativePresentation];
 }
 
 - (void)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction willEndForConfiguration:(__unused UIContextMenuConfiguration *)configuration animator:(id<UIContextMenuInteractionAnimating>)animator {
-    // The morph hid the real control for the menu's lifetime. With the
-    // dismissal preview above being invisible, nothing re-reveals it visually —
-    // restore it right as the dismissal starts so the button is sitting in its
-    // own row while the menu fades (idempotent with UIKit's own end-of-
-    // animation unhide bookkeeping).
-    UIView *morphSource = self.morphSourceView;
-    if (morphSource) {
-        UIView *morphView = morphSource;
-        SEL morphViewSelector = NSSelectorFromString(@"_morphView");
-        if ([morphSource respondsToSelector:morphViewSelector]) {
-            UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(morphSource, morphViewSelector);
-            if (resolved) morphView = resolved;
-        }
-        for (UIView *restore in @[morphView, morphSource]) {
-            if (restore.hidden) restore.hidden = NO;
-            if (restore.alpha < 0.999) restore.alpha = 1.0;
-        }
+    if (self.ended || self.dismissing) return;
+    [self captureNativePresentation];
+    self.dismissing = YES;
+    // Retain this preview/anchor through reverse morph and late preview callbacks.
+    if (animator) [animator addCompletion:^{ [self finishPresentation]; }];
+    else [self finishPresentation];
+}
+
+- (void)finishPresentation {
+    if (self.ended) return;
+    self.ended = YES;
+    UIView *source = self.sourceView;
+    BOOL ownsAnchor = objc_getAssociatedObject(source, &kApolloNativeActionMenuControllerKey) == self;
+    if (self.interaction) [source removeInteraction:self.interaction];
+    if (ownsAnchor) {
+        objc_setAssociatedObject(source, &kApolloNativeActionMenuControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        if (self.removeSourceViewOnEnd) [source removeFromSuperview];
+    }
+    if (ApolloNativeActionMenuPresenterForController(self.actionController) == self) {
+        ApolloNativeActionMenuSetPresenterForController(self.actionController, nil);
+    }
+    UIWindow *window = self.presentationWindow;
+    dispatch_block_t selectedAction = self.afterDismissalAction;
+    if (!selectedAction && ApolloNativeActionMenuActivePresenter(window) == self) {
+        ApolloNativeActionMenuSetActivePresenter(self.presentationWindow, nil);
+    }
+    // UIKit owns source visibility: never reset hidden/alpha or remove the real surface.
+    [self.morphStandInView removeFromSuperview];
+    self.morphStandInView = nil;
+    [self.morphHostView removeFromSuperview];
+    self.morphHostView = nil;
+    self.morphPreview = nil;
+    self.interaction = nil;
+    self.nativePresentation = nil;
+    self.menu = nil;
+    self.presentationWindow = nil;
+    [self.surfaceLease invalidate];
+    self.surfaceLease = nil;
+    dispatch_block_t next = self.pendingPresentationAction;
+    self.pendingPresentationAction = nil;
+    if (selectedAction) {
+        // Reserve the window through next-turn action execution, blocking competing menus.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.afterDismissalAction = nil;
+            if (ApolloNativeActionMenuActivePresenter(window) == self) {
+                ApolloNativeActionMenuSetActivePresenter(window, nil);
+            }
+            selectedAction();
+        });
+    } else if (next) {
+        dispatch_async(dispatch_get_main_queue(), next);
+    }
+}
+
+- (void)captureNativePresentation {
+    if (self.ended || self.nativePresentation) return;
+    SEL presentations = NSSelectorFromString(@"presentationsByIdentifier");
+    if (![self.interaction respondsToSelector:presentations]) return;
+    id values = ((id (*)(id, SEL))objc_msgSend)(self.interaction, presentations);
+    // Capture the sole presentation before dismissMenu clears it mid-animation;
+    // UIKit's internal identifier differs from our configuration identifier.
+    if ([values isKindOfClass:NSDictionary.class] && [values count] == 1) {
+        self.nativePresentation = [values allValues].firstObject;
+    }
+}
+
+- (id)nativeHandoffPresentationForSource:(UIView *)source {
+    UIView *surface = ApolloNavigationActionsMenuSourceView(source);
+    if (!self.dismissing || !self.didBeginPresentation || !surface ||
+        surface != self.morphPreview.view || surface.window != self.presentationWindow ||
+        !self.didRequestConfiguration || !ApolloNativeActionMenuMagicMorphEnabled()) return nil;
+
+    SEL disappearance = NSSelectorFromString(@"disappearanceTransition");
+    if (![self.interaction respondsToSelector:NSSelectorFromString(@"setOutgoingPresentation:")]) return nil;
+    id previous = self.nativePresentation;
+    id transition = [previous respondsToSelector:disappearance] ?
+        ((id (*)(id, SEL))objc_msgSend)(previous, disappearance) : nil;
+    Class morph = objc_getClass("_UIContextMenuLiquidMorphPresentationAnimation");
+    // Never reuse A's inherited outgoing transition for B -> C, and never
+    // start a competing lens if UIKit cannot provide a compatible handoff.
+    return morph && [transition isKindOfClass:morph] ? previous : nil;
+}
+
+- (BOOL)presentFromView:(UIView *)source completion:(dispatch_block_t)completion {
+    UIWindow *window = source.window;
+    if (!window || self.ended) return NO;
+    NSUInteger latest = [objc_getAssociatedObject(window, &kApolloNativeActionMenuWindowRequestKey) unsignedIntegerValue];
+    if (!self.requestGeneration) {
+        self.requestWindow = window;
+        self.requestGeneration = latest + 1;
+        objc_setAssociatedObject(window, &kApolloNativeActionMenuWindowRequestKey, @(self.requestGeneration), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if (self.requestWindow != window || self.requestGeneration != latest) {
+        // Reject stale queued taps before they can dismiss a newer menu.
+        [self finishPresentation];
+        return NO;
+    }
+    ApolloNativeActionMenuPresenter *active = ApolloNativeActionMenuActivePresenter(window);
+    if (active == self && self.interaction) return YES;
+    if (active != self && active.afterDismissalAction) {
+        // Chosen actions take priority, including those awaiting next-turn execution.
+        [self finishPresentation];
+        return YES;
+    }
+    id previousPresentation = [active nativeHandoffPresentationForSource:source];
+    if (active && active != self && !active.ended && !previousPresentation) {
+        // Dismiss an open/preparing menu first. Compatible requests during
+        // dismissal reuse its outgoing transition instead of this queue.
+        __weak UIView *weakSource = source;
+        active.pendingPresentationAction = ^{
+            UIView *liveSource = weakSource;
+            if (liveSource.window == window) [self presentFromView:liveSource completion:completion];
+        };
+        if (!active.dismissing) [active.interaction dismissMenu];
+        return YES;
     }
 
-    UIView *sourceView = self.sourceView;
-    UIContextMenuInteraction *menuInteraction = self.interaction;
-    BOOL removeSourceViewOnEnd = self.removeSourceViewOnEnd;
-    UIView *standInView = self.morphStandInView;
-    UIView *dismissalFallbackView = self.dismissalFallbackView;
-    id actionController = self.actionController;
-    self.morphStandInView = nil;
-    self.dismissalFallbackView = nil;
-    // Issue #249: tear down at dismissal END, not START — removing the anchor
-    // (the interaction's host view) while the menu is still morphing back into
-    // the source button cuts the dismissal animation short. The stand-in goes
-    // at the same point: it is what the collapsing platter is portaling, and
-    // pulling it early would empty the platter mid-animation.
-    void (^teardown)(void) = ^{
-        if (sourceView && menuInteraction) {
-            [sourceView removeInteraction:menuInteraction];
-            objc_setAssociatedObject(sourceView, &kApolloNativeActionMenuControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
-        }
-        if (ApolloNativeActionMenuPresenterForController(actionController) == self) {
-            ApolloNativeActionMenuSetPresenterForController(actionController, nil);
-        }
-        [standInView removeFromSuperview];
-        [dismissalFallbackView removeFromSuperview];
-        if (removeSourceViewOnEnd) {
-            [sourceView removeFromSuperview];
-        }
-        // Read at dismissal END rather than capturing at dismissal START. An
-        // action handler may run between those callbacks on a future UIKit and
-        // store its work after this method has already begun.
-        dispatch_block_t afterDismissalAction = self.afterDismissalAction;
-        self.afterDismissalAction = nil;
-        if (afterDismissalAction) {
-            dispatch_async(dispatch_get_main_queue(), afterDismissalAction);
-        }
-    };
-    if (animator) {
-        [animator addCompletion:teardown];
-    } else {
-        teardown();
+    UIContextMenuInteraction *interaction = [[UIContextMenuInteraction alloc] initWithDelegate:self];
+    SEL present = NSSelectorFromString(@"_presentMenuAtLocation:");
+    if (![interaction respondsToSelector:present]) return NO;
+    // Share UIKit's outgoing transition to avoid competing return/open glass animations.
+    SEL setOutgoing = NSSelectorFromString(@"setOutgoingPresentation:");
+    if (previousPresentation && [interaction respondsToSelector:setOutgoing]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(interaction, setOutgoing, previousPresentation);
     }
+    BOOL removeAnchor = NO;
+    UIView *anchor = ApolloNativeActionMenuCreateProxyAnchorView(source, &removeAnchor);
+    if (!anchor.window) return NO;
+    self.sourceView = anchor;
+    self.morphSourceView = ApolloNativeActionMenuViewShouldMorph(source) ? source : nil;
+    self.presentationWindow = window;
+    self.presentationAnchorCenter = [source convertPoint:CGPointMake(CGRectGetMidX(source.bounds),
+        CGRectGetMidY(source.bounds)) toView:window];
+    self.removeSourceViewOnEnd = removeAnchor;
+    self.interaction = interaction;
+    [anchor addInteraction:interaction];
+    objc_setAssociatedObject(anchor, &kApolloNativeActionMenuControllerKey, self, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloNativeActionMenuSetPresenterForController(self.actionController, self);
+    ApolloNativeActionMenuSetActivePresenter(window, self);
+    // Acquire before configuration/preview to protect preparation from late item updates.
+    self.surfaceLease = ApolloNativeActionMenuAcquireSurface(
+        ApolloNavigationActionsMenuSourceView(self.morphSourceView), self.requestGeneration);
+
+    SEL driver = NSSelectorFromString(@"_setFallbackDriverStyle:");
+    if ([interaction respondsToSelector:driver]) {
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(interaction, driver, 1);
+    }
+    CGPoint location = CGPointMake(CGRectGetMidX(anchor.bounds), CGRectGetMidY(anchor.bounds));
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(interaction, present, location);
+    [self captureNativePresentation];
+    // Configuration is synchronous; display can be delayed. Only rejection
+    // before configuration lacks an end animator; delayed willDisplay is not failure.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self.didRequestConfiguration && !self.ended) [self finishPresentation];
+    });
+    ApolloLog(@"[NativeActionMenu] Presentation requested for %@ (%lu sections)",
+        NSStringFromClass(source.class), (unsigned long)self.menu.children.count);
+    if (completion) completion();
+    return YES;
 }
 
 @end
@@ -1398,60 +1567,10 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
     }
     objc_setAssociatedObject(actionController, &kApolloNativeActionMenuSourceViewKey, sourceView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    BOOL removeAnchorViewOnEnd = NO;
-    UIView *anchorView = ApolloNativeActionMenuCreateProxyAnchorView(sourceView, &removeAnchorViewOnEnd);
-    if (!anchorView || !anchorView.window) {
-        ApolloLog(@"[NativeActionMenu] Could not create anchor view for %@", actionController);
-        return NO;
-    }
-
     ApolloNativeActionMenuPresenter *menuPresenter = [ApolloNativeActionMenuPresenter new];
     menuPresenter.menu = menu;
-    menuPresenter.sourceView = anchorView;
     menuPresenter.actionController = actionController;
-    menuPresenter.presentationWindow = anchorView.window;
-    menuPresenter.presentationAnchorCenter =
-        [anchorView convertPoint:CGPointMake(CGRectGetMidX(anchorView.bounds),
-                                             CGRectGetMidY(anchorView.bounds))
-                          toView:anchorView.window];
-    BOOL morphable = ApolloNativeActionMenuViewShouldMorph(sourceView);
-    menuPresenter.morphSourceView = morphable ? sourceView : nil;
-    menuPresenter.removeSourceViewOnEnd = removeAnchorViewOnEnd;
-    ApolloLog(@"[NativeActionMenu] source=%@ %.0fx%.0f morph=%@",
-              NSStringFromClass(sourceView.class),
-              CGRectGetWidth(sourceView.bounds), CGRectGetHeight(sourceView.bounds),
-              morphable ? @"yes" : @"no");
-
-    UIContextMenuInteraction *interaction = [[UIContextMenuInteraction alloc] initWithDelegate:menuPresenter];
-    if (![interaction respondsToSelector:NSSelectorFromString(@"_presentMenuAtLocation:")]) {
-        ApolloLog(@"[NativeActionMenu] UIContextMenuInteraction cannot present programmatically");
-        return NO;
-    }
-
-    menuPresenter.interaction = interaction;
-
-    [anchorView addInteraction:interaction];
-    objc_setAssociatedObject(anchorView, &kApolloNativeActionMenuControllerKey, menuPresenter, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    ApolloNativeActionMenuSetPresenterForController(actionController, menuPresenter);
-
-    // Issue #249: a programmatic presentation has no active click driver, so
-    // -[UIContextMenuInteraction menuAppearance] falls back to the interaction's
-    // fallbackDriverStyle — which defaults to 0 and resolves to the "rich"
-    // (long-press preview) appearance instead of the compact button-menu one.
-    // Compact appearance is what makes UIKit force preferredLayout 3 and compute
-    // the glass attachment point. UIKit's own programmatic presenters set the
-    // fallback first (UITextItemInteractionHandler, _UISearchSuggestionController).
-    SEL fallbackDriverStyleSelector = NSSelectorFromString(@"_setFallbackDriverStyle:");
-    if ([interaction respondsToSelector:fallbackDriverStyleSelector]) {
-        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(interaction, fallbackDriverStyleSelector, 1);
-    }
-
-    CGPoint location = CGPointMake(CGRectGetMidX(anchorView.bounds), CGRectGetMidY(anchorView.bounds));
-    ((void (*)(id, SEL, CGPoint))objc_msgSend)(interaction, NSSelectorFromString(@"_presentMenuAtLocation:"), location);
-
-    ApolloLog(@"[NativeActionMenu] Presented native menu with %lu item(s)", (unsigned long)menu.children.count);
-    if (completion) completion();
-    return YES;
+    return [menuPresenter presentFromView:sourceView completion:completion];
 }
 
 static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionController) {

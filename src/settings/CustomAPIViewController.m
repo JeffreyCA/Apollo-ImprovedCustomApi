@@ -1853,12 +1853,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     // "Color Flairs" now rides Appearance → Flair (native injection) —
     // -flairColorsSwitchToggled: below stays as the shared toggle handler.
-    ApolloSettingsRow *titleGapCentering =
-        [ApolloSettingsRow switchRowWithID:@"gen.titleGapCentering"
-                                     title:@"Center Title Between Buttons"
-                                      isOn:^BOOL { return IsLiquidGlass() && sLGTitleGapCentering; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf lgTitleGapCenteringSwitchToggled:sender]; }];
-    titleGapCentering.visible = ^BOOL { return IsLiquidGlass(); };
 
     // Overrides the top scroll-edge glass under the nav bar (iOS 26+). Liquid
     // Glass only — hidden otherwise rather than shown-disabled, since the row
@@ -1874,8 +1868,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:@"Display & Navigation"
-                                            footer:@"User Profile Pictures adds avatars beside usernames in posts, comments, messages, inbox rows, and moderator lists. Liquid Glass is required for the remaining options.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ userAvatars, titleGapCentering, scrollEdgeEffect ]];
+                                            footer:@"User Profile Pictures adds avatars beside usernames in posts, comments, messages, inbox rows, and moderator lists. Liquid Glass is required for the remaining options.\n\nIn Liquid Glass, navigation titles stay centered unless expanded actions need room. Tap the top-right ellipsis to reveal navigation actions; scrolling collapses them. Header Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
+                                              rows:@[ userAvatars, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -4123,12 +4117,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sDevvitFeedWidgets = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sDevvitFeedWidgets forKey:UDKeyDevvitFeedWidgets];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDevvitFeedOwnershipChangedNotification object:nil];
-}
-
-- (void)lgTitleGapCenteringSwitchToggled:(UISwitch *)sender {
-    sLGTitleGapCentering = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sLGTitleGapCentering forKey:UDKeyLGTitleGapCentering];
-    ApolloLGTitleCenteringModeChanged();
 }
 
 - (void)liveCommentsFollowSwitchToggled:(UISwitch *)sender {

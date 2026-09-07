@@ -3042,6 +3042,14 @@ static void ApolloSubredditSettleBlockedTableToTop(UITableView *tableView) {
 }
 
 - (void)viewWillAppear:(BOOL)animated {
+    // Apollo retains popped controllers for swipe-forward navigation. Teardown
+    // blocks late offscreen repairs, but the same controller becomes eligible
+    // again when it reappears. Clear before %orig so nested layout callbacks
+    // can also rebuild the header (including its Community Highlights wrapper).
+    if ([objc_getAssociatedObject(self, kApolloSubredditTeardownMarkerKey) boolValue]) {
+        objc_setAssociatedObject(self, kApolloSubredditTeardownMarkerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[SubredditHeaders] reactivating retained vc=%p on appearance", self);
+    }
     %orig(animated);
     ApolloSubredditScheduleInstallIfNeeded((UIViewController *)self);
 }
