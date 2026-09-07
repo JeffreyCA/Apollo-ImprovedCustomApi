@@ -399,7 +399,15 @@ static NSString *ApolloDirectChatEnhancementScript(NSDictionary *palette) {
             "--color-tone-1:${palette.text}!important;--color-tone-2:${palette.secondaryText}!important;--color-tone-3:${palette.secondaryText}!important;--color-tone-4:${palette.separator}!important;--color-tone-5:${palette.tertiary}!important;--color-tone-6:${palette.secondary}!important;--color-tone-7:${palette.primary}!important;"
             "--newCommunityTheme-body:${palette.primary}!important;--newCommunityTheme-bodyText:${palette.text}!important;--newCommunityTheme-button:${palette.accent}!important;--newCommunityTheme-line:${palette.separator}!important;"
         "}html,body,button,input,textarea,select{font-family:var(--apollo-chat-font)!important;}html,body{background-color:var(--apollo-chat-bg)!important;color:var(--apollo-chat-text)!important;-webkit-text-size-adjust:${textScale()}%!important;text-size-adjust:${textScale()}%!important;}body{accent-color:var(--apollo-chat-accent)!important;}a{color:var(--apollo-chat-accent)!important;}input,textarea,[contenteditable=true]{caret-color:var(--apollo-chat-accent)!important;font-size:16px!important;}::selection{background:var(--apollo-chat-accent)!important;color:var(--apollo-chat-bg)!important;}"
-        "shreddit-app{--page-y-padding:0px!important;padding-top:0!important;}header.v2.hui{display:none!important;}modmail-mailbox-wrapper{top:0!important;margin-top:0!important;}${mailLayout()}${chatTouchLayout()}${embeddedChrome()}${mailAvatarHold()}`;"
+        "shreddit-app{--page-y-padding:0px!important;padding-top:0!important;}header.v2.hui{display:none!important;}modmail-mailbox-wrapper{top:0!important;margin-top:0!important;}${mailLayout()}${chatTouchLayout()}${embeddedChrome()}${mailAvatarHold()}"
+        // A press-and-hold on a chat-list row used to bring up WebKit's stock
+        // link menu — the rows are links to Reddit's client-side /room/… routes,
+        // which do not exist as pages, so the preview was a 404 — and start a
+        // text selection in the row. Neither is an Apollo action; the rows opt
+        // out of both (inherited into each row's shadow tree). Links inside
+        // messages keep their menu.
+        "rs-rooms-nav-room,rs-threads-view-thread{-webkit-touch-callout:none!important;-webkit-user-select:none!important;user-select:none!important;}"
+        ":host(rs-rooms-nav-room) a,:host(rs-threads-view-thread) a{-webkit-touch-callout:none!important;}`;"
         "const themeRoot=r=>{if(!r)return;let s=r.querySelector('style[data-apollo-chat-theme]');if(!s){s=document.createElement('style');s.setAttribute('data-apollo-chat-theme','');const target=r===document?(document.head||document.documentElement):r;if(!target)return;target.appendChild(s);}const next=css();if(s.textContent!==next)s.textContent=next;};"
         "let sweepScheduled=false;const scheduleSweep=()=>{if(sweepScheduled)return;sweepScheduled=true;requestAnimationFrame(()=>{sweepScheduled=false;window.__apolloChatEnhancementSweep?.();});};window.__apolloChatScheduleSweep=scheduleSweep;"
         // Tapping Send media currently lets Reddit focus the contenteditable
@@ -773,6 +781,10 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
 // nobody asked for any more.
 @property (nonatomic, copy) NSString *pendingInPlaceConversationPath;
 @property (nonatomic, assign) NSTimeInterval pendingInPlaceConversationQueuedAt;
+// A room queued as a controller's destination waits for its FIRST document
+// however long that takes (a failed load retried by hand included); only a
+// room queued behind a list switch expires.
+@property (nonatomic, assign) BOOL pendingInPlaceConversationWaitsForFirstDocument;
 // A fresh, isolated WKWebView can leave Reddit's Modmail bundle waiting
 // forever when /mail/all is its very first document. Prime the authenticated
 // reddit.com client through the known-good Chat route, then replace it with
@@ -826,6 +838,7 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
 - (void)apollo_noteTouchBeganOnPage;
 - (void)apollo_resettleEmbeddedListForPath:(NSString *)path;
 - (void)apollo_openPendingInPlaceConversationIfReady;
+- (void)apollo_openQueuedConversation:(NSString *)pending attempt:(NSUInteger)attempt;
 - (BOOL)apollo_goBackToConversationList;
 - (void)apollo_captureConversationBackSnapshot;
 - (BOOL)apollo_beginInteractiveConversationBack;
@@ -2841,16 +2854,20 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
 // later reveals is the list and not the loading placeholder mid-fade.
 - (void)apollo_openPendingInPlaceConversationIfReady {
     NSString *pending = self.pendingInPlaceConversationPath;
-    if (!pending.length || !self.embeddedInInbox || self.mailboxKind != ApolloModernMailboxKindChat) return;
+    if (!pending.length || self.mailboxKind != ApolloModernMailboxKindChat) return;
     NSString *path = self.webView.URL.path ?: @"";
     BOOL rootList = [path isEqualToString:@"/chat"] || [path isEqualToString:@"/chat/"];
-    if (!rootList || self.embeddedInboxSection != ApolloModernChatInboxSectionMessages) {
+    if (!rootList || (self.embeddedInInbox &&
+                      self.embeddedInboxSection != ApolloModernChatInboxSectionMessages)) {
         // Another list came up first (the user switched sections meanwhile);
         // keep waiting for Messages until the queue expires.
         return;
     }
     self.pendingInPlaceConversationPath = nil;
-    BOOL fresh = [NSDate date].timeIntervalSince1970 - self.pendingInPlaceConversationQueuedAt < 12.0;
+    BOOL waitedForFirstDocument = self.pendingInPlaceConversationWaitsForFirstDocument;
+    self.pendingInPlaceConversationWaitsForFirstDocument = NO;
+    BOOL fresh = waitedForFirstDocument ||
+        [NSDate date].timeIntervalSince1970 - self.pendingInPlaceConversationQueuedAt < 12.0;
     if (!fresh) {
         ApolloLog(@"[DirectChatWeb] Dropped a queued conversation (queued too long ago)");
         return;
@@ -2859,8 +2876,36 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [weakSelf apollo_openConversationPath:pending];
+        [weakSelf apollo_openQueuedConversation:pending attempt:0];
     });
+}
+
+// The list reveals as soon as Reddit's page is ready, which can be a beat
+// before its rows have painted (skeleton placeholders first). The frame the
+// room's back swipe later reveals is captured at the room open, so wait for a
+// painted row — capped, since an empty list never paints one.
+- (void)apollo_openQueuedConversation:(NSString *)pending attempt:(NSUInteger)attempt {
+    NSString *script =
+        @"(()=>{const roots=[];const visit=r=>{if(!r||roots.includes(r))return;roots.push(r);for(const e of r.querySelectorAll('*'))if(e.shadowRoot)visit(e.shadowRoot);};visit(document);"
+         "for(const r of roots)for(const e of r.querySelectorAll('.room-name')){const b=e.getBoundingClientRect();if(b.width>0&&b.height>0)return 'rows';}return 'none';})()";
+    __weak typeof(self) weakSelf = self;
+    [self.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        BOOL rows = !error && [result isEqual:@"rows"];
+        if (rows || attempt >= 16) {
+            // One more beat for avatars and text to land in the painted rows.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [weakSelf apollo_openConversationPath:pending];
+            });
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [weakSelf apollo_openQueuedConversation:pending attempt:attempt + 1];
+        });
+    }];
 }
 
 - (void)apollo_startChatStatusRefreshIfNeeded {
@@ -4040,8 +4085,21 @@ UIViewController *ApolloCreateModernChatViewController(void) {
 
 UIViewController *ApolloCreateModernChatViewControllerForPath(NSString *destinationPath) {
     ApolloDirectChatWebViewController *controller = [ApolloDirectChatWebViewController new];
-    controller.initialDestinationPath = ApolloValidatedModernMailboxPath(
-        ApolloModernMailboxKindChat, destinationPath);
+    NSString *validated = ApolloValidatedModernMailboxPath(ApolloModernMailboxKindChat, destinationPath);
+    if ([validated hasPrefix:@"/chat/room/"] && !ApolloChatPathIsComposer(validated)) {
+        // A room destination loads the LIST first and opens the room in place
+        // once the list is up (apollo_openPendingInPlaceConversationIfReady),
+        // exactly like a room tapped in that list. A room loaded as the first
+        // document had nothing before it: its back swipe revealed the loading
+        // placeholder (the only frame ever captured) and returned to the list
+        // through a fresh load rather than the pane flip.
+        controller.initialDestinationPath = @"/chat";
+        controller.pendingInPlaceConversationPath = validated;
+        controller.pendingInPlaceConversationQueuedAt = [NSDate date].timeIntervalSince1970;
+        controller.pendingInPlaceConversationWaitsForFirstDocument = YES;
+    } else {
+        controller.initialDestinationPath = validated;
+    }
     // Lists remain part of the Inbox tab. Route observation hides the
     // shared tab bar only if this controller opens an actual conversation.
     controller.hidesBottomBarWhenPushed = NO;
