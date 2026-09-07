@@ -95,6 +95,14 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloGalleryImageViewer.m \
     $(SRC_DIR)/ApolloGalleryViewController.m \
     $(SRC_DIR)/ApolloGalleryVideoExport.xm \
+    $(SRC_DIR)/ApolloSaveAllMediaItems.m \
+    $(SRC_DIR)/ApolloSaveAllMedia.xm \
+    $(SRC_DIR)/ApolloSaveAllMediaBridge.swift \
+    $(SRC_DIR)/ApolloSaveAllMediaMenus.xm \
+    $(SRC_DIR)/ApolloGIFSaveActivity.xm \
+    $(SRC_DIR)/ApolloMediaDownloadActions.xm \
+    $(SRC_DIR)/ApolloLinkedAlbumPostControls.xm \
+    $(SRC_DIR)/ApolloFeedAlbumMenus.xm \
     $(SRC_DIR)/ApolloGalleryMenu.xm \
     $(SRC_DIR)/ApolloGalleryOrientation.xm \
     $(SRC_DIR)/ApolloBannedProfile.xm \

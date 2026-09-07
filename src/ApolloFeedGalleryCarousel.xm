@@ -712,8 +712,13 @@ static BOOL ApolloFeedGalleryCanGoForward(UINavigationController *navigationCont
 
 - (void)apollo_pageTapped:(UITapGestureRecognizer *)recognizer {
     if (recognizer.state != UIGestureRecognizerStateEnded || self.contentIsObscured) return;
-    NSInteger index = self.currentIndex;
-    if (index < 0 || index >= (NSInteger)self.items.count) return;
+    [self apollo_openPageAtIndex:self.currentIndex];
+}
+
+// Context-menu preview commits use the same native transition and index
+// handling as a direct tap. The menu passes its captured page index.
+- (void)apollo_openPageAtIndex:(NSInteger)index {
+    if (self.contentIsObscured || index < 0 || index >= (NSInteger)self.items.count) return;
 
     id richMediaNode = ApolloFeedGalleryRichMediaNode(self.albumNode);
     RDKLink *link = ApolloFeedGalleryObjectIvar(richMediaNode, "link");

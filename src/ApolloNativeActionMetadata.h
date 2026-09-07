@@ -10,7 +10,7 @@ static NSString *const kApolloNativeActionDefaultTitles[] = {
     @"Delete", @"Share as Image\u2026", @"Share Image Link", @"Share Album Link",
     @"Copy Album Link", @"Copy Text", @"Share Reddit Link", @"Share Comment Link",
     @"Share Message Link", @"Share Content Link", @"Save Image", @"Share Image",
-    @"Share Video", @"Download Video\u2026", @"", @"Save GIF",
+    @"Share Video", @"Download Video\u2026", @"Download GIF\u2026", @"Save GIF",
     @"Share GIF", @"Share Link", @"Share Link", @"Share Text",
     @"Sidebar", @"View Moderators", @"Subscribe", @"Unsubscribe",
     @"Favorite", @"Unfavorite", @"Author", @"View All Replies",
