@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- Add **Bold Post Titles** (Appearance → Posts) — feed post titles in Semibold for large and compact posts, every theme and theme font, Liquid Glass or legacy chrome; flips live without a relaunch (#226, #1033: @icpryde)
+
 ### Fixes
 
 - Stop **Autoplay Inline GIFs** treating Low Power Mode as Tap to Play — Always and WiFi Only now keep GIFs animating in Low Power Mode, and Tap to Play or Never remain the battery-saving choices (#634, #1004: @icpryde)
