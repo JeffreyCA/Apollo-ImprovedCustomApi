@@ -1155,19 +1155,13 @@ static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, B
         objc_setAssociatedObject(host, &kInboxAllOriginalRightItemsKey,
                                  [savedRightItems copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    // Swapping the trailing buttons must not let the Liquid Glass recenter
-    // re-balance the "Inbox" title against the other set's width — the title
-    // visibly slid toward screen center on every Notifications -> Chat switch
-    // and back again on the return. Hold the trailing reservation BEFORE the
-    // swap (so a recenter pass mid-removal already holds the old edge) and
-    // release it only AFTER the restore (so no pass between the two sees a
-    // bare bar). No-op off-glass and under the pre-26 nav bar. Chat gets its
-    // own three buttons (see ApolloInboxChatBarActions) in Apollo's slots.
-    if (visible) ApolloNavItemSetTrailingReservationHold(host.navigationItem, YES);
+    // Titles are anchored to screen center independently of these actions;
+    // the shared collapsed-pill presenter follows the original item array.
+    // Chat gets its own three buttons (see ApolloInboxChatBarActions) in
+    // Apollo's slots.
     [host.navigationItem setRightBarButtonItems:visible ? ApolloInboxChatRightBarItems(host)
                                                         : (savedRightItems.count ? savedRightItems : nil)
                                        animated:animated];
-    if (!visible) ApolloNavItemSetTrailingReservationHold(host.navigationItem, NO);
 
     if (visible) {
         // The install-time wiring runs before the host view joins the
@@ -1268,10 +1262,6 @@ static void ApolloDismantleInboxChatHub(UIViewController *host, NSString *reason
     // clear the stash so a later re-enable captures a fresh copy.
     objc_setAssociatedObject(host, &kInboxAllOriginalRightItemsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(host, &kInboxAllChatBarActionsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    // The hide above already released the trailing reservation hold, but keep
-    // dismantle self-sufficient: the hold must never outlive the hub on this
-    // navigation item, whatever path led here.
-    ApolloNavItemSetTrailingReservationHold(host.navigationItem, NO);
     ChatsFilterLog(@"dismantled Inbox chat hub (%@)", reason ?: @"unknown");
 }
 
