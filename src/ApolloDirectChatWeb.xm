@@ -791,6 +791,9 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
 // cover — so a room opened from outside the list never shows the list on
 // its way in.
 @property (nonatomic, assign) BOOL holdsLoadingCoverForQueuedConversation;
+// An embedded controller whose hub is pushed on its own (no Inbox host):
+// takes the stand-alone back-pan, since no host mode-pan exists for it.
+@property (nonatomic, assign) BOOL hostedByStandaloneHub;
 // A fresh, isolated WKWebView can leave Reddit's Modmail bundle waiting
 // forever when /mail/all is its very first document. Prime the authenticated
 // reddit.com client through the known-good Chat route, then replace it with
@@ -4157,30 +4160,6 @@ UIViewController *ApolloCreateModernChatViewControllerForPath(NSString *destinat
     return controller;
 }
 
-BOOL ApolloModernChatOpenInInbox(NSString *destinationPath) {
-    id tabBarController = ApolloMainTabBarController();
-    if (![tabBarController isKindOfClass:[UITabBarController class]]) return NO;
-    if ([tabBarController respondsToSelector:@selector(goToInboxTab)]) {
-        @try {
-            ((void (*)(id, SEL))objc_msgSend)(tabBarController, @selector(goToInboxTab));
-        } @catch (NSException *exception) {
-            ApolloLog(@"[DirectChatWeb] Could not select the Inbox tab for a Chat destination: %@", exception);
-            return NO;
-        }
-    }
-    UIViewController *selected = [(UITabBarController *)tabBarController selectedViewController];
-    UINavigationController *navigationController = [selected isKindOfClass:[UINavigationController class]]
-        ? (UINavigationController *)selected : selected.navigationController;
-    if (!navigationController) return NO;
-    UIViewController *chat = ApolloCreateModernChatViewControllerForPath(destinationPath);
-    if (!chat) return NO;
-    // A fresh destination, not another layer over an existing Inbox detail:
-    // Back has one predictable place to return to.
-    [navigationController popToRootViewControllerAnimated:NO];
-    [navigationController pushViewController:chat animated:YES];
-    return YES;
-}
-
 UIViewController *ApolloCreateEmbeddedModernChatViewController(ApolloModernChatInboxSection section) {
     if (section < ApolloModernChatInboxSectionMessages ||
         section > ApolloModernChatInboxSectionThreads) {
@@ -4214,6 +4193,23 @@ void ApolloModernChatControllerShowInboxSection(UIViewController *controller,
 void ApolloModernChatControllerOpenConversationPath(UIViewController *controller, NSString *path) {
     if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return;
     [(ApolloDirectChatWebViewController *)controller apollo_openConversationPath:path];
+}
+
+void ApolloModernChatControllerQueueConversationPath(UIViewController *controller, NSString *path) {
+    if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return;
+    ApolloDirectChatWebViewController *chatController = (ApolloDirectChatWebViewController *)controller;
+    NSString *validated = ApolloValidatedModernMailboxPath(ApolloModernMailboxKindChat, path);
+    if (![chatController apollo_isChatConversationPath:validated] || ApolloChatPathIsComposer(validated)) return;
+    chatController.pendingInPlaceConversationPath = validated;
+    chatController.pendingInPlaceConversationQueuedAt = [NSDate date].timeIntervalSince1970;
+    chatController.pendingInPlaceConversationWaitsForFirstDocument = YES;
+    // A list that is already up opens it now; otherwise its reveal will.
+    if (chatController.didRevealChat) [chatController apollo_openPendingInPlaceConversationIfReady];
+}
+
+void ApolloModernChatControllerSetHostedByStandaloneHub(UIViewController *controller, BOOL hosted) {
+    if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return;
+    ((ApolloDirectChatWebViewController *)controller).hostedByStandaloneHub = hosted;
 }
 
 void ApolloModernChatControllerApplyMessagesFilter(UIViewController *controller,
@@ -4456,7 +4452,8 @@ BOOL ApolloModernChatBackSwipeCommits(UIGestureRecognizerState state, CGFloat pr
     // Zeroing-weak read: once the host deallocs this is nil and the pan simply
     // never begins (it cannot serve a dead host).
     ApolloDirectChatWebViewController *host = sStandaloneChatBackPanHost;
-    if (!host || host.embeddedInInbox || host.mailboxKind != ApolloModernMailboxKindChat) return NO;
+    if (!host || (host.embeddedInInbox && !host.hostedByStandaloneHub) ||
+        host.mailboxKind != ApolloModernMailboxKindChat) return NO;
     // Only inside a conversation: on the list the stock pop is the right back.
     if (![host apollo_isInsideConversation]) return NO;
     UIPanGestureRecognizer *pan = (UIPanGestureRecognizer *)gestureRecognizer;
@@ -4477,7 +4474,8 @@ BOOL ApolloModernChatBackSwipeCommits(UIGestureRecognizerState state, CGFloat pr
 // (pop/pan recognizers on the navigation container, WebKit's re-created edge
 // recognizers). No-op for the embedded hub controller.
 static void ApolloStandaloneChatBackPanInstall(ApolloDirectChatWebViewController *controller) {
-    if (controller.embeddedInInbox || controller.mailboxKind != ApolloModernMailboxKindChat) return;
+    if ((controller.embeddedInInbox && !controller.hostedByStandaloneHub) ||
+        controller.mailboxKind != ApolloModernMailboxKindChat) return;
     UIView *hostView = controller.viewIfLoaded;
     if (!hostView) return;
     if (!sStandaloneChatBackPan) {

@@ -210,7 +210,7 @@ static BOOL ApolloQuickActionsOpenModernMailboxNow(NSDictionary<NSString *, NSSt
     NSString *path = route[@"path"];
     UIViewController *mailbox = [kind isEqualToString:@"modmail"]
         ? ApolloCreateModernModmailViewControllerForPath(path)
-        : ApolloCreateModernChatViewControllerForPath(path);
+        : ApolloCreateStandaloneInboxChatHub(path);
     if (!mailbox) return NO;
 
     // A notification is a fresh destination, not another layer on top of an

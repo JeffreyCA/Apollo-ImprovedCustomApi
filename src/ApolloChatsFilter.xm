@@ -747,6 +747,11 @@ typedef NS_ENUM(NSInteger, ApolloInboxMode) {
 @end
 
 @interface ApolloInboxChatHubViewController : UIViewController
+// Pushed as a screen of its own (no Inbox host): it hosts its own bar menu,
+// its embedded controller takes the stand-alone back-pan, and its
+// Notifications mode pops back.
+@property (nonatomic, assign) BOOL standalone;
+@property (nonatomic, copy) NSString *standaloneDestinationPath;
 @property (nonatomic, strong) ApolloInboxModeSwitcherView *modeSwitcher;
 @property (nonatomic, strong) ApolloInboxChatSectionSwitcherView *sectionSwitcher;
 @property (nonatomic, strong) UIView *contentContainerView;
@@ -759,6 +764,7 @@ typedef NS_ENUM(NSInteger, ApolloInboxMode) {
 @end
 
 static ApolloInboxChatHubViewController *ApolloEnsureInboxChatHub(UIViewController *host);
+static NSArray<UIBarButtonItem *> *ApolloInboxChatRightBarItems(UIViewController *host);
 static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, BOOL animated);
 static void ApolloDismantleInboxChatHub(UIViewController *host, NSString *reason);
 static void ApolloInboxWireModePanPrecedence(UIViewController *controller, UIPanGestureRecognizer *modePan);
@@ -876,6 +882,20 @@ static NSHashTable *sInboxModePanWired;
     ]];
     [self.chatController didMoveToParentViewController:self];
 
+    if (self.standalone) {
+        // A hub on its own is its own host: the bar menu's actions look the
+        // hub up on the host they were built for.
+        objc_setAssociatedObject(self, &kInboxAllChatHubKey, self, OBJC_ASSOCIATION_ASSIGN);
+        ApolloModernChatControllerSetHostedByStandaloneHub(self.chatController, YES);
+        self.navigationItem.rightBarButtonItems = ApolloInboxChatRightBarItems(self);
+        NSString *destination = self.standaloneDestinationPath;
+        if ([destination isEqualToString:ApolloChatRequestsPath]) {
+            [self apollo_showSection:ApolloModernChatInboxSectionRequests animated:NO];
+        } else if (destination.length > 0) {
+            ApolloModernChatControllerQueueConversationPath(self.chatController, destination);
+        }
+    }
+
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(apollo_chatStatusChanged:)
                                                  name:ApolloModernChatStatusDidChangeNotification
@@ -887,6 +907,14 @@ static NSHashTable *sInboxModePanWired;
     [super viewWillAppear:animated];
     [self.modeSwitcher apollo_setSelectedMode:ApolloInboxModeChat animated:NO];
     [self apollo_refreshTheme];
+    // The in-place Inbox hub is told about its visibility by the host; a hub
+    // on its own follows its own appearance.
+    if (self.standalone) ApolloModernChatControllerSetInboxVisible(self.chatController, YES);
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    if (self.standalone) ApolloModernChatControllerSetInboxVisible(self.chatController, NO);
 }
 
 - (void)dealloc {
@@ -1087,6 +1115,35 @@ static NSArray<UIBarButtonItem *> *ApolloInboxChatRightBarItems(UIViewController
     actions.menuItem = menuItem;
     objc_setAssociatedObject(host, &kInboxAllChatBarActionsKey, actions, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return @[menuItem];
+}
+
+UIViewController *ApolloCreateStandaloneInboxChatHub(NSString *destinationPath) {
+    ApolloInboxChatHubViewController *hub = [ApolloInboxChatHubViewController new];
+    hub.standalone = YES;
+    hub.standaloneDestinationPath = destinationPath;
+    return hub;
+}
+
+BOOL ApolloModernChatOpenInInbox(NSString *destinationPath) {
+    id tabBarController = ApolloMainTabBarController();
+    if (![tabBarController isKindOfClass:[UITabBarController class]]) return NO;
+    if ([tabBarController respondsToSelector:@selector(goToInboxTab)]) {
+        @try {
+            ((void (*)(id, SEL))objc_msgSend)(tabBarController, @selector(goToInboxTab));
+        } @catch (NSException *exception) {
+            ChatsFilterLog(@"could not select the Inbox tab for a Chat destination: %@", exception);
+            return NO;
+        }
+    }
+    UIViewController *selected = [(UITabBarController *)tabBarController selectedViewController];
+    UINavigationController *navigationController = [selected isKindOfClass:[UINavigationController class]]
+        ? (UINavigationController *)selected : selected.navigationController;
+    if (!navigationController) return NO;
+    // A fresh destination, not another layer over an existing Inbox detail:
+    // Back has one predictable place to return to.
+    [navigationController popToRootViewControllerAnimated:NO];
+    [navigationController pushViewController:ApolloCreateStandaloneInboxChatHub(destinationPath) animated:YES];
+    return YES;
 }
 
 static ApolloInboxChatHubViewController *ApolloEnsureInboxChatHub(UIViewController *host) {
@@ -2003,7 +2060,7 @@ static NSInteger ApolloRealMessagesRow(ApolloBoxesRowState *state, NSInteger dis
         if (nativeChatRow || realRow < 0) {
             if (ApolloModernChatShouldOpen()) {
                 ChatsFilterLog(@"Direct Chat tapped -> opening modern Reddit Chat");
-                UIViewController *controller = ApolloCreateModernChatViewController();
+                UIViewController *controller = ApolloCreateStandaloneInboxChatHub(nil);
                 [((UIViewController *)self).navigationController pushViewController:controller animated:YES];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     for (NSIndexPath *selectedPath in ([tableView indexPathsForSelectedRows] ?: @[])) {
@@ -2812,9 +2869,9 @@ static void ApolloInboxOpenChatPath(UIViewController *host, NSString *chatPath) 
             return;
         }
     }
-    UIViewController *controller = ApolloCreateModernChatViewControllerForPath(chatPath);
+    UIViewController *controller = ApolloCreateStandaloneInboxChatHub(chatPath);
     [host.navigationController pushViewController:controller animated:YES];
-    ChatsFilterLog(@"opened a chat mirror's %@ in a pushed Chat controller",
+    ChatsFilterLog(@"opened a chat mirror's %@ in a pushed Chat hub",
                    requests ? @"pending request list" : @"room");
 }
 

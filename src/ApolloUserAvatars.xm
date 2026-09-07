@@ -3821,7 +3821,7 @@ static void ApolloProfileOpenModernChat(NSString *username, UIViewController *ho
         // No reachable Inbox stack: the profile's own stack is the fallback.
         UINavigationController *navigationController = weakHost.navigationController;
         if (!navigationController) return;
-        [navigationController pushViewController:ApolloCreateModernChatViewControllerForPath(path) animated:YES];
+        [navigationController pushViewController:ApolloCreateStandaloneInboxChatHub(path) animated:YES];
     };
     ApolloChatRoomDirectoryResolve(@"[direct chat room]", username, 0, ^(NSString *chatPath) {
         if (chatPath.length > 0) {

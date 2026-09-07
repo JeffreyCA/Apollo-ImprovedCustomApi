@@ -50,11 +50,28 @@ UIViewController *ApolloCreateModernChatViewController(void);
 // Reddit Chat path such as /chat/room/<opaque-room-id>; invalid paths safely
 // fall back to the normal Chat entry screen.
 UIViewController *ApolloCreateModernChatViewControllerForPath(NSString * _Nullable destinationPath);
+// The Inbox Chat hub on its own: the same Chat surface the Inbox (All)
+// screen shows — Reddit's list header hidden, the Messages / Requests /
+// Threads controls, the More menu in the bar — pushed as a screen of its own
+// (Boxes > Direct Chat, a profile's envelope, a Messages-box mirror, a chat
+// notification). `destinationPath` is an optional conversation path
+// (/chat/room/…, /chat/user/…) opened in place once the list is up, or
+// ApolloChatRequestsPath for the Requests section. Implemented by the hub's
+// module (ApolloChatsFilter).
+UIViewController *ApolloCreateStandaloneInboxChatHub(NSString * _Nullable destinationPath);
 // Opens a Chat destination where Chat lives: the Inbox tab, reset to Boxes
-// with the Chat screen pushed on top (the same place a chat notification
+// with the stand-alone hub pushed on top (the same place a chat notification
 // lands). NO when the tab bar or its Inbox stack cannot be reached, so the
-// caller can push on its own stack instead.
-BOOL ApolloModernChatOpenInInbox(NSString *destinationPath);
+// caller can push on its own stack instead. Implemented by the hub's module.
+BOOL ApolloModernChatOpenInInbox(NSString * _Nullable destinationPath);
+// Queue a conversation for a Chat controller that has not loaded its list
+// yet (the stand-alone hub's): the list loads under the loading cover and the
+// conversation opens in place once the list is up.
+void ApolloModernChatControllerQueueConversationPath(UIViewController *controller, NSString *path);
+// An embedded (hub-hosted) Chat controller whose hub is pushed on its own has
+// no Inbox host mode-pan to climb the hierarchy for it; it takes the
+// stand-alone back-pan instead.
+void ApolloModernChatControllerSetHostedByStandaloneHub(UIViewController *controller, BOOL hosted);
 // Inbox-only variant. It embeds the authenticated web client below Apollo's
 // Notifications / Chat and Messages / Requests / Threads controls instead of
 // pushing a second full-screen Chat controller.
