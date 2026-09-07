@@ -509,6 +509,8 @@ static NSString *const UDKeyChatPollerIntervalOverride = @"ChatPollerIntervalOve
 static NSString *const UDKeyChatStaleRefreshOverride = @"ChatStaleRefreshOverride";
 // Embedded Inbox Chat > Messages room filter: "direct" (default), "group", "all".
 static NSString *const UDKeyChatMessagesFilter = @"ChatMessagesFilter";
+// Embedded Inbox Chat > Messages: show unread rooms only (Reddit's "Unread" switch).
+static NSString *const UDKeyChatMessagesUnreadOnly = @"ChatMessagesUnreadOnly";
 // Native Polls (ApolloPollVoting.xm / ApolloPollCompose.xm). Off by default —
 // an experimental feature that lets you vote in and create polls via a
 // per-account reddit.com web session (harvested once, then silent). Independent

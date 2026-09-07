@@ -78,6 +78,10 @@ typedef NS_ENUM(NSUInteger, ApolloModernChatMessagesFilter) {
     ApolloModernChatMessagesFilterAll,
 };
 ApolloModernChatMessagesFilter ApolloModernChatCurrentMessagesFilter(void);
+// Reddit's "Unread" switch in the same dropdown, kept as a preference and
+// re-applied on every Messages list load.
+BOOL ApolloModernChatMessagesUnreadOnly(void);
+void ApolloModernChatControllerSetMessagesUnreadOnly(UIViewController *controller, BOOL unreadOnly);
 // Stores the filter and reloads the embedded Messages list under it.
 void ApolloModernChatControllerApplyMessagesFilter(UIViewController *controller,
                                                    ApolloModernChatMessagesFilter filter);

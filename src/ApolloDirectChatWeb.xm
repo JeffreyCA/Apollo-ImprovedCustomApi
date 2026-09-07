@@ -1000,6 +1000,10 @@ ApolloModernChatMessagesFilter ApolloModernChatCurrentMessagesFilter(void) {
     return ApolloModernChatMessagesFilterDirect;
 }
 
+BOOL ApolloModernChatMessagesUnreadOnly(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyChatMessagesUnreadOnly];
+}
+
 static NSString *ApolloModernChatMessagesFilterName(ApolloModernChatMessagesFilter filter) {
     switch (filter) {
         case ApolloModernChatMessagesFilterGroup: return @"group chats";
@@ -3005,15 +3009,17 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
     ApolloModernChatMessagesFilter filter = ApolloModernChatCurrentMessagesFilter();
     BOOL directWanted = filter == ApolloModernChatMessagesFilterDirect;
     BOOL groupWanted = filter == ApolloModernChatMessagesFilterGroup;
+    BOOL unreadWanted = ApolloModernChatMessagesUnreadOnly();
     NSString *script = [NSString stringWithFormat:
         @"(()=>{const roots=[];const visit=r=>{if(!r||roots.includes(r))return;roots.push(r);for(const e of r.querySelectorAll('*'))if(e.shadowRoot)visit(e.shadowRoot);};visit(document);"
          "const all=()=>roots.flatMap(r=>[...r.querySelectorAll('*')]);const visible=e=>{const b=e.getBoundingClientRect(),s=getComputedStyle(e);return b.width>0&&b.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0';};"
          "const items=all().filter(e=>e.tagName==='RS-ROOMS-NAV-FILTER-ITEM'&&visible(e));"
          "if(!items.length){const filter=all().find(e=>visible(e)&&(e.getAttribute('aria-label')||'').trim().toLowerCase()==='filter chat inbox');if(filter){filter.click();return 'opening';}return 'waiting';}"
-         "const wanted={'group chats':%@,'direct chats':%@,'mod mail':false};"
-         "for(const item of items){const label=(item.getAttribute('label')||item.textContent||'').replace(/\\s+/g,' ').trim().toLowerCase();if(!(label in wanted))continue;const control=item.querySelector('[role=checkbox]')||item;const checked=item.checked===true||item.hasAttribute('checked')||control.getAttribute('aria-checked')==='true';if(checked!==wanted[label]){control.click();return 'changed';}}"
+         "const wanted={'group chats':%@,'direct chats':%@,'mod mail':false,'unread':%@};"
+         "for(const item of items){const label=(item.getAttribute('label')||item.textContent||'').replace(/\\s+/g,' ').trim().toLowerCase();if(!(label in wanted))continue;const control=item.querySelector('[role=checkbox],[role=switch]')||item;const checked=item.checked===true||item.hasAttribute('checked')||control.getAttribute('aria-checked')==='true';if(checked!==wanted[label]){control.click();return 'changed';}}"
          "const apply=all().find(e=>visible(e)&&e.matches('button,[role=button]')&&(e.textContent||'').replace(/\\s+/g,' ').trim().toLowerCase()==='apply');if(apply){apply.click();return 'applied';}return 'waiting';})()",
-         groupWanted ? @"true" : @"false", directWanted ? @"true" : @"false"];
+         groupWanted ? @"true" : @"false", directWanted ? @"true" : @"false",
+         unreadWanted ? @"true" : @"false"];
 
     __weak typeof(self) weakSelf = self;
     [self.webView evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
@@ -3021,8 +3027,9 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         if (!self || generation != self.readinessGeneration || self.didRevealChat ||
             self.embeddedInboxSection != desiredSection) return;
         if (!error && [result isEqual:@"applied"]) {
-            ApolloLog(@"[DirectChatWeb] Applied embedded Messages (%@) filter",
-                      ApolloModernChatMessagesFilterName(filter));
+            ApolloLog(@"[DirectChatWeb] Applied embedded Messages (%@%@) filter",
+                      ApolloModernChatMessagesFilterName(filter),
+                      unreadWanted ? @", unread only" : @"");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 if (generation != self.readinessGeneration || self.didRevealChat) return;
@@ -4110,6 +4117,12 @@ void ApolloModernChatControllerApplyMessagesFilter(UIViewController *controller,
         [controller apollo_showEmbeddedInboxSection:ApolloModernChatInboxSectionMessages
                                         forceReload:YES];
     }];
+}
+
+void ApolloModernChatControllerSetMessagesUnreadOnly(UIViewController *controller, BOOL unreadOnly) {
+    [[NSUserDefaults standardUserDefaults] setBool:unreadOnly forKey:UDKeyChatMessagesUnreadOnly];
+    // The readiness pass flips Reddit's switch to match on the reload.
+    ApolloModernChatControllerApplyMessagesFilter(controller, ApolloModernChatCurrentMessagesFilter());
 }
 
 void ApolloModernChatControllerPerformHeaderAction(UIViewController *controller,

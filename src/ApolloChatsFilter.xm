@@ -960,21 +960,19 @@ static NSHashTable *sInboxModePanWired;
 // underneath never leaves the hierarchy, preserving its exact scroll position
 // and avoiding the horizontal navigation/reload effect shown in the recording.
 
-// MARK: - Chat-side navigation bar buttons
+// MARK: - Chat-side navigation bar menu
 //
-// Notifications keeps Apollo's own trailing bar buttons (mark all read,
-// compose). Chat used to strip that side entirely, which also lost the three
-// controls Reddit draws in its list header — hidden with the rest of that
-// header because the hub carries its own section switcher. They return here as
-// native bar buttons in the same slots, each driving Reddit's own control
-// inside the page: Mark all read, a Filter menu for the Messages list (Direct
-// chats — the default — Group chats, or All chats), and New chat in the slot
-// Apollo's compose button has on Notifications.
+// Notifications keeps Apollo's own trailing bar buttons. Chat used to strip
+// that side entirely, which also lost the three controls Reddit draws in its
+// list header — hidden with the rest of that header because the hub carries
+// its own section switcher. They return as one More button whose menu drops
+// down from it: Mark all read and New chat drive Reddit's own controls inside
+// the page, and Show in Messages picks the list's room filter (Direct chats —
+// the default — Group chats, or All chats).
 
 @interface ApolloInboxChatBarActions : NSObject
 @property (nonatomic, weak) UIViewController *host;
-@property (nonatomic, strong) UIBarButtonItem *filterItem;
-@property (nonatomic, copy) NSArray<UIBarButtonItem *> *items;
+@property (nonatomic, strong) UIBarButtonItem *menuItem;
 @end
 
 @implementation ApolloInboxChatBarActions
@@ -984,14 +982,24 @@ static NSHashTable *sInboxModePanWired;
     return host ? objc_getAssociatedObject(host, &kInboxAllChatHubKey) : nil;
 }
 
-- (void)markAllRead:(id)sender {
+- (void)markAllRead {
     ApolloModernChatControllerPerformHeaderAction(self.hub.chatController,
                                                   ApolloModernChatHeaderActionMarkAllRead);
 }
 
-- (void)newChat:(id)sender {
+- (void)newChat {
     ApolloModernChatControllerPerformHeaderAction(self.hub.chatController,
                                                   ApolloModernChatHeaderActionNewChat);
+}
+
+- (void)applyFilter:(ApolloModernChatMessagesFilter)filter {
+    ApolloInboxChatHubViewController *hub = self.hub;
+    // The filter is a Messages-list setting: bring that section up with it.
+    [hub.sectionSwitcher apollo_setSelectedSection:ApolloModernChatInboxSectionMessages animated:NO];
+    ApolloModernChatControllerApplyMessagesFilter(hub.chatController, filter);
+    // UIMenu is immutable: rebuild it so the check mark follows the choice.
+    self.menuItem.menu = [self menu];
+    ChatsFilterLog(@"Chat hub Messages filter set to %lu", (unsigned long)filter);
 }
 
 - (UIMenu *)filterMenu {
@@ -1014,57 +1022,71 @@ static NSHashTable *sInboxModePanWired;
         action.state = filter == current ? UIMenuElementStateOn : UIMenuElementStateOff;
         [actions addObject:action];
     }];
-    return [UIMenu menuWithTitle:@"Show in Messages" children:actions];
+    UIMenu *types = [UIMenu menuWithTitle:@"" image:nil identifier:nil
+                                  options:UIMenuOptionsDisplayInline children:actions];
+    // Reddit's "Unread" switch from the same dropdown.
+    UIAction *unreadOnly = [UIAction actionWithTitle:@"Unread Only"
+                                               image:[UIImage systemImageNamed:@"envelope.badge"]
+                                          identifier:nil
+                                             handler:^(__kindof UIAction *sender) {
+        [weakSelf toggleUnreadOnly];
+    }];
+    unreadOnly.state = ApolloModernChatMessagesUnreadOnly() ? UIMenuElementStateOn : UIMenuElementStateOff;
+    UIMenu *unread = [UIMenu menuWithTitle:@"" image:nil identifier:nil
+                                   options:UIMenuOptionsDisplayInline children:@[unreadOnly]];
+    return [UIMenu menuWithTitle:@"Show in Messages"
+                           image:[UIImage systemImageNamed:@"line.3.horizontal.decrease.circle"]
+                                 ?: [UIImage systemImageNamed:@"line.horizontal.3.decrease.circle"]
+                      identifier:nil
+                         options:0
+                        children:@[types, unread]];
 }
 
-- (void)applyFilter:(ApolloModernChatMessagesFilter)filter {
+- (void)toggleUnreadOnly {
     ApolloInboxChatHubViewController *hub = self.hub;
-    // The filter is a Messages-list setting: bring that section up with it.
+    BOOL unreadOnly = !ApolloModernChatMessagesUnreadOnly();
     [hub.sectionSwitcher apollo_setSelectedSection:ApolloModernChatInboxSectionMessages animated:NO];
-    ApolloModernChatControllerApplyMessagesFilter(hub.chatController, filter);
-    // UIMenu is immutable: rebuild it so the check mark follows the choice.
-    self.filterItem.menu = [self filterMenu];
-    ChatsFilterLog(@"Chat hub Messages filter set to %lu", (unsigned long)filter);
+    ApolloModernChatControllerSetMessagesUnreadOnly(hub.chatController, unreadOnly);
+    self.menuItem.menu = [self menu];
+    ChatsFilterLog(@"Chat hub Messages unread-only %@", unreadOnly ? @"on" : @"off");
+}
+
+- (UIMenu *)menu {
+    __weak typeof(self) weakSelf = self;
+    UIAction *newChat = [UIAction actionWithTitle:@"New Chat"
+                                            image:[UIImage systemImageNamed:@"square.and.pencil"]
+                                       identifier:nil
+                                          handler:^(__kindof UIAction *sender) {
+        [weakSelf newChat];
+    }];
+    UIAction *markAllRead = [UIAction actionWithTitle:@"Mark All as Read"
+                                                image:[UIImage systemImageNamed:@"text.badge.checkmark"]
+                                           identifier:nil
+                                              handler:^(__kindof UIAction *sender) {
+        [weakSelf markAllRead];
+    }];
+    return [UIMenu menuWithTitle:@"" children:@[newChat, markAllRead, [self filterMenu]]];
 }
 
 @end
 
-static UIImage *ApolloInboxChatBarGlyph(NSArray<NSString *> *symbolNames) {
-    for (NSString *name in symbolNames) {
-        UIImage *image = [UIImage systemImageNamed:name];
-        if (image) return image;
-    }
-    return nil;
-}
-
-// The Chat side's trailing bar buttons for `host`, built once per host.
+// The Chat side's trailing bar button for `host`, built once per host: the
+// same More glyph Apollo's own bars use, with the actions in its menu.
 static NSArray<UIBarButtonItem *> *ApolloInboxChatRightBarItems(UIViewController *host) {
     ApolloInboxChatBarActions *actions = objc_getAssociatedObject(host, &kInboxAllChatBarActionsKey);
-    if (actions.items.count) return actions.items;
+    if (actions.menuItem) return @[actions.menuItem];
     actions = [ApolloInboxChatBarActions new];
     actions.host = host;
-    UIBarButtonItem *markAllRead =
-        [[UIBarButtonItem alloc] initWithImage:ApolloInboxChatBarGlyph(@[@"text.badge.checkmark"])
-                                         style:UIBarButtonItemStylePlain
-                                        target:actions
-                                        action:@selector(markAllRead:)];
-    markAllRead.accessibilityLabel = @"Mark All Chats as Read";
-    UIBarButtonItem *filter =
-        [[UIBarButtonItem alloc] initWithImage:ApolloInboxChatBarGlyph(@[@"line.3.horizontal.decrease",
-                                                                          @"line.horizontal.3.decrease"])
-                                          menu:[actions filterMenu]];
-    filter.accessibilityLabel = @"Filter Chats";
-    actions.filterItem = filter;
-    UIBarButtonItem *newChat =
-        [[UIBarButtonItem alloc] initWithImage:ApolloInboxChatBarGlyph(@[@"square.and.pencil"])
-                                         style:UIBarButtonItemStylePlain
-                                        target:actions
-                                        action:@selector(newChat:)];
-    newChat.accessibilityLabel = @"New Chat";
-    // Trailing items list the rightmost first.
-    actions.items = @[newChat, filter, markAllRead];
+    UIImage *glyph = [[UIImage imageNamed:@"option-more"
+                                 inBundle:NSBundle.mainBundle
+            compatibleWithTraitCollection:host.traitCollection]
+        imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]
+        ?: [UIImage systemImageNamed:@"ellipsis"];
+    UIBarButtonItem *menuItem = [[UIBarButtonItem alloc] initWithImage:glyph menu:[actions menu]];
+    menuItem.accessibilityLabel = @"Chat Options";
+    actions.menuItem = menuItem;
     objc_setAssociatedObject(host, &kInboxAllChatBarActionsKey, actions, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return actions.items;
+    return @[menuItem];
 }
 
 static ApolloInboxChatHubViewController *ApolloEnsureInboxChatHub(UIViewController *host) {
@@ -1157,7 +1179,7 @@ static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, B
     }
     // Titles are anchored to screen center independently of these actions;
     // the shared collapsed-pill presenter follows the original item array.
-    // Chat gets its own three buttons (see ApolloInboxChatBarActions) in
+    // Chat gets its own More button (see ApolloInboxChatBarActions) in
     // Apollo's slots.
     [host.navigationItem setRightBarButtonItems:visible ? ApolloInboxChatRightBarItems(host)
                                                         : (savedRightItems.count ? savedRightItems : nil)
