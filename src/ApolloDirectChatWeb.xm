@@ -751,6 +751,12 @@ typedef NS_ENUM(NSUInteger, ApolloModernMailboxKind) {
 // this still frame stands in for it while the drag runs, and is swapped for
 // the live (identical) list once the panes have actually flipped.
 @property (nonatomic, strong) UIView *conversationBackSnapshot;
+// When conversationBackSnapshot was captured by a touch on the list (0 for a
+// frame the route observer captured). A room opened by a tap keeps the
+// touch-time frame: it predates the row's pressed highlight and the web
+// view's move to the room geometry, both of which the route-time frame
+// would carry.
+@property (nonatomic, assign) NSTimeInterval conversationBackSnapshotTouchAt;
 @property (nonatomic, strong) UIView *conversationBackDimView;
 @property (nonatomic, assign) BOOL conversationBackInteractive;
 @property (nonatomic, assign) CGFloat conversationBackDirection;
@@ -1421,6 +1427,30 @@ static NSString * const ApolloDirectChatSurfaceMessageName = @"apolloChatSurface
                 [self apollo_beginModmailTransitionToURL:url isList:isList];
             }
         }
+        // Grab the list frame an interactive back will reveal BEFORE the
+        // chrome update below moves the web view to the room geometry (top
+        // offset 0, composer inset). A frame placed at the web view's frame
+        // after that move sat the aligned list offset (~3pt) above where the
+        // live list returns, so the list hopped down by that much when the
+        // frame faded. The touch that opened the room has usually captured
+        // this frame already (apollo_noteTouchBeganOnPage), without the
+        // pressed highlight the tapped row shows by the time the route
+        // changes — keep a fresh touch frame; only a room opened without a
+        // touch (queued conversation, notification, deep link) needs the
+        // route-time capture.
+        if (self.mailboxKind == ApolloModernMailboxKindChat && url &&
+            [self apollo_isChatConversationPath:path] &&
+            ![self apollo_isChatConversationPath:previousPath] &&
+            !self.pageConversationTreatmentsApplied) {
+            NSTimeInterval sinceTouch = [NSDate date].timeIntervalSince1970 -
+                self.conversationBackSnapshotTouchAt;
+            BOOL freshTouchFrame = self.conversationBackSnapshot != nil &&
+                self.conversationBackSnapshotTouchAt > 0.0 && sinceTouch < 1.0;
+            if (!freshTouchFrame) [self apollo_captureConversationBackSnapshot];
+            ApolloLog(@"[DirectChatWeb] Conversation back frame: %@ (list frame y=%.1f)",
+                      freshTouchFrame ? @"kept the touch-time frame" : @"captured at the route change",
+                      self.webView.frame.origin.y);
+        }
         [self apollo_updateTabBarVisibilityForURL:url animated:NO];
         [self apollo_updateEmbeddedWebChromeForURL:url];
         if (self.mailboxKind == ApolloModernMailboxKindChat && url) {
@@ -1452,11 +1482,8 @@ static NSString * const ApolloDirectChatSurfaceMessageName = @"apolloChatSurface
                 // whatever the swipe driver did on the way out of the last one
                 // must not swallow the first back gesture in this one.
                 self.conversationBackIssuedAt = 0.0;
-                // Grab the list while it is still the rendered frame — this
-                // observer runs in the same turn as Reddit's pane swap, before
-                // the room paints and before the transition cover blanks the
-                // document — so an interactive back has something to reveal.
-                if (!pageAlreadyShowing) [self apollo_captureConversationBackSnapshot];
+                // The list frame an interactive back reveals was captured
+                // above, before the chrome update moved the web view.
                 // WebKit re-creates its content view (and the history edge
                 // recognizers on it) across navigations; entering a room is
                 // exactly when the standalone back-pan must already outrank
@@ -2253,6 +2280,9 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
     if (self.chatTransitionPending || self.conversationBackInteractive) return;
     if ([self apollo_isInsideConversation]) return;
     [self apollo_captureConversationBackSnapshot];
+    if (self.conversationBackSnapshot) {
+        self.conversationBackSnapshotTouchAt = [NSDate date].timeIntervalSince1970;
+    }
 }
 
 // After a conversation gives way to a list — the URL observer's normal path,
@@ -2370,6 +2400,7 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
 
 - (void)apollo_captureConversationBackSnapshot {
     self.conversationBackSnapshot = nil;
+    self.conversationBackSnapshotTouchAt = 0.0;
     if (self.mailboxKind != ApolloModernMailboxKindChat) return;
     // A hidden hub renders nothing worth capturing, and an off-window view
     // snapshots empty.
@@ -3038,9 +3069,10 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         // redundant back/Threads row without clipping the first participant.
         // Returning from a reply-thread conversation, restore the already
         // measured alignment instead so the list does not visibly hop while
-        // the async re-measure runs.
+        // the async re-measure runs. A measured value is authoritative from
+        // the moment it exists, revealed or not — see the Messages branch.
         topOffset = 8.0;
-        if (self.didRevealChat && !isnan(self.threadsAlignedTopOffset) &&
+        if (!isnan(self.threadsAlignedTopOffset) &&
             self.embeddedInboxSection == ApolloModernChatInboxSectionThreads) {
             topOffset = self.threadsAlignedTopOffset;
         }
@@ -3051,8 +3083,16 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         // align pass has measured the real breathing gap once, returning from
         // a room reuses that value — resetting to zero here and re-measuring a
         // moment later made the whole list hop by the gap and back.
+        //
+        // The measured value counts before the reveal too. The align pass
+        // runs just ahead of the reveal and lays out immediately, which
+        // re-enters this method from viewDidLayoutSubviews; gating the reuse
+        // on didRevealChat made that re-entry undo the measurement (back to
+        // 0), so the list was revealed at 0, the frame a room's back swipe
+        // captured showed it there, and the first re-measure after the swipe
+        // dropped the whole list by the gap (~3pt).
         topOffset = 0.0;
-        if (self.didRevealChat && !isnan(self.messagesAlignedTopOffset) &&
+        if (!isnan(self.messagesAlignedTopOffset) &&
             self.embeddedInboxSection == ApolloModernChatInboxSectionMessages) {
             topOffset = self.messagesAlignedTopOffset;
         }
