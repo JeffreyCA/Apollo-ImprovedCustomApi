@@ -83,6 +83,7 @@ static char kInboxAllStatusObserverKey;
 static char kInboxAllChatHubKey;
 static char kInboxAllChatHubVisibleKey;
 static char kInboxAllOriginalRightItemsKey;
+static char kInboxAllChatBarActionsKey;
 
 // Apollo owns the Inbox badge for notification/message counts. Keep that raw
 // value separately and render Chat as an additive overlay so either producer
@@ -958,6 +959,114 @@ static NSHashTable *sInboxModePanWired;
 // Apollo's notification table and cross-fade it in place. The notification list
 // underneath never leaves the hierarchy, preserving its exact scroll position
 // and avoiding the horizontal navigation/reload effect shown in the recording.
+
+// MARK: - Chat-side navigation bar buttons
+//
+// Notifications keeps Apollo's own trailing bar buttons (mark all read,
+// compose). Chat used to strip that side entirely, which also lost the three
+// controls Reddit draws in its list header — hidden with the rest of that
+// header because the hub carries its own section switcher. They return here as
+// native bar buttons in the same slots, each driving Reddit's own control
+// inside the page: Mark all read, a Filter menu for the Messages list (Direct
+// chats — the default — Group chats, or All chats), and New chat in the slot
+// Apollo's compose button has on Notifications.
+
+@interface ApolloInboxChatBarActions : NSObject
+@property (nonatomic, weak) UIViewController *host;
+@property (nonatomic, strong) UIBarButtonItem *filterItem;
+@property (nonatomic, copy) NSArray<UIBarButtonItem *> *items;
+@end
+
+@implementation ApolloInboxChatBarActions
+
+- (ApolloInboxChatHubViewController *)hub {
+    UIViewController *host = self.host;
+    return host ? objc_getAssociatedObject(host, &kInboxAllChatHubKey) : nil;
+}
+
+- (void)markAllRead:(id)sender {
+    ApolloModernChatControllerPerformHeaderAction(self.hub.chatController,
+                                                  ApolloModernChatHeaderActionMarkAllRead);
+}
+
+- (void)newChat:(id)sender {
+    ApolloModernChatControllerPerformHeaderAction(self.hub.chatController,
+                                                  ApolloModernChatHeaderActionNewChat);
+}
+
+- (UIMenu *)filterMenu {
+    ApolloModernChatMessagesFilter current = ApolloModernChatCurrentMessagesFilter();
+    NSArray<NSNumber *> *filters = @[@(ApolloModernChatMessagesFilterDirect),
+                                     @(ApolloModernChatMessagesFilterGroup),
+                                     @(ApolloModernChatMessagesFilterAll)];
+    NSArray<NSString *> *titles = @[@"Direct Chats", @"Group Chats", @"All Chats"];
+    NSMutableArray<UIAction *> *actions = [NSMutableArray array];
+    __weak typeof(self) weakSelf = self;
+    [filters enumerateObjectsUsingBlock:^(NSNumber *value, NSUInteger index, BOOL *stop) {
+        ApolloModernChatMessagesFilter filter =
+            (ApolloModernChatMessagesFilter)value.unsignedIntegerValue;
+        UIAction *action = [UIAction actionWithTitle:titles[index]
+                                               image:nil
+                                          identifier:nil
+                                             handler:^(__kindof UIAction *sender) {
+            [weakSelf applyFilter:filter];
+        }];
+        action.state = filter == current ? UIMenuElementStateOn : UIMenuElementStateOff;
+        [actions addObject:action];
+    }];
+    return [UIMenu menuWithTitle:@"Show in Messages" children:actions];
+}
+
+- (void)applyFilter:(ApolloModernChatMessagesFilter)filter {
+    ApolloInboxChatHubViewController *hub = self.hub;
+    // The filter is a Messages-list setting: bring that section up with it.
+    [hub.sectionSwitcher apollo_setSelectedSection:ApolloModernChatInboxSectionMessages animated:NO];
+    ApolloModernChatControllerApplyMessagesFilter(hub.chatController, filter);
+    // UIMenu is immutable: rebuild it so the check mark follows the choice.
+    self.filterItem.menu = [self filterMenu];
+    ChatsFilterLog(@"Chat hub Messages filter set to %lu", (unsigned long)filter);
+}
+
+@end
+
+static UIImage *ApolloInboxChatBarGlyph(NSArray<NSString *> *symbolNames) {
+    for (NSString *name in symbolNames) {
+        UIImage *image = [UIImage systemImageNamed:name];
+        if (image) return image;
+    }
+    return nil;
+}
+
+// The Chat side's trailing bar buttons for `host`, built once per host.
+static NSArray<UIBarButtonItem *> *ApolloInboxChatRightBarItems(UIViewController *host) {
+    ApolloInboxChatBarActions *actions = objc_getAssociatedObject(host, &kInboxAllChatBarActionsKey);
+    if (actions.items.count) return actions.items;
+    actions = [ApolloInboxChatBarActions new];
+    actions.host = host;
+    UIBarButtonItem *markAllRead =
+        [[UIBarButtonItem alloc] initWithImage:ApolloInboxChatBarGlyph(@[@"text.badge.checkmark"])
+                                         style:UIBarButtonItemStylePlain
+                                        target:actions
+                                        action:@selector(markAllRead:)];
+    markAllRead.accessibilityLabel = @"Mark All Chats as Read";
+    UIBarButtonItem *filter =
+        [[UIBarButtonItem alloc] initWithImage:ApolloInboxChatBarGlyph(@[@"line.3.horizontal.decrease",
+                                                                          @"line.horizontal.3.decrease"])
+                                          menu:[actions filterMenu]];
+    filter.accessibilityLabel = @"Filter Chats";
+    actions.filterItem = filter;
+    UIBarButtonItem *newChat =
+        [[UIBarButtonItem alloc] initWithImage:ApolloInboxChatBarGlyph(@[@"square.and.pencil"])
+                                         style:UIBarButtonItemStylePlain
+                                        target:actions
+                                        action:@selector(newChat:)];
+    newChat.accessibilityLabel = @"New Chat";
+    // Trailing items list the rightmost first.
+    actions.items = @[newChat, filter, markAllRead];
+    objc_setAssociatedObject(host, &kInboxAllChatBarActionsKey, actions, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return actions.items;
+}
+
 static ApolloInboxChatHubViewController *ApolloEnsureInboxChatHub(UIViewController *host) {
     if (!host || !ApolloModernChatShouldOpen()) return nil;
     ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(host, &kInboxAllChatHubKey);
@@ -1046,15 +1155,17 @@ static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, B
         objc_setAssociatedObject(host, &kInboxAllOriginalRightItemsKey,
                                  [savedRightItems copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    // Stripping the right buttons must not let the Liquid Glass recenter
-    // re-balance the "Inbox" title against an empty trailing side — the title
+    // Swapping the trailing buttons must not let the Liquid Glass recenter
+    // re-balance the "Inbox" title against the other set's width — the title
     // visibly slid toward screen center on every Notifications -> Chat switch
     // and back again on the return. Hold the trailing reservation BEFORE the
-    // strip (so a recenter pass mid-removal already holds the old edge) and
+    // swap (so a recenter pass mid-removal already holds the old edge) and
     // release it only AFTER the restore (so no pass between the two sees a
-    // bare bar). No-op off-glass and under the pre-26 nav bar.
+    // bare bar). No-op off-glass and under the pre-26 nav bar. Chat gets its
+    // own three buttons (see ApolloInboxChatBarActions) in Apollo's slots.
     if (visible) ApolloNavItemSetTrailingReservationHold(host.navigationItem, YES);
-    [host.navigationItem setRightBarButtonItems:visible ? nil : (savedRightItems.count ? savedRightItems : nil)
+    [host.navigationItem setRightBarButtonItems:visible ? ApolloInboxChatRightBarItems(host)
+                                                        : (savedRightItems.count ? savedRightItems : nil)
                                        animated:animated];
     if (!visible) ApolloNavItemSetTrailingReservationHold(host.navigationItem, NO);
 
@@ -1156,6 +1267,7 @@ static void ApolloDismantleInboxChatHub(UIViewController *host, NSString *reason
     // The restored right bar items are live on the navigation item again;
     // clear the stash so a later re-enable captures a fresh copy.
     objc_setAssociatedObject(host, &kInboxAllOriginalRightItemsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(host, &kInboxAllChatBarActionsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // The hide above already released the trailing reservation hold, but keep
     // dismantle self-sufficient: the hold must never outlive the hub on this
     // navigation item, whatever path led here.

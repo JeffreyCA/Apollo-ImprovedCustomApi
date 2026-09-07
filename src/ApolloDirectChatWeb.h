@@ -68,6 +68,27 @@ void ApolloModernChatControllerSetInboxVisible(UIViewController *controller, BOO
 // that has not loaded its first document yet takes it as its initial
 // destination instead. Anything else is ignored.
 void ApolloModernChatControllerOpenConversationPath(UIViewController *controller, NSString *path);
+// Which rooms the embedded Messages list shows. Reddit's own list header
+// offers this as "Filter chat inbox"; the hub hides that header, so the
+// Inbox bar carries the choice instead. Direct chats is the long-standing
+// default (a bare Reddit list mixes group rooms in).
+typedef NS_ENUM(NSUInteger, ApolloModernChatMessagesFilter) {
+    ApolloModernChatMessagesFilterDirect = 0,
+    ApolloModernChatMessagesFilterGroup,
+    ApolloModernChatMessagesFilterAll,
+};
+ApolloModernChatMessagesFilter ApolloModernChatCurrentMessagesFilter(void);
+// Stores the filter and reloads the embedded Messages list under it.
+void ApolloModernChatControllerApplyMessagesFilter(UIViewController *controller,
+                                                   ApolloModernChatMessagesFilter filter);
+// The other two controls of Reddit's chat-list header, driven through the
+// page's own (hidden) buttons.
+typedef NS_ENUM(NSUInteger, ApolloModernChatHeaderAction) {
+    ApolloModernChatHeaderActionMarkAllRead = 0,
+    ApolloModernChatHeaderActionNewChat,
+};
+void ApolloModernChatControllerPerformHeaderAction(UIViewController *controller,
+                                                   ApolloModernChatHeaderAction action);
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller);
 // YES while `controller` (a modern Chat controller) is inside a conversation
 // (/chat/room/… or a /chat/threads/<id> reply thread) rather than one of the

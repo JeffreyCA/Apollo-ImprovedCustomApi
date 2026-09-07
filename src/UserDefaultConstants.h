@@ -513,6 +513,8 @@ static NSString *const UDKeyChatPollerIntervalOverride = @"ChatPollerIntervalOve
 // Debug-only override (seconds, >= 5) for how long the modern Chat surface
 // must be hidden/inactive before returning to it auto-refreshes the list.
 static NSString *const UDKeyChatStaleRefreshOverride = @"ChatStaleRefreshOverride";
+// Embedded Inbox Chat > Messages room filter: "direct" (default), "group", "all".
+static NSString *const UDKeyChatMessagesFilter = @"ChatMessagesFilter";
 // Native Polls (ApolloPollVoting.xm / ApolloPollCompose.xm). Off by default —
 // an experimental feature that lets you vote in and create polls via a
 // per-account reddit.com web session (harvested once, then silent). Independent
