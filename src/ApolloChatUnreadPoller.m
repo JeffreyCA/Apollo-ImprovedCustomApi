@@ -54,6 +54,11 @@ static NSString *sChatPollSinceBase = nil;     // homeserver the since token bel
 static NSTimeInterval sChatPollMintBlockedUntil = 0;
 static NSTimeInterval sChatPollAuthBlockedUntil = 0;
 static NSTimeInterval sChatPollServerBlockedUntil = 0;
+// Optional bearer source backed by a live mailbox web view's cookie jar
+// (ApolloChatPollSetWebJarBearerProvider); consulted before an offscreen mint.
+static void (^sChatPollWebJarBearerProvider)(void (^)(NSString *)) = nil;
+static void ApolloChatPollMintAndAdoptBearer(NSString *username, NSString *cookieHeader,
+                                             void (^completion)(NSString *bearer));
 
 #pragma mark - Small helpers
 
@@ -272,6 +277,35 @@ static void ApolloChatPollObtainBearer(NSString *username, NSString *cookieHeade
             return;
         }
     }
+    // A live modern mailbox web view has loaded real reddit.com documents, and
+    // Reddit refreshes token_v2 on those: its jar is an already-minted bearer.
+    // Consult it before an offscreen mint — and before the mint backoff, which
+    // a failed mint may have armed while the web view was working fine.
+    if (sChatPollWebJarBearerProvider) {
+        sChatPollWebJarBearerProvider(^(NSString *token) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSTimeInterval later = [NSDate date].timeIntervalSince1970;
+                if (token.length > 0 && ![token isEqualToString:sChatPollRejectedBearer] &&
+                    ApolloChatPollJWTExpiry(token) - later > kChatPollBearerSlack) {
+                    sChatPollBearer = token;
+                    sChatPollBearerExpiry = ApolloChatPollJWTExpiry(token);
+                    ApolloLog(@"[ChatPoller] Adopted a fresh token_v2 from the mailbox web view for u/%@", username);
+                    completion(token);
+                    return;
+                }
+                ApolloChatPollMintAndAdoptBearer(username, cookieHeader, completion);
+            });
+        });
+        return;
+    }
+    ApolloChatPollMintAndAdoptBearer(username, cookieHeader, completion);
+}
+
+// Mint through the offscreen web view (unless a recent failure is still
+// backing off) and cache the result for every later request.
+static void ApolloChatPollMintAndAdoptBearer(NSString *username, NSString *cookieHeader,
+                                             void (^completion)(NSString *bearer)) {
+    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
     if (now < sChatPollMintBlockedUntil) {
         completion(nil);
         return;
@@ -706,5 +740,55 @@ static void ApolloChatUnreadPollerInit(void) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ ApolloChatPollTick(); });
         }
+    });
+}
+
+#pragma mark - Shared bearer access
+
+NSString *ApolloChatPollHomeserver(void) {
+    return ApolloChatPollHomeserverBase();
+}
+
+void ApolloChatPollSetWebJarBearerProvider(void (^provider)(void (^)(NSString *))) {
+    sChatPollWebJarBearerProvider = [provider copy];
+}
+
+void ApolloChatPollNoteBearerRejected(NSString *bearer) {
+    if (bearer.length == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (![bearer isEqualToString:sChatPollBearer]) return;
+        sChatPollRejectedBearer = [bearer copy];
+        sChatPollBearer = nil;
+        sChatPollBearerExpiry = 0;
+    });
+}
+
+void ApolloChatPollObtainBearerForActiveAccount(void (^completion)(NSString *bearer)) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ ApolloChatPollObtainBearerForActiveAccount(completion); });
+        return;
+    }
+    if (!ApolloModernMailboxOSSupported()) {
+        completion(nil);
+        return;
+    }
+    NSString *username = ApolloActiveWebSessionUsername();
+    ApolloWebSessionEntry *entry = username.length > 0 ? ApolloWebSessionPollFor(username) : nil;
+    if (username.length == 0 || entry.cookieHeader.length == 0) {
+        completion(nil);
+        return;
+    }
+    // Same per-account ownership rule as the tick: a switch resets every
+    // cached token and backoff before anything is reused.
+    if (![username isEqualToString:sChatPollUsername]) {
+        sChatPollUsername = [username copy];
+        ApolloChatPollResetPerAccountState();
+    }
+    if ([NSDate date].timeIntervalSince1970 < sChatPollAuthBlockedUntil) {
+        completion(nil);
+        return;
+    }
+    ApolloChatPollObtainBearer(username, entry.cookieHeader, ^(NSString *bearer) {
+        completion(bearer.length > 0 ? bearer : nil);
     });
 }

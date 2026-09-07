@@ -50,6 +50,32 @@ UIViewController *ApolloCreateModernChatViewController(void);
 // Reddit Chat path such as /chat/room/<opaque-room-id>; invalid paths safely
 // fall back to the normal Chat entry screen.
 UIViewController *ApolloCreateModernChatViewControllerForPath(NSString * _Nullable destinationPath);
+// The Inbox Chat hub on its own: the same Chat surface the Inbox (All)
+// screen shows — Reddit's list header hidden, the Messages / Requests /
+// Threads controls, the More menu in the bar — pushed as a screen of its own
+// (Boxes > Direct Chat, a profile's envelope, a Messages-box mirror, a chat
+// notification). `destinationPath` is an optional conversation path
+// (/chat/room/…, /chat/user/…) opened in place once the list is up, or
+// ApolloChatRequestsPath for the Requests section. Implemented by the hub's
+// module (ApolloChatsFilter).
+UIViewController *ApolloCreateStandaloneInboxChatHub(NSString * _Nullable destinationPath);
+// Opens a Chat destination where Chat lives: the Inbox tab, reset to Boxes
+// with the stand-alone hub pushed on top (the same place a chat notification
+// lands). NO when the tab bar or its Inbox stack cannot be reached, so the
+// caller can push on its own stack instead. Implemented by the hub's module.
+BOOL ApolloModernChatOpenInInbox(NSString * _Nullable destinationPath);
+// The embedded Chat controller of a stand-alone hub screen, nil for any other
+// view controller. Implemented by the hub's module; used by the tab re-tap
+// rule in ApolloDirectChatWeb.
+UIViewController * _Nullable ApolloStandaloneInboxChatHubEmbeddedController(UIViewController * _Nullable viewController);
+// Queue a conversation for a Chat controller that has not loaded its list
+// yet (the stand-alone hub's): the list loads under the loading cover and the
+// conversation opens in place once the list is up.
+void ApolloModernChatControllerQueueConversationPath(UIViewController *controller, NSString *path);
+// An embedded (hub-hosted) Chat controller whose hub is pushed on its own has
+// no Inbox host mode-pan to climb the hierarchy for it; it takes the
+// stand-alone back-pan instead.
+void ApolloModernChatControllerSetHostedByStandaloneHub(UIViewController *controller, BOOL hosted);
 // Inbox-only variant. It embeds the authenticated web client below Apollo's
 // Notifications / Chat and Messages / Requests / Threads controls instead of
 // pushing a second full-screen Chat controller.
@@ -61,10 +87,44 @@ void ApolloModernChatControllerShowInboxSection(UIViewController *controller,
 // ownership to the web controller while Chat is visible, and restore it when
 // Notifications returns.
 void ApolloModernChatControllerSetInboxVisible(UIViewController *controller, BOOL visible);
+// Open a conversation inside an existing Chat controller (the Inbox hub's, or
+// a standalone one): a validated Reddit Chat conversation path such as
+// /chat/room/<opaque-room-id> loads as a real navigation under the same
+// covered transition a tapped room gets, in the Messages section. A controller
+// that has not loaded its first document yet takes it as its initial
+// destination instead. Anything else is ignored.
+void ApolloModernChatControllerOpenConversationPath(UIViewController *controller, NSString *path);
+// Which rooms the embedded Messages list shows. Reddit's own list header
+// offers this as "Filter chat inbox"; the hub hides that header, so the
+// Inbox bar carries the choice instead. Direct chats is the long-standing
+// default (a bare Reddit list mixes group rooms in).
+typedef NS_ENUM(NSUInteger, ApolloModernChatMessagesFilter) {
+    ApolloModernChatMessagesFilterDirect = 0,
+    ApolloModernChatMessagesFilterGroup,
+    ApolloModernChatMessagesFilterAll,
+};
+ApolloModernChatMessagesFilter ApolloModernChatCurrentMessagesFilter(void);
+// Reddit's "Unread" switch in the same dropdown, kept as a preference and
+// re-applied on every Messages list load.
+BOOL ApolloModernChatMessagesUnreadOnly(void);
+void ApolloModernChatControllerSetMessagesUnreadOnly(UIViewController *controller, BOOL unreadOnly);
+// Stores the filter and reloads the embedded Messages list under it.
+void ApolloModernChatControllerApplyMessagesFilter(UIViewController *controller,
+                                                   ApolloModernChatMessagesFilter filter);
+// The other two controls of Reddit's chat-list header, driven through the
+// page's own (hidden) buttons.
+typedef NS_ENUM(NSUInteger, ApolloModernChatHeaderAction) {
+    ApolloModernChatHeaderActionMarkAllRead = 0,
+    ApolloModernChatHeaderActionNewChat,
+};
+void ApolloModernChatControllerPerformHeaderAction(UIViewController *controller,
+                                                   ApolloModernChatHeaderAction action);
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller);
 // YES while `controller` (a modern Chat controller) is inside a conversation
 // (/chat/room/… or a /chat/threads/<id> reply thread) rather than one of the
-// list surfaces. The Inbox hub's back-swipe tracker checks this to decide
+// list surfaces — by the web view's route, or by the page's own report of a
+// conversation pane on screen when a same-document room open delivered no
+// URL change. The Inbox hub's back-swipe tracker checks this to decide
 // which level of the hierarchy one gesture climbs: out of the conversation
 // while one is open, otherwise Chat -> Notifications.
 BOOL ApolloModernChatControllerIsOnConversationRoute(UIViewController * _Nullable controller);

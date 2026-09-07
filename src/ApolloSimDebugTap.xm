@@ -722,6 +722,17 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             ApolloDevvitDebugEvaluateJS([contents substringFromIndex:9]);
             return;
         }
+        // "chatjs <js>" command: evaluate JS in the most recently created
+        // modern Chat/Modmail web view (the Inbox hub's, normally) and log
+        // the result. Lets a sim reproduce web-side states the sim's own
+        // WebKit never produces — e.g. `chatjs history.replaceState(null,"",
+        // "/chat")` inside a room mimics the device's room-under-a-list-URL
+        // desync. See ApolloDirectChatDebugEvaluateJS in ApolloDirectChatWeb.xm.
+        if ([contents hasPrefix:@"chatjs "]) {
+            extern void ApolloDirectChatDebugEvaluateJS(NSString *js);
+            ApolloDirectChatDebugEvaluateJS([contents substringFromIndex:7]);
+            return;
+        }
         // "devvitsweep": run the interactive-post stale-width sweep now, with
         // a per-surface geometry dump.
         if ([contents hasPrefix:@"devvitsweep"]) {
