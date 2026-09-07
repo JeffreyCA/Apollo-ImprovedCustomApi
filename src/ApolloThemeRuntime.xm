@@ -836,6 +836,17 @@ UIColor *ApolloNavigationChromeColor(void) {
     return color;
 }
 
+UIColor *ApolloModeratorColor(void) {
+    return [UIColor colorWithRed:(48.0 / 255.0) green:(209.0 / 255.0) blue:(88.0 / 255.0) alpha:1.0];
+}
+
+static BOOL ApolloUsesLegacyModeratorColor(CGFloat r, CGFloat g, CGFloat b, uintptr_t caller) {
+    // Scope the exact palette replacement to Apollo, not UIKit or other libraries.
+    return r == 0.0 && fabs(g - 148.0 / 255.0) < 0.00001 &&
+        fabs(b - 15.0 / 255.0) < 0.00001 &&
+        sApolloStart && caller >= sApolloStart && caller < sApolloEnd;
+}
+
 static UIColor *NavigationTitlePrimaryColor(void) {
     if (IsLiquidGlass()) return ApolloNavigationChromeColor();
     return ApolloThemeCurrentSnapshot()->enabled
@@ -855,6 +866,28 @@ static NSAttributedString *NavigationTitleAttributedText(NSAttributedString *sou
 }
 
 static void ApplyThemeToNavigationTitleControl(UIView *titleControl);
+
+static char kApolloNeutralNavigationTitleKey;
+
+static BOOL ApolloNeutralNavigationTitle(UIView *view) {
+    for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
+        if (objc_getAssociatedObject(ancestor, &kApolloNeutralNavigationTitleKey)) return YES;
+    }
+    return NO;
+}
+
+static CGSize ApolloNavigationTitleFittingSize(UIButton *button, CGSize size) {
+    if (!IsLiquidGlass() || (!ApolloNeutralNavigationTitle(button) &&
+        ![NSStringFromClass(button.class) isEqualToString:@"Apollo.DualLabelTitleButton"])) return size;
+    if (!isfinite(size.height) || size.height <= 44.0 || !isfinite(size.width) || size.width <= 0) return size;
+    NSAttributedString *title = button.currentAttributedTitle;
+    if (!title.length) return size;
+    CGFloat textHeight = ceil([title boundingRectWithSize:CGSizeMake(size.width, CGFLOAT_MAX)
+        options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading context:nil].size.height);
+    // Keep larger accessibility titles intact; remove only surplus button padding.
+    if (isfinite(textHeight) && textHeight > 0 && textHeight <= 44.0) size.height = 44.0;
+    return size;
+}
 
 static void RefreshFontOnTextControl(UIView *view, ApolloThemeFont target) {
     if (FontPinned(view)) return;
@@ -1676,6 +1709,9 @@ void ApolloThemeRuntimeInvalidate(void) {
 // sink hooks below, not by this constructor path.
 
 + (UIColor *)colorWithRed:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b alpha:(CGFloat)a {
+    if (ApolloUsesLegacyModeratorColor(r, g, b, (uintptr_t)__builtin_return_address(0))) {
+        return %orig(48.0 / 255.0, 209.0 / 255.0, 88.0 / 255.0, a);
+    }
     const ApolloThemeRuntimeSnapshot *snapshot = ApolloThemeCurrentSnapshot();
     if (snapshot->enabled && !sBypassHook) {
         uint32_t rgb = ApolloThemeRGBKeyFromComponents(r, g, b);
@@ -1693,6 +1729,9 @@ void ApolloThemeRuntimeInvalidate(void) {
 // Apollo is Swift: UIColor(red:green:blue:alpha:) compiles to this instance
 // initialiser, so this is the primary donor entry point.
 - (UIColor *)initWithRed:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b alpha:(CGFloat)a {
+    if (ApolloUsesLegacyModeratorColor(r, g, b, (uintptr_t)__builtin_return_address(0))) {
+        return %orig(48.0 / 255.0, 209.0 / 255.0, 88.0 / 255.0, a);
+    }
     const ApolloThemeRuntimeSnapshot *snapshot = ApolloThemeCurrentSnapshot();
     if (snapshot->enabled && !sBypassHook) {
         uint32_t rgb = ApolloThemeRGBKeyFromComponents(r, g, b);
@@ -1979,6 +2018,10 @@ void ApolloThemeRuntimeInvalidate(void) {
 }
 
 - (void)setTextColor:(UIColor *)textColor {
+    if (ApolloNeutralNavigationTitle(self)) {
+        %orig(ApolloNavigationChromeColor());
+        return;
+    }
     if (ApolloThemeCurrentSnapshot()->enabled && NavigationTitleOwnsButtonLabel(self)) {
         %orig(textColor);
         return;
@@ -1993,6 +2036,10 @@ void ApolloThemeRuntimeInvalidate(void) {
     if (sAttributedTextAssignmentBypass ||
         (ApolloThemeCurrentSnapshot()->enabled && NavigationTitleOwnsButtonLabel(self))) {
         %orig(attributedText);
+        return;
+    }
+    if (ApolloNeutralNavigationTitle(self)) {
+        %orig(NavigationTitleAttributedText(attributedText, self, ApolloNavigationChromeColor()));
         return;
     }
     objc_setAssociatedObject(self, kApolloThemeOriginalAttributedTextKey,
@@ -2010,12 +2057,29 @@ void ApolloThemeRuntimeInvalidate(void) {
 
 %hook UIButton
 
+- (CGSize)intrinsicContentSize {
+    return ApolloNavigationTitleFittingSize(self, %orig);
+}
+
+- (CGSize)sizeThatFits:(CGSize)size {
+    return ApolloNavigationTitleFittingSize(self, %orig(size));
+}
+
+- (void)setTitleColor:(UIColor *)color forState:(UIControlState)state {
+    if (ApolloNeutralNavigationTitle(self)) color = ApolloNavigationChromeColor();
+    %orig(color, state);
+}
+
 - (void)setAttributedTitle:(NSAttributedString *)title forState:(UIControlState)state {
     if (sNavigationButtonTitleAssignmentBypass) {
         %orig(title, state);
         return;
     }
     // Capture both title lines before attachment so retheming uses the raw source.
+    if (ApolloNeutralNavigationTitle(self)) {
+        %orig(NavigationTitleAttributedText(title, self, ApolloNavigationChromeColor()), state);
+        return;
+    }
     BOOL dualTitle = [NSStringFromClass(self.class) isEqualToString:@"Apollo.DualLabelTitleButton"];
     NSMutableDictionary<NSNumber *, id> *sources = NavigationButtonTitleSources(self, dualTitle);
     if (sources) {
@@ -2103,6 +2167,52 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
         }
     }
     %orig;
+}
+
+%end
+
+%hook UITabBar
+- (void)didMoveToWindow {
+    %orig;
+    if (IsLiquidGlass() && self.window) {
+        UIColor *accent = ApolloThemeAccentColor();
+        if (accent) self.tintColor = accent;
+    }
+}
+
+- (void)setTintColor:(UIColor *)color {
+    // Moderator pages change their navigation accent, not the selected tab's identity.
+    if (IsLiquidGlass()) color = ApolloThemeAccentColor() ?: color;
+    %orig(color);
+}
+%end
+
+%hook UINavigationItem
+
+- (void)setTitleView:(UIView *)view {
+    if (IsLiquidGlass() && view) {
+        // Prepare custom titles before UIKit snapshots the incoming page.
+        objc_setAssociatedObject(view, &kApolloNeutralNavigationTitleKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        view.tintColor = ApolloNavigationChromeColor();
+        ApplyThemeToNavigationTitleContent(view, ApolloThemeCurrentSnapshot()->enabled
+            ? ApolloThemeCurrentSnapshot()->fontChoices[CurrentRuntimeMode()] : ApolloThemeFontSystem,
+            ApolloNavigationChromeColor());
+    }
+    %orig(view);
+}
+
+%end
+
+%hook _TtC6Apollo27AutoModeratorViewController
+
+- (void)viewDidLoad {
+    %orig;
+    if (IsLiquidGlass()) {
+        UIBarButtonItem *close = ((UIViewController *)self).navigationItem.leftBarButtonItem;
+        close.tintColor = ApolloNavigationChromeColor();
+        if (close.image) close.image = [close.image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        close.customView.tintColor = ApolloNavigationChromeColor();
+    }
 }
 
 %end

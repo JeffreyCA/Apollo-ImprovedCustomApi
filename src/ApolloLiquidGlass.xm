@@ -946,8 +946,6 @@ static BOOL ApolloRecenterTitleControl(ApolloNavigationTitleGlassController *con
 @property (nonatomic) CGRect observedJumpBarBounds;
 @property (nonatomic) NSUInteger observedJumpBarSubviewCount;
 @property (nonatomic) BOOL observedSearching;
-@property (nonatomic) CFTimeInterval searchMorphDeadline;
-@property (nonatomic, weak) UITextField *revealingSearchField;
 @property (nonatomic) BOOL actionsMotionCaptured;
 @property (nonatomic) CGPoint actionsMotionStart;
 // Read-only frame fold over the whole bar subtree: the recenter's output
@@ -989,9 +987,6 @@ static BOOL ApolloRecenterTitleControl(ApolloNavigationTitleGlassController *con
     [self.glassView removeFromSuperview];
     self.glassView = nil;
     self.glassHostView = nil;
-    self.searchMorphDeadline = 0;
-    [self.revealingSearchField.layer removeAnimationForKey:@"ApolloJumpBarSearchReveal"];
-    self.revealingSearchField = nil;
 }
 
 - (void)resetContentPlacementPreservingActionsMotion:(BOOL)preserve {
@@ -1395,58 +1390,31 @@ BOOL ApolloNavigationTitleContainsNativeSearchSurface(UIView *view) {
     }
     self.preservesNativeSearchLayout = NO;
 
-    // Search's Cancel/globe allocation settles over several frames on iOS 27.
-    // Morph from the displayed bar-space frame to avoid width jumps; exclude
-    // push/pop transitions and Reduce Motion.
-    BOOL searching = ApolloJumpBarIsSearching(jumpBar);
     BOOL navigating = ApolloOwningTopViewController(self.titleControl).transitionCoordinator.isAnimated;
-    if (navigating || UIAccessibilityIsReduceMotionEnabled()) self.searchMorphDeadline = 0;
-    if (self.observationValid && jumpBar && jumpBar == self.observedJumpBar &&
-        searching != self.observedSearching && !navigating && !UIAccessibilityIsReduceMotionEnabled()) {
-        self.searchMorphDeadline = CACurrentMediaTime() + 0.3;
-        [self.revealingSearchField.layer removeAnimationForKey:@"ApolloJumpBarSearchReveal"];
-        self.revealingSearchField = searching ? ApolloVisibleTitleSearchField(jumpBar) : nil;
-        if (self.revealingSearchField && self.glassView) {
-            // Reveal text as the narrow capsule opens, preserving model alpha.
-            CAKeyframeAnimation *reveal = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
-            reveal.values = @[@(-1.0), @(-1.0), @0.0];
-            reveal.keyTimes = @[@0.0, @0.5, @1.0];
-            reveal.duration = 0.3;
-            reveal.additive = YES;
-            [self.revealingSearchField.layer addAnimation:reveal forKey:@"ApolloJumpBarSearchReveal"];
-        }
-    }
-    UIView *bar = self.titleControl.superview;
-    while (bar && ![bar isKindOfClass:UINavigationBar.class]) bar = bar.superview;
+    BOOL animateSearch = jumpBar && jumpBar == self.observedJumpBar && self.observationValid &&
+        ApolloJumpBarIsSearching(jumpBar) != self.observedSearching &&
+        !navigating && !UIAccessibilityIsReduceMotionEnabled();
     UIVisualEffectView *oldGlass = self.glassView;
-    CGRect oldGlassFrame = CGRectNull;
-    if (bar && oldGlass.window && CACurrentMediaTime() < self.searchMorphDeadline) {
-        CALayer *presentation = oldGlass.layer.presentationLayer;
-        CALayer *barPresentation = bar.layer.presentationLayer;
-        oldGlassFrame = presentation && barPresentation
-            ? [presentation convertRect:presentation.bounds toLayer:barPresentation]
-            : [oldGlass convertRect:oldGlass.bounds toView:bar];
-    }
+    CGRect oldBounds = oldGlass.bounds;
+    CGRect displayedBounds = oldGlass.layer.presentationLayer
+        ? oldGlass.layer.presentationLayer.bounds : oldBounds;
 
     // Constrain/transform outside layoutSubviews to avoid a layout loop. Cache
     // observations only after recentering succeeds, so skipped work retries.
     BOOL recenterSettled = ApolloRecenterTitleControl(self);
     if (recenterSettled && jumpBar) ApolloLayoutJumpBarSearchContent(jumpBar);
     [self updateGlassForHostView:hostView candidateViews:[self titleContentViews]];
-    if (!CGRectIsNull(oldGlassFrame) && self.glassView == oldGlass && oldGlass.superview == hostView) {
-        CGRect target = oldGlass.frame;
-        CGRect start = [bar convertRect:oldGlassFrame toView:hostView];
-        if (!CGRectEqualToRect(start, target)) {
-            // The host itself just changed width/origin. Rebase before
-            // animating so that transform is not counted a second time.
-            [oldGlass.layer removeAnimationForKey:@"position"];
-            [oldGlass.layer removeAnimationForKey:@"bounds"];
-            [UIView performWithoutAnimation:^{ oldGlass.frame = start; }];
-            [UIView animateWithDuration:MAX(0.08, self.searchMorphDeadline - CACurrentMediaTime())
-                                  delay:0 options:UIViewAnimationOptionBeginFromCurrentState |
-                                      UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseOut
-                             animations:^{ oldGlass.frame = target; } completion:nil];
-        }
+    if (animateSearch && oldGlass && self.glassView == oldGlass &&
+        !CGRectEqualToRect(oldBounds, oldGlass.bounds)) {
+        // The host already keeps the capsule centered. Animate only its size;
+        // rebasing its position adds the host's movement a second time.
+        CABasicAnimation *resize = [CABasicAnimation animationWithKeyPath:@"bounds"];
+        displayedBounds.origin = oldGlass.bounds.origin;
+        resize.fromValue = [NSValue valueWithCGRect:displayedBounds];
+        resize.toValue = [NSValue valueWithCGRect:oldGlass.bounds];
+        resize.duration = 0.25;
+        resize.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        [oldGlass.layer addAnimation:resize forKey:@"bounds"];
     }
 
     self.observedTitleFrame = self.titleControl.frame;
@@ -1719,8 +1687,23 @@ static BOOL ApolloRecenterTitleControl(ApolloNavigationTitleGlassController *con
     // treat controls / labels / image views / visual-effect bubbles as edges.
     CGFloat leftLimit = CGRectGetMinX(bar.bounds) + bar.safeAreaInsets.left;
     CGFloat rightLimit = CGRectGetMaxX(bar.bounds) - bar.safeAreaInsets.right;
+    UIView *jumpBar = ApolloFindJumpBar(titleControl);
+    BOOL searching = jumpBar && ApolloJumpBarIsSearching(jumpBar);
+    BOOL searchActions = NO;
+    CGFloat searchActionsWidth = 0;
+    for (UIBarButtonItem *item in bar.topItem.rightBarButtonItems) {
+        searchActions |= item.action == NSSelectorFromString(@"cancelBarButtonItemTappedWithSender:");
+        CGFloat width = item.customView ? item.customView.intrinsicContentSize.width : item.width;
+        searchActionsWidth += MAX(44.0, width);
+    }
+    searchActions &= searching;
+    // Outgoing platters remain visible during the search handoff. Their moving
+    // edges are not the editor's available width; reserve the final items once.
+    if (searchActions) {
+        rightLimit -= MAX(16.0, bar.layoutMargins.right) + searchActionsWidth;
+    }
     CGRect collapsedActions = ApolloNavigationActionsCollapsedFrame(bar);
-    if (!CGRectIsNull(collapsedActions)) {
+    if (!searchActions && !CGRectIsNull(collapsedActions)) {
         if (CGRectGetMidX(collapsedActions) >= CGRectGetMidX(bar.bounds)) {
             rightLimit = MIN(rightLimit, CGRectGetMinX(collapsedActions));
         } else {
@@ -1768,15 +1751,13 @@ static BOOL ApolloRecenterTitleControl(ApolloNavigationTitleGlassController *con
             if (CGRectGetMidX(sibInBar) < CGRectGetMidX(bar.bounds)) {
                 leftLimit = MAX(leftLimit, CGRectGetMaxX(sibInBar));
             } else {
-                rightLimit = MIN(rightLimit, CGRectGetMinX(sibInBar));
+                if (!searchActions) rightLimit = MIN(rightLimit, CGRectGetMinX(sibInBar));
             }
         }
     }
 
     const CGFloat kEdgePadding = kApolloTitleButtonSpacing;
 
-    UIView *jumpBar = ApolloFindJumpBar(titleControl);
-    BOOL searching = jumpBar && ApolloJumpBarIsSearching(jumpBar);
     CGFloat capsulePadding = !searching &&
         ApolloResolvedScrollEdgeEffectStyle() != ApolloScrollEdgeEffectStyleHard
         ? kApolloTitleCapsuleHorizontalPadding : 0.0;
@@ -2151,45 +2132,20 @@ void ApolloNavigationTitlesRefresh(void) {
 
 %end
 
-static CGSize ApolloDualTitleNavigationSize(UIButton *button, CGSize size) {
-    if (!isfinite(size.height) || size.height <= 44.0 || !isfinite(size.width) || size.width <= 0) return size;
-    // UIKit may not have populated its label yet. Measure the current native
-    // attributed title without forcing lazy layout from an intrinsic-size read.
-    NSAttributedString *title = button.currentAttributedTitle;
-    if (!title.length) return size;
-    CGFloat textHeight = ceil([title boundingRectWithSize:CGSizeMake(size.width, CGFLOAT_MAX)
-        options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading context:nil].size.height);
-    if (isfinite(textHeight) && textHeight > 0 && textHeight <= 44.0) size.height = 44.0;
-    return size;
-}
-
-%group ApolloLGDualTitleSizing
-%hook ApolloDualLabelNavigationTitleButton
-- (CGSize)intrinsicContentSize {
-    return ApolloDualTitleNavigationSize((UIButton *)self, %orig);
-}
-- (CGSize)sizeThatFits:(CGSize)size {
-    return ApolloDualTitleNavigationSize((UIButton *)self, %orig(size));
-}
-%end
-%end
-
 %ctor {
     %init;
-    Class dualTitleButton = NSClassFromString(@"Apollo.DualLabelTitleButton");
-    if (IsLiquidGlass() && NSClassFromString(@"UIGlassEffect") && dualTitleButton) {
-        // Set the native allocation before push animation or title adoption.
-        %init(ApolloLGDualTitleSizing, ApolloDualLabelNavigationTitleButton = dualTitleButton);
-    }
-    // Also cover programmatic JumpBar entry, which doesn't pass through touch
-    // tracking. The native opening helper has set the field frame by this point.
+    // Programmatic entry also needs a refresh, but editing starts before Apollo
+    // finishes replacing the trailing buttons. Measure after that setup returns.
     [[NSNotificationCenter defaultCenter] addObserverForName:UITextFieldTextDidBeginEditingNotification
                                                      object:nil queue:nil
                                                  usingBlock:^(NSNotification *notification) {
         UIView *field = notification.object;
         if ([field isKindOfClass:UITextField.class] &&
             [NSStringFromClass(field.superview.class) isEqualToString:@"Apollo.JumpBar"]) {
-            ApolloRefreshJumpBarSearchPresentation(field.superview);
+            __weak UIView *jumpBar = field.superview;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ApolloRefreshJumpBarSearchPresentation(jumpBar);
+            });
         }
     }];
     // _UINavigationBarPlatterView only exists on iOS 26+ — register the poke

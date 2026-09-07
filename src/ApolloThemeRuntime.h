@@ -27,6 +27,9 @@ BOOL ApolloThemeRuntimeIsActive(void);
 // of the custom theme's content palette.
 UIColor *ApolloNavigationChromeColor(void);
 
+// Shared moderator identity color for native Apollo surfaces and tweak menus.
+UIColor *ApolloModeratorColor(void);
+
 // Cached dynamic colour for a token, or nil if inactive / out of range.
 UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token);
 
