@@ -3769,6 +3769,8 @@ static BOOL ApolloDefaultsKeyChangesNativeFavorites(NSString *key) {
                                     UDKeySubredditHeaderImmersive: @YES,
                                     UDKeySubredditShowBanner: @YES,
                                     UDKeySubredditShowJoinButton: @YES,
+                                    UDKeySubredditShowUserFlairButton: @YES,
+                                    UDKeySubredditShowSidebarButton: @YES,
                                     UDKeySubredditShowDisplayName: @YES,
                                     UDKeySubredditShowSubtitle: @YES,
                                     UDKeySubredditShowDescription: @YES,
@@ -4033,6 +4035,8 @@ static BOOL ApolloDefaultsKeyChangesNativeFavorites(NSString *key) {
     sSubredditHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditHeaderImmersive];
     sSubredditShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowBanner];
     sSubredditShowJoinButton = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowJoinButton];
+    sSubredditShowUserFlairButton = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowUserFlairButton];
+    sSubredditShowSidebarButton = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowSidebarButton];
     sSubredditShowDisplayName = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowDisplayName];
     sSubredditShowSubtitle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowSubtitle];
     sSubredditShowDescription = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowDescription];

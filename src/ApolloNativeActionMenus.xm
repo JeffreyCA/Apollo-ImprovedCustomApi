@@ -20,6 +20,9 @@ static char kApolloNativeActionMenuWrappedSourceActionKey;
 
 static __weak UIView *sApolloNativeActionMenuSourceView = nil;
 static __weak UIView *sApolloNativeActionMenuConfigurationSourceView = nil;
+static __weak UIViewController *sApolloNativeDirectActionOwner = nil;
+static __weak UIView *sApolloNativeDirectActionSourceView = nil;
+static uint16_t sApolloNativeDirectActionKind = UINT16_MAX;
 static NSUInteger sApolloNativeActionMenuCaptureDepth = 0;
 static BOOL sApolloNativeActionMenuModeratorStyleStack[32];
 static BOOL sApolloNativeActionMenuNextPresentationModeratorStyle = NO;
@@ -566,6 +569,70 @@ static void ApolloNativeActionMenuSelectRow(id actionController, NSInteger row) 
         tableView,
         indexPath
     );
+}
+
+static NSInteger ApolloNativeActionMenuRowForActionKind(id actionController,
+                                                        uint16_t requestedKind) {
+    void *actionsBuffer = ApolloReadRawIvar(actionController, "actions");
+    int64_t actionCount = ApolloSwiftArrayCount(actionsBuffer);
+    for (int64_t row = 0; row < actionCount; row++) {
+        uint8_t *element = (uint8_t *)actionsBuffer + 0x20 + row * 0x30;
+        if (*(uint16_t *)(element + 0x00) == requestedKind) return (NSInteger)row;
+    }
+    return NSNotFound;
+}
+
+static BOOL ApolloNativeActionMenuPerformPendingDirectAction(id actionController) {
+    UIViewController *owner = sApolloNativeDirectActionOwner;
+    if (!owner || ![actionController isKindOfClass:objc_getClass("_TtC6Apollo16ActionController")]) {
+        return NO;
+    }
+
+    UIView *sourceView = sApolloNativeDirectActionSourceView;
+    uint16_t actionKind = sApolloNativeDirectActionKind;
+    sApolloNativeDirectActionOwner = nil;
+    sApolloNativeDirectActionSourceView = nil;
+    sApolloNativeDirectActionKind = UINT16_MAX;
+
+    NSInteger row = ApolloNativeActionMenuRowForActionKind(actionController, actionKind);
+    if (row == NSNotFound) {
+        ApolloLog(@"[NativeActionMenu] Posts action kind %u unavailable", actionKind);
+        return YES;
+    }
+
+    if (sourceView) {
+        objc_setAssociatedObject(actionController, &kApolloNativeActionMenuSourceViewKey,
+                                 sourceView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    ApolloLog(@"[NativeActionMenu] Invoking Posts action kind %u directly", actionKind);
+    ApolloNativeActionMenuSelectRow(actionController, row);
+    return YES;
+}
+
+BOOL ApolloNativeActionMenuInvokePostsAction(UIViewController *postsViewController,
+                                             UIView *sourceView,
+                                             uint16_t actionKind) {
+    SEL selector = @selector(moreOptionsBarButtonItemTappedWithSender:);
+    if (!postsViewController || !sourceView ||
+        ![postsViewController respondsToSelector:selector] ||
+        sApolloNativeDirectActionOwner) {
+        return NO;
+    }
+
+    sApolloNativeDirectActionOwner = postsViewController;
+    sApolloNativeDirectActionSourceView = sourceView;
+    sApolloNativeDirectActionKind = actionKind;
+    ((void (*)(id, SEL, id))objc_msgSend)(postsViewController, selector, sourceView);
+
+    BOOL consumed = sApolloNativeDirectActionOwner == nil;
+    if (!consumed) {
+        ApolloLog(@"[NativeActionMenu] Posts action kind %u did not produce an ActionController",
+                  actionKind);
+        sApolloNativeDirectActionOwner = nil;
+        sApolloNativeDirectActionSourceView = nil;
+        sApolloNativeDirectActionKind = UINT16_MAX;
+    }
+    return consumed;
 }
 
 static UIAction *ApolloNativeActionMenuAction(NSString *title, NSString *subtitle, UIImage *image, UIColor *tintColor, BOOL opensModeratorMenu, BOOL destructive, BOOL checked, BOOL enabled, id actionController, NSInteger row) {
@@ -1845,6 +1912,10 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
 
 %hook _TtC6Apollo26ApolloNavigationController
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
+    if (ApolloNativeActionMenuPerformPendingDirectAction(viewControllerToPresent)) {
+        if (completion) completion();
+        return;
+    }
     if (ApolloNativeActionMenuPresent(self, viewControllerToPresent, completion)) {
         return;
     }
@@ -1858,6 +1929,10 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
 %hook UIViewController
 
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
+    if (ApolloNativeActionMenuPerformPendingDirectAction(viewControllerToPresent)) {
+        if (completion) completion();
+        return;
+    }
     if (ApolloNativeActionMenuPresent(self, viewControllerToPresent, completion)) {
         return;
     }

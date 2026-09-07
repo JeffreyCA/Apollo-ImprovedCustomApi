@@ -376,6 +376,8 @@ static ApolloNativePreviewMetrics ApolloNativePreviewMetricsMake(CGFloat width,
 - (void)configureWithDensityMode:(ApolloSubredditDensityMode)mode
                           banner:(BOOL)banner
                       joinButton:(BOOL)joinButton
+                 userFlairButton:(BOOL)userFlairButton
+                   sidebarButton:(BOOL)sidebarButton
                      displayName:(BOOL)displayName
                         subtitle:(BOOL)subtitle
                      description:(BOOL)description {
@@ -387,8 +389,9 @@ static ApolloNativePreviewMetrics ApolloNativePreviewMetricsMake(CGFloat width,
     self.accessibilityLabel = mode == ApolloSubredditDensityModeNative
         ? @"Native subreddit preview. No custom identity header; the feed begins below search."
         : [NSString stringWithFormat:
-            @"%@ production subreddit header preview using r slash ApolloReborn. Banner %@. Joined button %@. Subreddit name %@. Subtitle %@. Description %@.",
+            @"%@ production subreddit header preview using r slash ApolloReborn. Banner %@. Joined button %@. User Flair button %@. Sidebar button %@. Subreddit name %@. Subtitle %@. Description %@.",
             modeName, banner ? @"shown" : @"hidden", joinButton ? @"shown" : @"hidden",
+            userFlairButton ? @"shown" : @"hidden", sidebarButton ? @"shown" : @"hidden",
             displayName ? @"shown" : @"hidden", subtitle ? @"shown" : @"hidden",
             description ? @"shown" : @"hidden"];
     [self apollo_updateNativeAppearance];

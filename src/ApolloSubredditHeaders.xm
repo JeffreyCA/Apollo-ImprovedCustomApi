@@ -12,6 +12,7 @@
 #import "ApolloSubredditHeaderPreview.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloSubredditLayout.h"
+#import "ApolloNativeActionMenus.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloSubredditHighlights.h"
 #import "ApolloImmersiveHeaderBackground.h"
@@ -106,6 +107,10 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 @property(nonatomic, strong) UILabel *nameLabel;
 @property(nonatomic, strong) UIButton *subscribeButton;
 @property(nonatomic, strong) UIVisualEffectView *subscribeGlassView;
+@property(nonatomic, strong) UIButton *userFlairButton;
+@property(nonatomic, strong) UIVisualEffectView *userFlairGlassView;
+@property(nonatomic, strong) UIButton *sidebarButton;
+@property(nonatomic, strong) UIVisualEffectView *sidebarGlassView;
 @property(nonatomic, strong) UILabel *aboutLabel;
 @property(nonatomic, strong) UIButton *aboutToggleButton;
 @property(nonatomic) BOOL aboutExpanded;
@@ -134,6 +139,8 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 // followIntentDate/followIntentValue for the profile Follow button.
 @property(nonatomic, strong) NSDate *subscribeIntentDate;
 @property(nonatomic) BOOL subscribeIntentValue;
+@property(nonatomic) BOOL userFlairAvailabilityKnown;
+@property(nonatomic) BOOL userCanSetFlair;
 @property(nonatomic, copy) NSString *communityTitle;
 @property(nonatomic) BOOL subredditInfoLoaded;
 @property(nonatomic, copy) NSString *memberCountText;
@@ -147,6 +154,8 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 - (void)apollo_viewImageForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind;
 - (NSURL *)apollo_viewableImageURLForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind;
 - (void)apollo_subscribeTapped;
+- (void)apollo_userFlairTapped;
+- (void)apollo_sidebarTapped;
 - (void)apollo_applySubscriptionState:(BOOL)subscribed known:(BOOL)known;
 - (void)apollo_applySubscriptionGlassWithAccent:(UIColor *)accent;
 - (void)apollo_updateSubname;
@@ -195,6 +204,10 @@ static CGFloat const ApolloSubredditControlGlassTintAlpha = 0.62;
 
 static CGFloat const ApolloSubredditActionBottomGap = 16.0;  // gap below the Join pill, above the body
 static CGFloat const ApolloSubredditActionRowHeight = 42.0;  // Join pill height at default type — matches the profile header's Follow pill
+static CGFloat const ApolloSubredditSecondaryActionSide = 44.0;
+static CGFloat const ApolloSubredditSecondaryActionIconSide = 22.0;
+static CGFloat const ApolloSubredditActionGap = 10.0;
+static CGFloat const ApolloSubredditStackedActionGap = 8.0;
 // Vertical breathing room around the pill's scaled title. 42pt around the
 // default-size (~20pt) line, kept as the growth rate for larger type.
 static CGFloat const ApolloSubredditActionRowVerticalPadding = 22.0;
@@ -209,6 +222,21 @@ static CGFloat const ApolloSubredditBannerHeight = 104.0;
 static CGFloat const ApolloSubredditAboutMaxHeight = 220.0;
 static CGFloat const ApolloSubredditAboutToggleHeight = 22.0;
 static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
+
+static UIImage *ApolloSubredditSizedActionIcon(UIImage *image) {
+    if (!image || image.size.width <= 0.0 || image.size.height <= 0.0) return image;
+    CGFloat scale = MIN(ApolloSubredditSecondaryActionIconSide / image.size.width,
+                        ApolloSubredditSecondaryActionIconSide / image.size.height);
+    if (scale >= 1.0) return image;
+
+    CGSize size = CGSizeMake(round(image.size.width * scale), round(image.size.height * scale));
+    UIGraphicsBeginImageContextWithOptions(size, NO, 0.0);
+    [image drawInRect:(CGRect){CGPointZero, size}];
+    UIImage *resizedImage = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return resizedImage ?: image;
+}
+
 @implementation ApolloSubredditHeaderView {
     CGFloat _cachedSubtitleHeight;
     CGFloat _cachedSubtitleWidth;
@@ -297,6 +325,38 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
         [_subscribeButton addTarget:self action:@selector(apollo_subscribeTapped)
                    forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_subscribeButton];
+
+        UIImageSymbolConfiguration *actionSymbolConfiguration =
+            [UIImageSymbolConfiguration configurationWithPointSize:17.0
+                                                             weight:UIImageSymbolWeightSemibold];
+        UIImage *flairImage = [UIImage imageNamed:@"option-set-flair"];
+        if (!flairImage) {
+            flairImage = [UIImage systemImageNamed:@"tag" withConfiguration:actionSymbolConfiguration];
+        }
+        flairImage = ApolloSubredditSizedActionIcon(flairImage);
+        _userFlairButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_userFlairButton setImage:[flairImage imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]
+                          forState:UIControlStateNormal];
+        _userFlairButton.accessibilityLabel = @"Set User Flair";
+        _userFlairButton.layer.cornerCurve = kCACornerCurveContinuous;
+        [_userFlairButton addTarget:self action:@selector(apollo_userFlairTapped)
+                   forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_userFlairButton];
+
+        UIImage *sidebarImage = [UIImage imageNamed:@"option-sidebar"];
+        if (!sidebarImage) {
+            sidebarImage = [UIImage systemImageNamed:@"rectangle.righthalf.inset.filled"
+                                    withConfiguration:actionSymbolConfiguration];
+        }
+        sidebarImage = ApolloSubredditSizedActionIcon(sidebarImage);
+        _sidebarButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_sidebarButton setImage:[sidebarImage imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]
+                        forState:UIControlStateNormal];
+        _sidebarButton.accessibilityLabel = @"Open Sidebar";
+        _sidebarButton.layer.cornerCurve = kCACornerCurveContinuous;
+        [_sidebarButton addTarget:self action:@selector(apollo_sidebarTapped)
+                 forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_sidebarButton];
 
         // Same treatment as the profile header's bio: body-size type, collapsed
         // to a few lines with a "more"/"less" toggle instead of a small,
@@ -443,8 +503,8 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     return ApolloIdentityHeaderLayoutMakeWithBanner(width, sSubredditShowBanner ? ApolloSubredditBannerHeight : 0.0);
 }
 
-// Y of the centered Join pill: right below the name/subname stack, above the
-// body. Only meaningful when sSubredditShowJoinButton is YES.
+// Y of the action cluster: right below the name/subname stack and above the
+// description. Flair and Sidebar remain independent of the Join preference.
 - (CGFloat)apollo_actionYForWidth:(CGFloat)width {
     ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
     BOOL displayNameShown = [self apollo_displayNameShown];
@@ -457,7 +517,110 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     return CGRectGetMaxY(identity.avatarFrame) + 8.0;
 }
 
-// Single source of truth for the post-name body stack, in order: Join pill →
+- (BOOL)apollo_userFlairButtonShown {
+    return sSubredditShowUserFlairButton &&
+        self.userFlairAvailabilityKnown && self.userCanSetFlair;
+}
+
+- (BOOL)apollo_sidebarButtonShown {
+    return sSubredditShowSidebarButton && self.subredditName.length > 0;
+}
+
+- (void)apollo_layoutSecondaryActionButton:(UIButton *)button
+                                  glassView:(UIVisualEffectView *)glassView
+                                      frame:(CGRect)frame {
+    button.frame = frame;
+    button.layer.cornerRadius = CGRectGetHeight(frame) / 2.0;
+    glassView.frame = button.bounds;
+    glassView.layer.cornerRadius = button.layer.cornerRadius;
+}
+
+// Lays out separate Flair / Join / Sidebar controls as one centered cluster.
+// If Dynamic Type makes the three controls too wide, Join keeps its own row and
+// the two secondary controls wrap below it rather than shrinking tap targets.
+- (CGFloat)apollo_layoutActionsForWidth:(CGFloat)width
+                                  bodyX:(CGFloat)bodyX
+                              bodyWidth:(CGFloat)bodyWidth
+                                      y:(CGFloat)y
+                                  apply:(BOOL)apply {
+    BOOL showJoin = sSubredditShowJoinButton;
+    BOOL showFlair = [self apollo_userFlairButtonShown];
+    BOOL showSidebar = [self apollo_sidebarButtonShown];
+    NSUInteger secondaryCount = (showFlair ? 1 : 0) + (showSidebar ? 1 : 0);
+
+    if (apply) {
+        self.subscribeButton.hidden = !showJoin;
+        self.subscribeGlassView.hidden = !showJoin;
+        self.userFlairButton.hidden = !showFlair;
+        self.sidebarButton.hidden = !showSidebar;
+    }
+    if (!showJoin && secondaryCount == 0) return y;
+
+    CGFloat joinHeight = showJoin ? [self apollo_subscribeButtonHeight] : 0.0;
+    CGFloat joinWidth = showJoin
+        ? MIN(bodyWidth, MAX(148.0, ceil(self.subscribeButton.intrinsicContentSize.width) + 52.0))
+        : 0.0;
+    CGFloat inlineWidth = joinWidth + secondaryCount * ApolloSubredditSecondaryActionSide;
+    NSUInteger controlCount = secondaryCount + (showJoin ? 1 : 0);
+    if (controlCount > 1) inlineWidth += (controlCount - 1) * ApolloSubredditActionGap;
+    BOOL stacked = showJoin && secondaryCount > 0 && inlineWidth > bodyWidth;
+
+    if (!stacked) {
+        CGFloat rowHeight = MAX(joinHeight, secondaryCount > 0 ? ApolloSubredditSecondaryActionSide : 0.0);
+        CGFloat x = bodyX + floor((bodyWidth - inlineWidth) / 2.0);
+        if (showFlair) {
+            CGRect frame = CGRectMake(x, y + floor((rowHeight - ApolloSubredditSecondaryActionSide) / 2.0),
+                                      ApolloSubredditSecondaryActionSide, ApolloSubredditSecondaryActionSide);
+            if (apply) [self apollo_layoutSecondaryActionButton:self.userFlairButton
+                                                      glassView:self.userFlairGlassView
+                                                          frame:frame];
+            x += ApolloSubredditSecondaryActionSide + ApolloSubredditActionGap;
+        }
+        if (showJoin) {
+            CGRect frame = CGRectMake(x, y + floor((rowHeight - joinHeight) / 2.0), joinWidth, joinHeight);
+            if (apply) {
+                self.subscribeButton.frame = frame;
+                self.subscribeButton.layer.cornerRadius = joinHeight / 2.0;
+                self.subscribeGlassView.frame = self.subscribeButton.bounds;
+                self.subscribeGlassView.layer.cornerRadius = self.subscribeButton.layer.cornerRadius;
+            }
+            x += joinWidth + ApolloSubredditActionGap;
+        }
+        if (showSidebar) {
+            CGRect frame = CGRectMake(x, y + floor((rowHeight - ApolloSubredditSecondaryActionSide) / 2.0),
+                                      ApolloSubredditSecondaryActionSide, ApolloSubredditSecondaryActionSide);
+            if (apply) [self apollo_layoutSecondaryActionButton:self.sidebarButton
+                                                      glassView:self.sidebarGlassView
+                                                          frame:frame];
+        }
+        return y + rowHeight + ApolloSubredditActionBottomGap;
+    }
+
+    if (apply) {
+        self.subscribeButton.frame = CGRectMake(bodyX + floor((bodyWidth - joinWidth) / 2.0),
+                                                y, joinWidth, joinHeight);
+        self.subscribeButton.layer.cornerRadius = joinHeight / 2.0;
+        self.subscribeGlassView.frame = self.subscribeButton.bounds;
+        self.subscribeGlassView.layer.cornerRadius = self.subscribeButton.layer.cornerRadius;
+    }
+    y += joinHeight + ApolloSubredditStackedActionGap;
+    CGFloat secondaryWidth = secondaryCount * ApolloSubredditSecondaryActionSide +
+        (secondaryCount - 1) * ApolloSubredditActionGap;
+    CGFloat x = bodyX + floor((bodyWidth - secondaryWidth) / 2.0);
+    for (UIButton *button in @[self.userFlairButton, self.sidebarButton]) {
+        BOOL visible = button == self.userFlairButton ? showFlair : showSidebar;
+        if (!visible) continue;
+        UIVisualEffectView *glassView = button == self.userFlairButton
+            ? self.userFlairGlassView : self.sidebarGlassView;
+        CGRect frame = CGRectMake(x, y, ApolloSubredditSecondaryActionSide,
+                                  ApolloSubredditSecondaryActionSide);
+        if (apply) [self apollo_layoutSecondaryActionButton:button glassView:glassView frame:frame];
+        x += ApolloSubredditSecondaryActionSide + ApolloSubredditActionGap;
+    }
+    return y + ApolloSubredditSecondaryActionSide + ApolloSubredditActionBottomGap;
+}
+
+// Single source of truth for the post-name body stack, in order: actions →
 // about text → more/less toggle. apply=NO just measures (returns the bottom
 // Y); apply=YES also sets every frame, so preferredHeightForWidth and
 // layoutSubviews can never drift apart — mirrors the profile header's
@@ -468,23 +631,7 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     CGFloat bodyX = identity.bodyX;
     CGFloat y = [self apollo_actionYForWidth:width];
 
-    if (apply) {
-        self.subscribeButton.hidden = !sSubredditShowJoinButton;
-        self.subscribeGlassView.hidden = !sSubredditShowJoinButton;
-    }
-    if (sSubredditShowJoinButton) {
-        CGFloat buttonHeight = [self apollo_subscribeButtonHeight];
-        if (apply) {
-            // Grows for Dynamic Type and the longer "Joining…"/"Leaving…"
-            // titles instead of clipping inside a fixed pill.
-            CGFloat buttonWidth = MIN(bodyWidth, MAX(148.0, ceil(self.subscribeButton.intrinsicContentSize.width) + 52.0));
-            self.subscribeButton.frame = CGRectMake(floor((width - buttonWidth) / 2.0), y, buttonWidth, buttonHeight);
-            self.subscribeButton.layer.cornerRadius = buttonHeight / 2.0;
-            self.subscribeGlassView.frame = self.subscribeButton.bounds;
-            self.subscribeGlassView.layer.cornerRadius = buttonHeight / 2.0;
-        }
-        y += buttonHeight + ApolloSubredditActionBottomGap;
-    }
+    y = [self apollo_layoutActionsForWidth:width bodyX:bodyX bodyWidth:bodyWidth y:y apply:apply];
 
     CGFloat aboutHeight = [self apollo_aboutHeightForWidth:bodyWidth];
     BOOL showToggle = aboutHeight > 0.0 && ([self apollo_aboutTruncatesForWidth:bodyWidth] || self.aboutExpanded);
@@ -526,7 +673,8 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
 
     NSArray<UIView *> *expectedSubviews = @[self.bannerImageView, self.iconImageView,
                                             self.displayNameLabel, self.nameLabel,
-                                            self.subscribeButton, self.aboutLabel,
+                                            self.userFlairButton, self.subscribeButton,
+                                            self.sidebarButton, self.aboutLabel,
                                             self.aboutToggleButton];
     for (UIView *subview in expectedSubviews) {
         if (subview && subview.superview != self) {
@@ -547,6 +695,8 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     // interaction state calls for, not unconditionally to full strength — a
     // hard 1.0 here would wipe the disabled dimming on the next layout.
     self.subscribeButton.alpha = self.subscribeButton.enabled ? 1.0 : ApolloSubredditDisabledControlAlpha;
+    self.userFlairButton.alpha = 1.0;
+    self.sidebarButton.alpha = 1.0;
     self.aboutLabel.alpha = 1.0;
 
     CGFloat width = self.bounds.size.width;
@@ -557,13 +707,15 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     self.displayNameLabel.frame = identity.nameFrame;
     self.nameLabel.frame = [self apollo_subtitleFrameForLayout:identity];
 
-    // Join pill → about text → more/less toggle, in one sequential pass.
+    // Header actions → about text → more/less toggle, in one sequential pass.
     [self apollo_layoutBodyForWidth:width apply:YES];
 
     [self bringSubviewToFront:self.iconImageView];
     [self bringSubviewToFront:self.displayNameLabel];
     [self bringSubviewToFront:self.nameLabel];
+    [self bringSubviewToFront:self.userFlairButton];
     [self bringSubviewToFront:self.subscribeButton];
+    [self bringSubviewToFront:self.sidebarButton];
     [self bringSubviewToFront:self.aboutLabel];
     [self bringSubviewToFront:self.aboutToggleButton];
 }
@@ -583,6 +735,10 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     self.aboutLabel.text = info.aboutText.length > 0 ? info.aboutText : nil;
     self.memberCountText = info && info.subscriberCount >= 0
         ? ApolloSubredditFormattedMemberCount(info.subscriberCount) : nil;
+    if (info.userFlairInfoAvailable) {
+        self.userFlairAvailabilityKnown = YES;
+        self.userCanSetFlair = info.usersCanAssignUserFlair;
+    }
     [self apollo_updateSubname];
 
     self.displayNameLabel.hidden = ![self apollo_displayNameShown];
@@ -609,6 +765,28 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
         self.nameLabel.text = self.memberCountText;
     }
     self.nameLabel.hidden = ![self apollo_subtitleShown];
+}
+
+- (UIVisualEffectView *)apollo_applySecondaryActionAppearanceToButton:(UIButton *)button
+                                                             glassView:(UIVisualEffectView *)glassView {
+    button.tintColor = UIColor.labelColor;
+    button.backgroundColor = UIColor.clearColor;
+    button.clipsToBounds = YES;
+    if (!glassView || glassView.superview != button) {
+        [glassView removeFromSuperview];
+        UIVisualEffect *effect = ApolloImmersiveGlassEffect(nil, 0.0, YES)
+            ?: [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+        glassView = [[UIVisualEffectView alloc] initWithEffect:effect];
+        glassView.userInteractionEnabled = NO;
+        glassView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [button insertSubview:glassView atIndex:0];
+    }
+    glassView.frame = button.bounds;
+    glassView.layer.cornerCurve = kCACornerCurveContinuous;
+    glassView.clipsToBounds = YES;
+    [button sendSubviewToBack:glassView];
+    if (button.imageView) [button bringSubviewToFront:button.imageView];
+    return glassView;
 }
 
 - (void)apollo_applySubscriptionState:(BOOL)subscribed known:(BOOL)known {
@@ -648,6 +826,10 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
                                      forState:UIControlStateHighlighted];
         [self.aboutToggleButton setTitleColor:resolvedAccent forState:UIControlStateNormal];
     }
+    self.userFlairGlassView = [self apollo_applySecondaryActionAppearanceToButton:self.userFlairButton
+                                                                        glassView:self.userFlairGlassView];
+    self.sidebarGlassView = [self apollo_applySecondaryActionAppearanceToButton:self.sidebarButton
+                                                                      glassView:self.sidebarGlassView];
     _appliedAccent = resolvedAccent;
 }
 
@@ -764,6 +946,22 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
         });
     };
     ((id (*)(id, SEL, id, id))objc_msgSend)(client, selector, subredditName, [completion copy]);
+}
+
+- (void)apollo_userFlairTapped {
+    if (![self apollo_userFlairButtonShown]) return;
+    if (!ApolloNativeActionMenuInvokePostsAction(self.hostViewController, self.userFlairButton, 46)) {
+        ApolloLog(@"[SubredditHeaders] Set User Flair action unavailable subreddit=%@",
+                  self.subredditName ?: @"nil");
+    }
+}
+
+- (void)apollo_sidebarTapped {
+    if (![self apollo_sidebarButtonShown]) return;
+    if (!ApolloNativeActionMenuInvokePostsAction(self.hostViewController, self.sidebarButton, 36)) {
+        ApolloLog(@"[SubredditHeaders] Sidebar action unavailable subreddit=%@",
+                  self.subredditName ?: @"nil");
+    }
 }
 
 - (void)apollo_presentPhotoPickerForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind {
@@ -1197,6 +1395,34 @@ static void ApolloSubredditRefreshSubscriptionState(ApolloSubredditHeaderView *h
                   subredditName ?: @"nil", subscribed);
     }
     [header apollo_applySubscriptionState:subscribed known:YES];
+}
+
+// Prefer Apollo's live subreddit model, then the same can_assign_user_flair
+// value cached with the header metadata. The overflow action alone is not an
+// availability signal: Apollo includes it for communities with no choices.
+static void ApolloSubredditRefreshUserFlairAvailability(ApolloSubredditHeaderView *header,
+                                                        UIViewController *viewController) {
+    if (!header || !viewController) return;
+    id subreddit = ApolloSubredditTypedIvar(viewController, @"currentSubreddit",
+                                            objc_getClass("RDKSubreddit"));
+    if ([subreddit respondsToSelector:@selector(name)]) {
+        NSString *name = ((NSString *(*)(id, SEL))objc_msgSend)(subreddit, @selector(name));
+        if (!ApolloSubredditNamesEqual(name, header.subredditName)) return;
+    }
+
+    BOOL canSetFlair = NO;
+    if ([subreddit respondsToSelector:@selector(canSetFlair)]) {
+        canSetFlair = ((BOOL (*)(id, SEL))objc_msgSend)(subreddit, @selector(canSetFlair));
+    } else {
+        ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache]
+            cachedInfoForSubreddit:header.subredditName];
+        if (!info.userFlairInfoAvailable) return;
+        canSetFlair = info.usersCanAssignUserFlair;
+    }
+    BOOL changed = !header.userFlairAvailabilityKnown || header.userCanSetFlair != canSetFlair;
+    header.userFlairAvailabilityKnown = YES;
+    header.userCanSetFlair = canSetFlair;
+    if (changed) [header setNeedsLayout];
 }
 
 // PostsType is a Swift enum stored inline in the `currentPostsType` ivar; its
@@ -1675,6 +1901,8 @@ void ApolloSubredditHeaderPreviewContentConfigure(UIView *contentView,
     if (!header || !info) return;
 
     header.subredditName = fallbackSubredditName;
+    header.userFlairAvailabilityKnown = YES;
+    header.userCanSetFlair = YES;
     [header applyInfo:info fallbackSubredditName:fallbackSubredditName];
     header.iconImageView.image = iconImage ?: ApolloSubredditPlaceholderIcon();
     header.bannerImageView.image = bannerImage ?: ApolloSubredditDefaultBanner();
@@ -1737,7 +1965,7 @@ static void ApolloSubredditLoadImages(ApolloSubredditHeaderView *header, NSStrin
     if (forceRefresh) {
         [cache refetchInfoForSubreddit:subredditName completion:applyInfo];
     } else {
-        [cache requestInfoForSubreddit:subredditName completion:applyInfo];
+        [cache requestUserFlairInfoForSubreddit:subredditName completion:applyInfo];
     }
 }
 
@@ -2478,6 +2706,8 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
         header.usesCustomBanner = NO;
         header.subscriptionStateKnown = NO;
         header.subscriptionRequestInFlight = NO;
+        header.userFlairAvailabilityKnown = NO;
+        header.userCanSetFlair = NO;
         // A reused header must not carry a previous subreddit's tap intent
         // into this one — same class of bug as the profile header's
         // followIntentDate not being cleared on a username change.
@@ -2493,6 +2723,9 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
     // Account/subscription notifications below explicitly invalidate it.
     if (!header.subscriptionStateKnown) {
         ApolloSubredditRefreshSubscriptionState(header, viewController);
+    }
+    if (!header.userFlairAvailabilityKnown) {
+        ApolloSubredditRefreshUserFlairAvailability(header, viewController);
     }
 
     if (wrappedHeader && header) {
@@ -2838,6 +3071,8 @@ static void ApolloSubredditSettleBlockedTableToTop(UITableView *tableView) {
         objc_getAssociatedObject(self, kApolloSubredditHeaderViewKey);
     header.subscriptionStateKnown = NO;
     header.subscribeIntentDate = nil;
+    header.userFlairAvailabilityKnown = NO;
+    header.userCanSetFlair = NO;
     ApolloSubredditScheduleRepairPass((UIViewController *)self, @"account changed");
 }
 

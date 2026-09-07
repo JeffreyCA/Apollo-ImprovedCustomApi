@@ -462,6 +462,8 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
     [preview configureWithDensityMode:[self currentDensityMode]
                                banner:sSubredditShowBanner
                           joinButton:sSubredditShowJoinButton
+                     userFlairButton:sSubredditShowUserFlairButton
+                       sidebarButton:sSubredditShowSidebarButton
                          displayName:sSubredditShowDisplayName
                             subtitle:sSubredditShowSubtitle
                           description:sSubredditShowDescription];
@@ -571,6 +573,32 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
         }];
     joinButton.visible = ^BOOL { return sShowSubredditHeaders; };
 
+    ApolloSettingsRow *userFlairButton =
+        [ApolloSettingsRow switchRowWithID:@"showUserFlairButton"
+                                     title:@"User Flair Button"
+                                      isOn:^BOOL { return sSubredditShowUserFlairButton; }
+                                  onToggle:^(UISwitch *sender) {
+            sSubredditShowUserFlairButton = sender.isOn;
+            [[NSUserDefaults standardUserDefaults] setBool:sender.isOn
+                                                    forKey:UDKeySubredditShowUserFlairButton];
+            [weakSelf apollo_refreshLayoutPreviewAnimated:YES];
+            [weakSelf apollo_persistAndApply];
+        }];
+    userFlairButton.visible = ^BOOL { return sShowSubredditHeaders; };
+
+    ApolloSettingsRow *sidebarButton =
+        [ApolloSettingsRow switchRowWithID:@"showSidebarButton"
+                                     title:@"Sidebar Button"
+                                      isOn:^BOOL { return sSubredditShowSidebarButton; }
+                                  onToggle:^(UISwitch *sender) {
+            sSubredditShowSidebarButton = sender.isOn;
+            [[NSUserDefaults standardUserDefaults] setBool:sender.isOn
+                                                    forKey:UDKeySubredditShowSidebarButton];
+            [weakSelf apollo_refreshLayoutPreviewAnimated:YES];
+            [weakSelf apollo_persistAndApply];
+        }];
+    sidebarButton.visible = ^BOOL { return sShowSubredditHeaders; };
+
     ApolloSettingsRow *displayName =
         [ApolloSettingsRow switchRowWithID:@"showDisplayName"
                                      title:@"Subreddit Name"
@@ -610,7 +638,8 @@ static NSInteger const ApolloCommunityHighlightsPreviewViewTag = 8102;
     ApolloSettingsSection *headerSection =
         [ApolloSettingsSection sectionWithTitle:@"Layout"
                                          footer:@"Immersive and Compact use Apollo Reborn’s customizable header. Native keeps Apollo’s original layout."
-                                           rows:@[ density, banner, joinButton, displayName, subtitle, description ]];
+                                           rows:@[ density, banner, joinButton, userFlairButton, sidebarButton,
+                                                   displayName, subtitle, description ]];
 
     ApolloSettingsRow *highlights =
         [ApolloSettingsRow valueRowWithID:@"highlights"

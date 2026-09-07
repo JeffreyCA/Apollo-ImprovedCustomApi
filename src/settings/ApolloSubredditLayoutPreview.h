@@ -9,6 +9,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)configureWithDensityMode:(ApolloSubredditDensityMode)mode
                           banner:(BOOL)banner
                       joinButton:(BOOL)joinButton
+                 userFlairButton:(BOOL)userFlairButton
+                   sidebarButton:(BOOL)sidebarButton
                      displayName:(BOOL)displayName
                         subtitle:(BOOL)subtitle
                      description:(BOOL)description;

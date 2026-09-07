@@ -26,6 +26,11 @@ FOUNDATION_EXPORT NSString *ApolloSubredditFormattedMemberCount(NSInteger subscr
 @property(nonatomic) BOOL allowsImageComments; // uploaded images/gifs ("static"/"animated")
 @property(nonatomic) BOOL allowsGifComments;   // Giphy GIFs ("giphy")
 
+// Whether Reddit says users may assign their own flair in this community.
+// The availability bit distinguishes a known NO from an older cached entry.
+@property(nonatomic) BOOL userFlairInfoAvailable;
+@property(nonatomic) BOOL usersCanAssignUserFlair;
+
 // Whether the signed-in user subscribes to this subreddit, from
 // `user_is_subscriber` on about.json. Deliberately an NSNumber so "we don't
 // know" (nil) stays distinct from "known not subscribed" (@NO): reddit only
@@ -62,6 +67,10 @@ FOUNDATION_EXPORT NSString *ApolloSubredditFormattedMemberCount(NSInteger subscr
 // comment-media permissions: if a cached entry predates that field it forces a
 // refetch instead of returning stale data.
 - (void)requestCommentMediaInfoForSubreddit:(NSString *)subredditName completion:(void (^)(ApolloSubredditInfo *info))completion;
+
+// Like -requestInfoForSubreddit:, but refreshes older cache entries that do not
+// yet carry can_assign_user_flair.
+- (void)requestUserFlairInfoForSubreddit:(NSString *)subredditName completion:(void (^)(ApolloSubredditInfo *info))completion;
 - (void)clearAllCaches;
 
 @end

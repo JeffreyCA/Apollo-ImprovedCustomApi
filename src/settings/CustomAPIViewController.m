@@ -2530,7 +2530,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     NSMutableArray<NSString *> *hidden = [NSMutableArray array];
     if (!sSubredditShowBanner) [hidden addObject:@"Banner"];
     if (!sSubredditShowJoinButton) [hidden addObject:@"Join Button"];
+    if (!sSubredditShowUserFlairButton) [hidden addObject:@"User Flair Button"];
+    if (!sSubredditShowSidebarButton) [hidden addObject:@"Sidebar Button"];
     if (!sSubredditShowDisplayName) [hidden addObject:@"Subreddit Name"];
+    if (!sSubredditShowSubtitle) [hidden addObject:@"Subtitle"];
+    if (!sSubredditShowDescription) [hidden addObject:@"Description"];
     if (hidden.count > 0) {
         [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
     }

@@ -145,6 +145,8 @@ extern BOOL sShowSubredditHeaders;
 extern BOOL sSubredditHeaderImmersive;
 extern BOOL sSubredditShowBanner;
 extern BOOL sSubredditShowJoinButton;
+extern BOOL sSubredditShowUserFlairButton;
+extern BOOL sSubredditShowSidebarButton;
 // Whether the short subreddit name (e.g. "science") appears as the bold title.
 extern BOOL sSubredditShowDisplayName;
 // Whether the community title + member-count subtitle appears below it. Before
