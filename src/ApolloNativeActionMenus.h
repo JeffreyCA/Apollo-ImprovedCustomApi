@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 @class UIView;
+@class UIViewController;
 
 NS_ASSUME_NONNULL_BEGIN
 __BEGIN_DECLS
@@ -10,6 +11,13 @@ __BEGIN_DECLS
 // the action through that sheet's own dismissal completion instead.
 BOOL ApolloNativeActionMenuPerformAfterDismissal(id actionController,
                                                   dispatch_block_t action);
+
+// Ask Apollo's PostsViewController to build its normal overflow actions, then
+// invoke the requested native Action kind directly from a custom source view.
+// This preserves Apollo's own availability checks and destination controllers.
+BOOL ApolloNativeActionMenuInvokePostsAction(UIViewController *postsViewController,
+                                             UIView *sourceView,
+                                             uint16_t actionKind);
 
 // Defer collapse until the menu releases this surface; reopening cancels it.
 // Returns NO when no menu owns the surface.
@@ -26,8 +34,8 @@ BOOL ApolloNativeActionMenuOwnsNavigationSurface(UIView * _Nullable surface);
 // `update` when unowned; the caller may apply it immediately. Capture UI owners
 // weakly because the surface retains pending blocks.
 BOOL ApolloNativeActionMenuDeferNavigationUpdate(UIView * _Nullable surface,
-                                                   NSString *key,
-                                                   dispatch_block_t update);
+                                                  NSString *key,
+                                                  dispatch_block_t update);
 
 __END_DECLS
 NS_ASSUME_NONNULL_END

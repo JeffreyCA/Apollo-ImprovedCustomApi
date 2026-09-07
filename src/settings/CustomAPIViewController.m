@@ -2330,11 +2330,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return ApolloSettingsRouteInstantiate(@"feed-shortcuts");
         }];
 
-    // Pushes the dedicated Subreddit Layout screen — the single customize
-    // screen for everything subreddit-page-related: Density (New, Classic, or
-    // Apollo's native header), the Apollo Reborn header show switches, and
-    // Community Highlights (also a subreddit-page feature, not a
-    // subreddit-list one).
     ApolloSettingsRow *subredditLayout =
         [self hubDisclosureRowWithID:@"sub.layout"
                                 title:@"Subreddit Layout"
@@ -2523,13 +2518,17 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 }
 
 - (NSString *)subredditLayoutSummaryText {
-    if (!sShowSubredditHeaders) return @"Native (Apollo)";
+    if (!sShowSubredditHeaders) return @"Native";
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
-    [parts addObject:sSubredditHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"];
+    [parts addObject:sSubredditHeaderImmersive ? @"Immersive" : @"Compact"];
     NSMutableArray<NSString *> *hidden = [NSMutableArray array];
     if (!sSubredditShowBanner) [hidden addObject:@"Banner"];
     if (!sSubredditShowJoinButton) [hidden addObject:@"Join Button"];
+    if (!sSubredditShowUserFlairButton) [hidden addObject:@"User Flair Button"];
+    if (!sSubredditShowSidebarButton) [hidden addObject:@"Sidebar Button"];
     if (!sSubredditShowDisplayName) [hidden addObject:@"Subreddit Name"];
+    if (!sSubredditShowSubtitle) [hidden addObject:@"Subtitle"];
+    if (!sSubredditShowDescription) [hidden addObject:@"Description"];
     if (hidden.count > 0) {
         [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
     }

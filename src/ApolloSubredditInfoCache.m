@@ -220,6 +220,10 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
         dict[@"allowsImageComments"] = @(info.allowsImageComments);
         dict[@"allowsGifComments"] = @(info.allowsGifComments);
     }
+    if (info.userFlairInfoAvailable) {
+        dict[@"userFlairInfoAvailable"] = @(YES);
+        dict[@"usersCanAssignUserFlair"] = @(info.usersCanAssignUserFlair);
+    }
     // Written only when known, so a reloaded entry that never carried the flag
     // stays nil (unknown) rather than decoding as a definite "not subscribed."
     if (info.userIsSubscriber != nil) {
@@ -260,6 +264,8 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
     info.commentMediaInfoAvailable = [dict[@"commentMediaInfoAvailable"] boolValue];
     info.allowsImageComments = [dict[@"allowsImageComments"] boolValue];
     info.allowsGifComments = [dict[@"allowsGifComments"] boolValue];
+    info.userFlairInfoAvailable = [dict[@"userFlairInfoAvailable"] boolValue];
+    info.usersCanAssignUserFlair = [dict[@"usersCanAssignUserFlair"] boolValue];
     id storedSubscriberFlag = dict[@"userIsSubscriber"];
     if ([storedSubscriberFlag isKindOfClass:[NSNumber class]]) {
         info.userIsSubscriber = @([storedSubscriberFlag boolValue]);
@@ -420,6 +426,12 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
     if ([subscriberFlag isKindOfClass:[NSNumber class]]) {
         info.userIsSubscriber = @([subscriberFlag boolValue]);
         info.userIsSubscriberAccount = ApolloActiveAccountUsername().lowercaseString;
+    }
+
+    id userFlairFlag = dataDict[@"can_assign_user_flair"];
+    if ([userFlairFlag isKindOfClass:[NSNumber class]]) {
+        info.userFlairInfoAvailable = YES;
+        info.usersCanAssignUserFlair = [userFlairFlag boolValue];
     }
 
     // `allowed_media_in_comments` is an array of permitted media kinds for
@@ -606,6 +618,16 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
     // Fresh entry missing the comment-media field (older disk cache) → force a
     // refetch so we don't keep serving incomplete data.
     BOOL forceRefresh = (cached != nil && !cached.commentMediaInfoAvailable);
+    [self enqueueRequestForSubreddit:subredditName forceRefresh:forceRefresh completion:completion];
+}
+
+- (void)requestUserFlairInfoForSubreddit:(NSString *)subredditName completion:(void (^)(ApolloSubredditInfo *info))completion {
+    ApolloSubredditInfo *cached = [self cachedInfoForSubreddit:subredditName];
+    if (cached && [self isFreshInfo:cached] && cached.userFlairInfoAvailable) {
+        if (completion) completion(cached);
+        return;
+    }
+    BOOL forceRefresh = cached != nil && !cached.userFlairInfoAvailable;
     [self enqueueRequestForSubreddit:subredditName forceRefresh:forceRefresh completion:completion];
 }
 

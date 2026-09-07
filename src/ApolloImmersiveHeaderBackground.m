@@ -13,11 +13,20 @@ static CGFloat const ApolloImmersiveBackdropBlurSigma = 28.0;
 // melts into the blurred backdrop instead of ending in a hard seam.
 static CGFloat const ApolloImmersiveSharpFeatherHeight = 44.0;
 
-UIColor *ApolloImmersiveResolvedPageColor(UIColor *fallback) {
-    UIColor *themeBackground = ApolloThemeRuntimeIsActive()
-        ? ApolloThemeRuntimeColor(ApolloThemeTokenBackground)
-        : nil;
-    return themeBackground ?: fallback ?: UIColor.systemBackgroundColor;
+static BOOL ApolloImmersiveColorProvidesSurface(UIColor *color, UITraitCollection *traits) {
+    if (!color) return NO;
+    UIColor *resolved = [color resolvedColorWithTraitCollection:
+        traits ?: UIScreen.mainScreen.traitCollection];
+    return resolved && CGColorGetAlpha(resolved.CGColor) > 0.01;
+}
+
+UIColor *ApolloImmersiveResolvedPageColor(UIColor *fallback, UITraitCollection *traits) {
+    // Prefer Apollo's page background for stock and custom themes. Ignore transparent
+    // candidates so layout switches cannot expose a stale Posts surface.
+    UIColor *themeBackground = ApolloThemePageBackgroundColor();
+    if (ApolloImmersiveColorProvidesSurface(themeBackground, traits)) return themeBackground;
+    if (ApolloImmersiveColorProvidesSurface(fallback, traits)) return fallback;
+    return UIColor.systemGroupedBackgroundColor;
 }
 
 UIVisualEffect *ApolloImmersiveGlassEffect(UIColor *tintColor, CGFloat tintAlpha, BOOL interactive) {
@@ -472,12 +481,19 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
     self.contentContainer.frame = self.bounds;
     self.contentContainer.transform = transform;
 
-    BOOL hasBanner = self.sharpView.image != nil && regionHeight > 0.0;
-    self.backdropView.hidden = !hasBanner;
-    self.sharpClip.hidden = !hasBanner;
-    self.veilLayer.hidden = !hasBanner;
-    self.chromeScrimLayer.hidden = !hasBanner;
-    if (!hasBanner) return;
+    // Banner Off keeps the ambient artwork but clips out the sharp banner.
+    // Production uses topInset == regionHeight; the chrome-free Settings
+    // preview uses topInset == regionHeight == 0.
+    CGFloat bannerTop = MIN(regionHeight, MAX(0.0, self.topInset));
+    BOOL hasArtwork = self.sharpView.image != nil && extendedHeight > 0.0;
+    BOOL hasSharpBanner = hasArtwork && regionHeight > bannerTop;
+    self.backdropView.hidden = !hasArtwork;
+    self.sharpClip.hidden = !hasSharpBanner;
+    self.veilLayer.hidden = !hasArtwork;
+    // A zero top inset means the host has no chrome to shade; showing the scrim
+    // would add a false top-edge gradient.
+    self.chromeScrimLayer.hidden = !hasArtwork || self.topInset <= 0.0;
+    if (!hasArtwork) return;
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -485,7 +501,6 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
     self.backdropView.frame = CGRectMake(0.0, 0.0, width, extendedHeight);
 
     self.sharpClip.frame = CGRectMake(0.0, 0.0, width, regionHeight);
-    CGFloat bannerTop = MIN(regionHeight, MAX(0.0, self.topInset));
     CGFloat bannerHeight = MAX(1.0, regionHeight - bannerTop);
     self.sharpView.frame = CGRectMake(0.0, bannerTop, width, bannerHeight);
     CGFloat featherStart = MAX(0.0, 1.0 - ApolloImmersiveSharpFeatherHeight / MAX(1.0, regionHeight));

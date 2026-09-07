@@ -19,7 +19,8 @@
 
 @end
 
-FOUNDATION_EXPORT UIColor *ApolloImmersiveResolvedPageColor(UIColor *fallback);
+FOUNDATION_EXPORT UIColor *ApolloImmersiveResolvedPageColor(UIColor *fallback,
+                                                             UITraitCollection *traits);
 
 // Average-luminance check over the banner's top strip (the region under the
 // status bar / nav chrome). Used to pick readable chrome text over the image.
