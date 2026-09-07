@@ -13,6 +13,9 @@ struct WidgetEntry: TimelineEntry {
     enum State: Hashable {
         case posts([RenderPost])
         case needsSetup
+        /// The source (Home, an own multireddit) needs the account tier of the
+        /// setup code and the pasted one has none.
+        case needsAccount
         case error(String)
         case loading
     }
@@ -27,6 +30,8 @@ struct WidgetEntry: TimelineEntry {
     /// for sources like r/popular, so the header must show the configured
     /// source, not the first post's subreddit.
     var sourceLabel: String? = nil
+    /// Deep link for the Feed header (opens the configured feed in Apollo).
+    var sourceURL: URL? = nil
     /// Feed density: hide thumbnails / tighter rows (ignored by other widgets).
     var feedCompact: Bool = false
     /// Calendar widget rendering config (ignored by the other widgets). The
@@ -92,19 +97,13 @@ enum WidgetSample {
     static var post: RedditPost { feed[0] }
 }
 
-/// Human-readable label for a Feed/Post source. r/popular, r/all and the home
-/// feed are multi-subreddit, so they get a plain capitalized name; everything
-/// else is shown as "r/<sub>".
-func feedSourceLabel(_ sub: String) -> String {
-    let lower = sub.lowercased()
-    if ["popular", "all", "home"].contains(lower) { return lower.capitalized }
-    return "r/\(sub)"
-}
-
-/// Stamp a Feed source label onto every entry of a built timeline.
-func stamped(_ timeline: Timeline<WidgetEntry>, sourceLabel: String) -> Timeline<WidgetEntry> {
+/// Stamp a Feed source (header label + deep link) onto every entry of a built
+/// timeline. `username` resolves the link for the user's own multireddits.
+func stamped(_ timeline: Timeline<WidgetEntry>, source: FeedSource, username: String?) -> Timeline<WidgetEntry> {
+    let label = source.label
+    let url = source.apolloURL(username: username)
     let entries = timeline.entries.map { e -> WidgetEntry in
-        var e = e; e.sourceLabel = sourceLabel; return e
+        var e = e; e.sourceLabel = label; e.sourceURL = url; return e
     }
     return Timeline(entries: entries, policy: timeline.policy)
 }
@@ -237,17 +236,29 @@ func singleEntry(_ state: WidgetEntry.State, refreshIn: TimeInterval) -> Timelin
              policy: .after(Date().addingTimeInterval(refreshIn)))
 }
 
-func errorMessage(_ error: Error) -> String {
-    if let e = error as? RedditAppOnlyClient.ClientError {
+func errorMessage(_ error: Error, source: FeedSource? = nil) -> String {
+    if let e = error as? RedditClient.ClientError {
         switch e {
         case .http(401), .http(403): return "Reddit rejected the credentials. Re-copy the setup code."
-        case .http(404): return "Subreddit not found."
+        case .http(404):
+            // A private multireddit reads as 404 without its owner's account.
+            if let source, source.isMultireddit { return "Multireddit not found. If it's private, copy the setup code with your account." }
+            return "Subreddit not found."
         case .http(429): return "Rate limited by Reddit. Will retry shortly."
         case .http(let code): return "Reddit error \(code)."
         case .badResponse, .noToken: return "Couldn't reach Reddit."
+        case .needsAccount: return "This feed needs your account. Copy the setup code with your account."
+        case .accountRejected: return "Reddit rejected your account. Re-copy the setup code with your account."
         }
     }
     return "Couldn't load posts."
+}
+
+/// Mutable holder so the fetch step of a timeline build can hand the source it
+/// actually used (after learning the account's multireddits) to `assemble`.
+final class SourceBox {
+    var source: FeedSource
+    init(_ source: FeedSource) { self.source = source }
 }
 
 /// Shared driver: parse creds → fetch (with cache fallback) → hand posts to a
@@ -255,7 +266,8 @@ func errorMessage(_ error: Error) -> String {
 func runPostTimeline(
     code: String?,
     cacheKey: String,
-    fetch: @escaping (RedditAppOnlyClient) async throws -> [RedditPost],
+    source: SourceBox? = nil,
+    fetch: @escaping (RedditClient) async throws -> [RedditPost],
     assemble: @escaping ([RedditPost]) async -> Timeline<WidgetEntry>,
     completion: @escaping (Timeline<WidgetEntry>) -> Void
 ) {
@@ -279,7 +291,7 @@ func runPostTimeline(
         }
     }
     Task {
-        let client = RedditAppOnlyClient(clientID: creds.clientID, userAgent: creds.resolvedUserAgent)
+        let client = RedditClient(code: creds)
         do {
             var posts = try await fetch(client)
             rwLog.log("runPostTimeline[\(cacheKey, privacy: .public)]: fetched \(posts.count)")
@@ -292,11 +304,60 @@ func runPostTimeline(
             completion(await assemble(posts))
         } catch {
             rwLog.error("runPostTimeline[\(cacheKey, privacy: .public)]: \(String(describing: error), privacy: .public)")
+            // No account for a personal source: say so rather than showing
+            // stale posts — the fix is a paste, and the prompt explains it.
+            if case RedditClient.ClientError.needsAccount = error {
+                completion(singleEntry(.needsAccount, refreshIn: 60 * 60))
+                return
+            }
             let cached = PostCache.load(cacheKey)
             if !cached.isEmpty { completion(await assemble(cached)) }
-            else { completion(singleEntry(.error(errorMessage(error)), refreshIn: 15 * 60)) }
+            else { completion(singleEntry(.error(errorMessage(error, source: source?.source)), refreshIn: 15 * 60)) }
         }
     }
+}
+
+/// Source-aware driver over `runPostTimeline` for the configurable widgets.
+/// `resolve` maps the account's cached multireddit names to the source (so a
+/// bare "nintendo" can be m/nintendo when it's the user's); on the first build
+/// with an account the multireddits are fetched first and the source
+/// re-resolved. `assemble` gets the posts plus the source actually used, for
+/// the header label and deep link.
+func runSourceTimeline(
+    code: String?,
+    cacheKey: String,
+    resolve: @escaping (Set<String>) -> FeedSource,
+    sort: WidgetSort,
+    limit: Int,
+    filter: @escaping ([RedditPost]) -> [RedditPost] = { $0 },
+    assemble: @escaping ([RedditPost], FeedSource) async -> Timeline<WidgetEntry>,
+    completion: @escaping (Timeline<WidgetEntry>) -> Void
+) {
+    let box = SourceBox(resolve(OwnMultis.names(for: widgetAccountKey(code))))
+    runPostTimeline(
+        code: code, cacheKey: cacheKey, source: box,
+        fetch: { client in
+            if client.hasAccount, OwnMultis.isStale(for: client.accountKey) {
+                await client.refreshOwnMultisIfStale()
+                box.source = resolve(OwnMultis.names(for: client.accountKey))
+            }
+            return filter(try await client.posts(source: box.source, sort: sort, limit: limit))
+        },
+        assemble: { await assemble($0, box.source) },
+        completion: completion)
+}
+
+/// Per-account cache id for the resolved setup code (nil without an account).
+func widgetAccountKey(_ code: String?) -> String? {
+    SetupCode.resolve(code).flatMap { RedditClient(code: $0).accountKey }
+}
+
+/// Username behind the resolved setup code — from the code itself, else as
+/// learned from the account's multireddit paths. Nil without an account.
+func widgetUsername(_ code: String?) -> String? {
+    guard let creds = SetupCode.resolve(code), creds.hasAccount else { return nil }
+    if let u = creds.username, !u.isEmpty { return u }
+    return OwnMultis.owner(for: RedditClient(code: creds).accountKey)
 }
 
 // MARK: - assemble helpers (image downloads)

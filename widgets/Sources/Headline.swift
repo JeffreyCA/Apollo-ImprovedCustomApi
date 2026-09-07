@@ -15,20 +15,25 @@ struct HeadlineProvider: IntentTimelineProvider {
     func getSnapshot(for configuration: Intent, in context: Context,
                      completion: @escaping (WidgetEntry) -> Void) {
         if context.isPreview { completion(.sample([WidgetSample.feed[0]])); return }
-        let sub = resolvedSubreddit(configuration.subreddit, default: "worldnews")
-        let post = PostCache.load("headline.\(sub)").first ?? WidgetSample.feed[0]
+        let source = Self.source(configuration, ownMultis: OwnMultis.names(for: widgetAccountKey(configuration.setupCode)))
+        let post = PostCache.load("headline.\(source.cacheKey)").first ?? WidgetSample.feed[0]
         completion(WidgetEntry(date: Date(), state: .posts([RenderPost(post: post, imageData: nil)])))
+    }
+
+    private static func source(_ configuration: Intent, ownMultis: Set<String>) -> FeedSource {
+        widgetSource(text: configuration.subreddit, default: .subreddits(["worldnews"]), ownMultis: ownMultis)
     }
 
     func getTimeline(for configuration: Intent, in context: Context,
                      completion: @escaping (Timeline<WidgetEntry>) -> Void) {
-        let sub = resolvedSubreddit(configuration.subreddit, default: "worldnews")
-        let key = "headline.\(sub)"
-        rwLog.log("getTimeline Headline r/\(sub, privacy: .public) family=\(familyName(context.family), privacy: .public)")
-        runPostTimeline(
+        let source = Self.source(configuration, ownMultis: OwnMultis.names(for: widgetAccountKey(configuration.setupCode)))
+        let key = "headline.\(source.cacheKey)"
+        rwLog.log("getTimeline Headline \(source.label, privacy: .public) family=\(familyName(context.family), privacy: .public)")
+        runSourceTimeline(
             code: configuration.setupCode, cacheKey: key,
-            fetch: { try await $0.topPosts(subreddit: sub, sort: .hot, limit: 10) },
-            assemble: { assembleText($0, key: key) },   // rotates through the top posts
+            resolve: { Self.source(configuration, ownMultis: $0) },
+            sort: .hot, limit: 10,
+            assemble: { posts, _ in assembleText(posts, key: key) },   // rotates through the top posts
             completion: completion)
     }
 }

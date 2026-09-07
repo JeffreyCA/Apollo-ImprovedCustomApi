@@ -29,6 +29,8 @@ struct WidgetShell<Content: View, Background: View>: View {
             MessageView(icon: "ellipsis", title: "Apollo", detail: "Loading…")
         case .needsSetup:
             SetupView()
+        case .needsAccount:
+            SetupView(needsAccount: true)
         case .error(let msg):
             // Transient (offline / rate-limited) — phrased as "will retry".
             MessageView(icon: "wifi.exclamationmark", title: "Can't reach Reddit", detail: msg)
@@ -73,7 +75,22 @@ struct MessageView: View {
 /// intentional welcome rather than an error.
 struct SetupView: View {
     @Environment(\.widgetFamily) private var family
+    /// The code is fine but this source (Home, an own multireddit) needs the
+    /// account tier — ask for the "with account" code instead of a first paste.
+    var needsAccount: Bool = false
     private var small: Bool { family == .systemSmall }
+
+    private var title: String { needsAccount ? "Sign in for this feed" : "Set up Apollo widgets" }
+    private var detail: String {
+        if needsAccount {
+            return small
+                ? "Paste a setup code that includes your account."
+                : "Home and your multireddits need your account. In Apollo → Settings → Apollo Reborn, copy the setup code with your account and paste it here."
+        }
+        return small
+            ? "Tap Edit and paste your Apollo setup code."
+            : "Tap Edit and paste your setup code from Apollo → Settings → Apollo Reborn. Just once — every widget shares it."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: small ? 7 : 9) {
@@ -84,14 +101,12 @@ struct SetupView: View {
                 .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 1))
                 .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Set up Apollo widgets")
+                Text(title)
                     .font(.system(size: small ? 14 : 16, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                     .minimumScaleFactor(0.7)
                     .lineLimit(2)
-                Text(small
-                     ? "Tap Edit and paste your Apollo setup code."
-                     : "Tap Edit and paste your setup code from Apollo → Settings → Apollo Reborn. Just once — every widget shares it.")
+                Text(detail)
                     .font(.system(size: small ? 11 : 12))
                     .foregroundStyle(.white.opacity(0.9))
                     .minimumScaleFactor(0.8)
@@ -107,19 +122,32 @@ struct SetupView: View {
 
 /// Small header: a bold tinted title (Apollo uses an emoji, e.g. "Showerthoughts
 /// 🚿"), with an optional leading SF Symbol and trailing interactive button.
+/// With `url`, the title becomes a link (the Feed header opens its feed in
+/// Apollo) while the trailing button keeps its own tap.
 struct WidgetHeader: View {
     var icon: String? = nil
     let label: String
     var tint: Color = .white
+    var url: URL? = nil
     var trailing: AnyView? = nil
     var body: some View {
         HStack(spacing: 5) {
-            if let icon { Image(systemName: icon).font(.caption2) }
-            Text(label).font(.system(size: 13, weight: .heavy, design: .rounded))
+            if let url {
+                Link(destination: url) { title }
+            } else {
+                title
+            }
             Spacer(minLength: 4)
             if let trailing { trailing }
         }
         .foregroundStyle(tint)
+    }
+
+    private var title: some View {
+        HStack(spacing: 5) {
+            if let icon { Image(systemName: icon).font(.caption2) }
+            Text(label).font(.system(size: 13, weight: .heavy, design: .rounded)).lineLimit(1)
+        }
     }
 }
 
@@ -406,7 +434,7 @@ struct AccessoryPostView: View {
 
     private var accessoryNote: String {
         switch entry.state {
-        case .needsSetup: return "Set up in Apollo"
+        case .needsSetup, .needsAccount: return "Set up in Apollo"
         case .error: return "Tap to open Apollo"
         default: return "Loading…"
         }

@@ -20,18 +20,66 @@ let rwSession: URLSession = {
     return URLSession(configuration: cfg)
 }()
 
-/// Minimal Reddit client using the **app-only** OAuth grant
-/// (`grant_type=...installed_client`). This requires only a client_id — no
-/// user login — and can read public subreddits like r/showerthoughts.
+/// Minimal Reddit client with two token tiers:
+///
+///   * **app-only** (`grant_type=...installed_client`) — needs only the client
+///     id and reads every public listing: subreddits, r/popular, r/all, other
+///     people's public multireddits. This is what every widget used before.
+///   * **account** (`grant_type=refresh_token`) — present only when the setup
+///     code was copied *with account*. It's what Home and the user's own
+///     (private) multireddits need; public sources keep using the app-only
+///     token so a revoked account never breaks them.
 ///
 /// Validated by hand:
-///   POST https://www.reddit.com/api/v1/access_token   (Basic clientID:"")
+///   POST https://www.reddit.com/api/v1/access_token   (Basic clientID:secret-or-empty)
 ///   GET  https://oauth.reddit.com/r/showerthoughts/top?t=day&limit=N
-struct RedditAppOnlyClient {
+///   GET  https://oauth.reddit.com/hot                   (home; user token)
+///   GET  https://oauth.reddit.com/me/m/<multi>/hot      (own multi; user token)
+///   GET  https://oauth.reddit.com/user/<u>/m/<multi>/hot (public multi; either token)
+///   GET  https://oauth.reddit.com/api/multi/mine        (user token)
+/// Reddit does NOT rotate refresh tokens on use, so the widget refreshing its
+/// own access token never invalidates the one Apollo itself holds.
+struct RedditClient {
     let clientID: String
     let userAgent: String
+    /// Client secret for "web app" (confidential) API keys; empty for the
+    /// usual "installed app" keys, matching how Apollo itself authenticates.
+    var clientSecret: String = ""
+    var refreshToken: String? = nil
+    var username: String? = nil
 
-    enum ClientError: Error { case http(Int), badResponse, noToken }
+    init(clientID: String, userAgent: String, clientSecret: String = "",
+         refreshToken: String? = nil, username: String? = nil) {
+        self.clientID = clientID
+        self.userAgent = userAgent
+        self.clientSecret = clientSecret
+        self.refreshToken = refreshToken
+        self.username = username
+    }
+
+    init(code: SetupCode) {
+        self.init(clientID: code.clientID, userAgent: code.resolvedUserAgent,
+                  clientSecret: code.clientSecret ?? "",
+                  refreshToken: code.hasAccount ? code.refreshToken : nil,
+                  username: code.username)
+    }
+
+    var hasAccount: Bool { !(refreshToken ?? "").isEmpty }
+
+    /// Stable id of the signed-in account for per-account caches (never the
+    /// raw token). Nil without an account.
+    var accountKey: String? {
+        guard let refreshToken, !refreshToken.isEmpty else { return nil }
+        return String(fnv1a("\(clientID):\(refreshToken)"), radix: 36)
+    }
+
+    enum ClientError: Error {
+        case http(Int), badResponse, noToken
+        /// The source needs a user token and the setup code has none.
+        case needsAccount
+        /// Reddit refused the refresh token (revoked / password changed).
+        case accountRejected
+    }
 
     // MARK: Token cache (per-extension UserDefaults; no cross-process sharing)
 
@@ -40,6 +88,9 @@ struct RedditAppOnlyClient {
     private static let tokenExpiryKey = "rw.appOnlyTokenExpiry"
     private static let tokenClientKey = "rw.appOnlyTokenClient"
     private static let deviceIDKey = "rw.deviceID"
+    private static let userTokenKey = "rw.userToken"
+    private static let userTokenExpiryKey = "rw.userTokenExpiry"
+    private static let userTokenAccountKey = "rw.userTokenAccount"
 
     /// Stable per-install device id required by the installed_client grant.
     private static var deviceID: String {
@@ -66,24 +117,43 @@ struct RedditAppOnlyClient {
         d.set(Date().timeIntervalSince1970 + expiresIn, forKey: Self.tokenExpiryKey)
     }
 
+    private func cachedUserToken() -> String? {
+        let d = Self.defaults
+        guard let accountKey, d.string(forKey: Self.userTokenAccountKey) == accountKey,
+              let token = d.string(forKey: Self.userTokenKey) else { return nil }
+        guard d.double(forKey: Self.userTokenExpiryKey) - 120 > Date().timeIntervalSince1970 else { return nil }
+        return token
+    }
+
+    private func storeUserToken(_ token: String, expiresIn: Double) {
+        let d = Self.defaults
+        d.set(token, forKey: Self.userTokenKey)
+        d.set(accountKey, forKey: Self.userTokenAccountKey)
+        d.set(Date().timeIntervalSince1970 + expiresIn, forKey: Self.userTokenExpiryKey)
+    }
+
     // MARK: OAuth
 
-    private func fetchToken() async throws -> String {
+    private func tokenRequest(body: String) -> URLRequest {
         var req = URLRequest(url: URL(string: "https://www.reddit.com/api/v1/access_token")!)
         req.httpMethod = "POST"
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        // HTTP Basic: clientID as username, empty password.
-        let basic = Data("\(clientID):".utf8).base64EncodedString()
+        // HTTP Basic: clientID as username, the secret (empty for installed
+        // apps) as password — the same shape Apollo's own RedditKit sends.
+        let basic = Data("\(clientID):\(clientSecret)".utf8).base64EncodedString()
         req.setValue("Basic \(basic)", forHTTPHeaderField: "Authorization")
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = "grant_type=https://oauth.reddit.com/grants/installed_client&device_id=\(Self.deviceID)"
         req.httpBody = body.data(using: .utf8)
+        return req
+    }
 
-        let (data, resp) = try await rwSession.data(for: req)
+    private struct TokenResponse: Codable { let access_token: String; let expires_in: Double }
+
+    private func fetchToken() async throws -> String {
+        let body = "grant_type=https://oauth.reddit.com/grants/installed_client&device_id=\(Self.deviceID)"
+        let (data, resp) = try await rwSession.data(for: tokenRequest(body: body))
         guard let http = resp as? HTTPURLResponse else { throw ClientError.badResponse }
         guard http.statusCode == 200 else { throw ClientError.http(http.statusCode) }
-
-        struct TokenResponse: Codable { let access_token: String; let expires_in: Double }
         guard let tr = try? JSONDecoder().decode(TokenResponse.self, from: data) else {
             throw ClientError.noToken
         }
@@ -96,17 +166,54 @@ struct RedditAppOnlyClient {
         return try await fetchToken()
     }
 
+    /// Mint a user access token from the account's refresh token.
+    private func fetchUserToken() async throws -> String {
+        guard let refreshToken, !refreshToken.isEmpty else { throw ClientError.needsAccount }
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        let encoded = refreshToken.addingPercentEncoding(withAllowedCharacters: allowed) ?? refreshToken
+        let body = "grant_type=refresh_token&refresh_token=\(encoded)"
+        let (data, resp) = try await rwSession.data(for: tokenRequest(body: body))
+        guard let http = resp as? HTTPURLResponse else { throw ClientError.badResponse }
+        // Reddit answers a revoked/foreign refresh token with 400 invalid_grant
+        // (401 for a bad client id/secret pairing); both mean "re-copy the code".
+        if http.statusCode == 400 || http.statusCode == 401 {
+            rwLog.error("user token refresh → HTTP \(http.statusCode)")
+            throw ClientError.accountRejected
+        }
+        guard http.statusCode == 200 else { throw ClientError.http(http.statusCode) }
+        guard let tr = try? JSONDecoder().decode(TokenResponse.self, from: data) else {
+            throw ClientError.noToken
+        }
+        storeUserToken(tr.access_token, expiresIn: tr.expires_in)
+        return tr.access_token
+    }
+
+    private func userToken() async throws -> String {
+        if let cached = cachedUserToken() { return cached }
+        return try await fetchUserToken()
+    }
+
+    /// The bearer for a source: account tier for personal sources, app-only for
+    /// everything public (so a dead account never takes r/aww down with it).
+    private func bearer(for source: FeedSource) async throws -> String {
+        if source.needsAccount {
+            guard hasAccount else { throw ClientError.needsAccount }
+            return try await userToken()
+        }
+        return try await token()
+    }
+
     // MARK: Data
 
-    func topPosts(subreddit: String, sort: WidgetSort, limit: Int = 25,
-                  allowNSFW: Bool = false) async throws -> [RedditPost] {
-        let bearer = try await token()
-        let sub = RedditPost.normalizeSubreddit(subreddit)
-        // Built from a sanitized sub, but never force-unwrap: a nil URL must
+    /// Posts from any `FeedSource` at the given sort.
+    func posts(source: FeedSource, sort: WidgetSort, limit: Int = 25,
+               allowNSFW: Bool = false) async throws -> [RedditPost] {
+        let bearer = try await bearer(for: source)
+        // Built from sanitized names, but never force-unwrap: a nil URL must
         // surface as an error, not a crash (a crashing extension poisons
         // WidgetKit's enumeration of every widget).
-        guard !sub.isEmpty,
-              var comps = URLComponents(string: "https://oauth.reddit.com/r/\(sub)/\(sort.path)") else {
+        guard var comps = URLComponents(string: "https://oauth.reddit.com\(source.listingPath)/\(sort.path)") else {
             throw ClientError.badResponse
         }
         var items = [
@@ -130,14 +237,58 @@ struct RedditAppOnlyClient {
         let (data, resp) = try await rwSession.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw ClientError.badResponse }
         guard http.statusCode == 200 else {
-            rwLog.error("fetch r/\(sub, privacy: .public)/\(sort.path, privacy: .public) → HTTP \(http.statusCode)")
+            rwLog.error("fetch \(source.listingPath, privacy: .public)/\(sort.path, privacy: .public) → HTTP \(http.statusCode)")
             throw ClientError.http(http.statusCode)
         }
         let posts = Self.parseListing(data, allowNSFW: allowNSFW)
         let firstIDs = posts.prefix(3).map { $0.id }.joined(separator: ",")
         let window = sort.timeWindow ?? "-"
-        rwLog.log("fetched r/\(sub, privacy: .public) sort=\(sort.path, privacy: .public) t=\(window, privacy: .public) → \(posts.count) posts [\(firstIDs, privacy: .public)]")
+        rwLog.log("fetched \(source.label, privacy: .public) sort=\(sort.path, privacy: .public) t=\(window, privacy: .public) → \(posts.count) posts [\(firstIDs, privacy: .public)]")
         return posts
+    }
+
+    /// Posts from one subreddit (the fixed-subreddit widgets: Jokes, Showerthoughts).
+    func topPosts(subreddit: String, sort: WidgetSort, limit: Int = 25,
+                  allowNSFW: Bool = false) async throws -> [RedditPost] {
+        let sub = RedditPost.normalizeSubreddit(subreddit)
+        guard !sub.isEmpty else { throw ClientError.badResponse }
+        return try await posts(source: .subreddits([sub]), sort: sort, limit: limit, allowNSFW: allowNSFW)
+    }
+
+    /// Learn the signed-in user's multireddits (names + owner) into `OwnMultis`
+    /// when the cache is missing or old. No-op without an account; failures
+    /// are logged and simply leave the cache as it was.
+    func refreshOwnMultisIfStale() async {
+        guard let accountKey, OwnMultis.isStale(for: accountKey) else { return }
+        do {
+            let bearer = try await userToken()
+            guard let url = URL(string: "https://oauth.reddit.com/api/multi/mine?raw_json=1") else { return }
+            var req = URLRequest(url: url)
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("bearer \(bearer)", forHTTPHeaderField: "Authorization")
+            let (data, resp) = try await rwSession.data(for: req)
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                rwLog.error("multi/mine failed (\((resp as? HTTPURLResponse)?.statusCode ?? -1))")
+                return
+            }
+            var names: [String] = []
+            var owner: String? = username
+            for item in list {
+                guard let d = item["data"] as? [String: Any],
+                      let name = d["name"] as? String, !name.isEmpty else { continue }
+                names.append(name)
+                // "/user/<owner>/m/<name>/" — the owner is our username.
+                if owner == nil, let path = d["path"] as? String {
+                    let segs = path.split(separator: "/")
+                    if segs.count >= 2, segs[0] == "user" { owner = String(segs[1]) }
+                }
+            }
+            OwnMultis.store(names: names, owner: owner, for: accountKey)
+            rwLog.log("multi/mine → \(names.count) multireddit(s)")
+        } catch {
+            rwLog.error("multi/mine: \(String(describing: error), privacy: .public)")
+        }
     }
 
     /// A subreddit's icon URL + brand color hex from /about (best-effort).
