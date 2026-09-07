@@ -2,6 +2,7 @@
 #import "ApolloNavigationActionsDiscovery.h"
 #import "ApolloNativeActionMenus.h"
 #import "ApolloCommon.h"
+#import "ApolloThemeRuntime.h"
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
@@ -26,8 +27,75 @@ static char kActionsRefreshKey;
 static char kActionsStandardItemKey;
 static char kActionsStandardMoreKey;
 static char kActionsScrollOwnerKey;
+static char kActionsChromeKey;
+static char kActionsApprovedLayoutKey;
 static NSUInteger sActionsModelWriteDepth;
 @class ApolloNavigationActionsOwner;
+
+// Keep right-item chrome neutral before it appears, including lone actions on
+// profile feeds. Mark only the actual item content, never the whole nav bar.
+static void ApolloActionsPinChrome(id object) {
+    UIColor *chrome = ApolloNavigationChromeColor();
+    if (!objc_getAssociatedObject(object, &kActionsChromeKey) ||
+        ![[object tintColor] isEqual:chrome]) {
+        [object setTintColor:chrome];
+        objc_setAssociatedObject(object, &kActionsChromeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static UIImage *ApolloActionsTemplateImage(UIImage *image) {
+    return image && image.renderingMode != UIImageRenderingModeAlwaysTemplate
+        ? [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] : image;
+}
+
+static BOOL ApolloActionsIsAutoModClose(UIBarButtonItem *item) {
+    return item.action == NSSelectorFromString(@"cancelBarButtonItemTappedWithSender:") &&
+        [NSStringFromClass([item.target class]) isEqualToString:@"Apollo.AutoModeratorViewController"];
+}
+
+static void ApolloActionsPrepareApprovedContent(UIView *content) {
+    if (!content || objc_getAssociatedObject(content, &kActionsApprovedLayoutKey)) return;
+    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    for (UIView *child in content.subviews) {
+        if ([child isKindOfClass:UIButton.class]) [buttons addObject:(UIButton *)child];
+    }
+    if (buttons.count != 2) return;
+    [buttons sortUsingComparator:^NSComparisonResult(UIButton *a, UIButton *b) {
+        return CGRectGetMinX(a.frame) < CGRectGetMinX(b.frame) ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    // Apollo's compact legacy frames put the plus below its 24pt container.
+    // Keep the original controls/actions, with equal centered glass slots.
+    const CGFloat slotWidth = 36.0;
+    for (NSUInteger index = 0; index < buttons.count; index++) {
+        UIButton *button = buttons[index];
+        button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+        button.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+        button.contentEdgeInsets = UIEdgeInsetsZero;
+        button.imageEdgeInsets = UIEdgeInsetsZero;
+        button.frame = CGRectMake(index * slotWidth, 0, slotWidth, 44);
+    }
+    CGRect frame = content.frame;
+    frame.size = CGSizeMake(buttons.count * slotWidth, 44);
+    content.frame = frame;
+    content.bounds = CGRectMake(0, 0, frame.size.width, 44);
+    objc_setAssociatedObject(content, &kActionsApprovedLayoutKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void ApolloActionsApplyChromeToView(UIView *view) {
+    if (!view) return;
+    ApolloActionsPinChrome(view);
+    if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (id)view;
+        const UIControlState states[] = { UIControlStateNormal, UIControlStateSelected,
+            UIControlStateHighlighted, UIControlStateDisabled };
+        for (NSUInteger i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+            UIImage *image = [button imageForState:states[i]];
+            UIImage *templated = ApolloActionsTemplateImage(image);
+            if (templated != image) [button setImage:templated forState:states[i]];
+        }
+    }
+    for (UIView *child in view.subviews) ApolloActionsApplyChromeToView(child);
+}
 
 @interface ApolloNavigationActionsControllerBox : NSObject
 @property (nonatomic, weak) UIViewController *controller;
@@ -485,15 +553,44 @@ static NSArray<UIBarButtonItem *> *ApolloActionsInboxItems(UINavigationItem *ite
     // including late action insertion and overlapping menu sessions.
     if ([self deferGeometryUpdate]) return;
     self.preparing = YES;
+    for (UIBarButtonItem *item in items) {
+        if (item.action == NSSelectorFromString(@"cancelBarButtonItemTappedWithSender:") &&
+            [NSStringFromClass(self.controller.class) isEqualToString:@"Apollo.PostsViewController"]) {
+            // Search replaces these actions in the same update. Settle the old
+            // strip now so dismissal restores it collapsed, without a second spring.
+            [self setExpanded:NO animated:NO];
+            break;
+        }
+    }
     BOOL retargetAnimation = NO;
     NSMutableArray *strips = [NSMutableArray array];
+    ApolloNavigationActionsControllerBox *controllerBox = objc_getAssociatedObject(self.item, &kActionsControllerKey);
+    BOOL approvedSubmitters = [NSStringFromClass(controllerBox.controller.class)
+        isEqualToString:@"Apollo.ModeratorApprovedSubmittersViewController"];
     for (UIBarButtonItem *item in items) {
+        ApolloActionsPinChrome(item);
+        UIImage *image = ApolloActionsTemplateImage(item.image);
+        if (image != item.image) item.image = image;
         UIView *source = ApolloNavigationActionsContentView(item);
+        if (approvedSubmitters) ApolloActionsPrepareApprovedContent(source);
+        ApolloActionsApplyChromeToView(source);
         ApolloNavigationActionsStrip *strip = [item.customView isKindOfClass:ApolloNavigationActionsStrip.class]
             ? (id)item.customView : nil;
         UIButton *more = strip.more ?: ApolloActionsFindMore(source);
         if (!strip && more && ApolloActionsControlCount(source) > 1) {
-            strip = [[ApolloNavigationActionsStrip alloc] initWithContent:source more:more];
+            // Apollo rebuilds its container using the same buttons on return.
+            // Keep the displayed surface alive while UIKit hands off the item.
+            for (ApolloNavigationActionsStrip *existing in self.strips) {
+                if (existing.more == more) { strip = existing; break; }
+            }
+            if (strip) {
+                [strip removeIconAnimations];
+                [strip.content removeFromSuperview];
+                strip.content = source;
+                strip.originalAccessibilityHidden = source.accessibilityElementsHidden;
+            } else {
+                strip = [[ApolloNavigationActionsStrip alloc] initWithContent:source more:more];
+            }
             item.customView = strip;
             // setCustomView: detaches the old view even if reparented; adopt it afterward.
             [strip.surface.contentView addSubview:source];
@@ -676,7 +773,12 @@ static NSArray<UIBarButtonItem *> *ApolloActionsInboxItems(UINavigationItem *ite
     }
     // iOS 27's SwiftUI host caches custom-item width until the navigation model
     // changes. Reuse current identities, including any late native replacement.
-    [self.item setRightBarButtonItems:self.item.rightBarButtonItems animated:NO];
+    // During item replacement the caller is about to publish the new array.
+    // Republishing the outgoing array here lets translation upkeep pull the
+    // globe out of its new search host and merge it back into the old strip.
+    if (!self.preparing) {
+        [self.item setRightBarButtonItems:self.item.rightBarButtonItems animated:NO];
+    }
     UINavigationBar *bar = self.controller.navigationController.navigationBar;
     if (bar.topItem != self.item) return; // Never drive the page we navigated to.
     [bar setNeedsLayout];
@@ -923,9 +1025,48 @@ NSArray<UIView *> *ApolloNavigationActionsManagedRoots(UINavigationBar *bar) {
 %end
 %end
 
+// Apollo can retint existing controls without replacing their navigation item.
+// Reject those accent writes at the setter, rather than correcting a visible
+// frame later. Menu elements and unrelated content remain untouched.
+%group ApolloNavigationActionsChromeHooks
+%hook UIView
+- (void)setTintColor:(UIColor *)color {
+    if (objc_getAssociatedObject(self, &kActionsChromeKey)) {
+        color = ApolloNavigationChromeColor();
+        if ([self.tintColor isEqual:color]) return;
+    }
+    %orig(color);
+}
+%end
+
+%hook UIButton
+- (void)setImage:(UIImage *)image forState:(UIControlState)state {
+    if (objc_getAssociatedObject(self, &kActionsChromeKey)) image = ApolloActionsTemplateImage(image);
+    %orig(image, state);
+}
+%end
+
+%hook UIBarButtonItem
+- (void)setTintColor:(UIColor *)color {
+    if (objc_getAssociatedObject(self, &kActionsChromeKey) || ApolloActionsIsAutoModClose(self)) {
+        color = ApolloNavigationChromeColor();
+        if ([self.tintColor isEqual:color]) return;
+    }
+    %orig(color);
+}
+- (void)setImage:(UIImage *)image {
+    if (objc_getAssociatedObject(self, &kActionsChromeKey) || ApolloActionsIsAutoModClose(self)) image = ApolloActionsTemplateImage(image);
+    %orig(image);
+}
+%end
+%end
+
 %ctor {
     if (@available(iOS 26.0, *)) {
         %init(ApolloNavigationActionsHooks);
+        if (IsLiquidGlass()) {
+            %init(ApolloNavigationActionsChromeHooks);
+        }
         ApolloLog(@"[NavigationActions] Page-owned native strip hooks installed");
     }
 }

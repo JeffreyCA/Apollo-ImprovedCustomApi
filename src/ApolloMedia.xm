@@ -144,11 +144,8 @@ static void ApolloMediaRepairRouteControlLayout(UIView *routeView, NSString *rea
     routeView.superview.clipsToBounds = NO;
     routeView.superview.layer.masksToBounds = NO;
 
-    CGRect frame = routeView.frame;
-    CGFloat minSide = 36.0;
-    if (frame.size.width > 0.0 && frame.size.width < minSide) frame.size.width = minSide;
-    if (frame.size.height > 0.0 && frame.size.height < minSide) frame.size.height = minSide;
-    routeView.frame = frame;
+    // UIKit sizes and centers this control inside the player's glass button.
+    // Enlarging it here shifts the glyph away from that center.
 
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:routeView];
     NSUInteger inspected = 0;

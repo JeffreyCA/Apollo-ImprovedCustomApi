@@ -143,9 +143,21 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
     UIView *fromView = [ctx viewForKey:UITransitionContextFromViewKey] ?: fromVC.view;
     UIView *toView = [ctx viewForKey:UITransitionContextToViewKey] ?: toVC.view;
     BOOL push = ApolloNavAnimatorIsPresenting(animatorObject);
-    UISearchController *fromSearch = fromVC.navigationItem.searchController;
-    BOOL restoreSearchOnCancel = ApolloNativeFeedSearchEnabled() && !fromSearch.active &&
-                                 CGRectGetHeight(fromSearch.searchBar.bounds) > 1.0;
+    UINavigationItem *fromItem = fromVC.navigationItem;
+    UISearchController *fromSearch = fromItem.searchController;
+    UINavigationController *navigationController = fromVC.navigationController;
+    BOOL hadRevealedSearch = ApolloNativeFeedSearchEnabled() && interactive && !push && fromSearch && !fromSearch.active &&
+        fromItem.hidesSearchBarWhenScrolling && CGRectGetHeight(fromSearch.searchBar.bounds) > 1.0;
+    __block BOOL holdsRevealedInset = NO;
+    if (hadRevealedSearch) {
+        [fromVC.transitionCoordinator notifyWhenInteractionChangesUsingBlock:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+            if (!context.isCancelled || fromItem.searchController != fromSearch || fromSearch.active) return;
+            // A cancelled pop must keep the outgoing page's existing safe-area band.
+            // Otherwise UIKit briefly removes it and reparks the entire feed upward.
+            holdsRevealedInset = YES;
+            fromItem.hidesSearchBarWhenScrolling = NO;
+        }];
+    }
     CGFloat width = CGRectGetWidth(container.bounds);
     CGFloat parallax = width / kApolloNavParallaxDivisor;
 
@@ -233,16 +245,32 @@ static UIViewPropertyAnimator *ApolloNavBuildAnimator(id animatorObject,
         // No cache bookkeeping here: this may synchronously start the next transition (a push or
         // pop issued from didShowViewController:), whose animator must survive untouched. The
         // per-context lookup in interruptibleAnimatorForTransition: keeps the two apart.
-        [ctx completeTransition:!cancelled];
-        // completeTransition: synchronously restores the item stack and feed
-        // geometry on cancellation. Keep the guard up through that cleanup.
-        if (interactive && sApolloNavTransitionsInFlight > 0) sApolloNavTransitionsInFlight--;
-        if (cancelled && restoreSearchOnCancel) {
-            ApolloNativeFeedSearchRestoreCancelledNavigation(fromVC);
-        }
+        void (^complete)(void) = ^{
+            [ctx completeTransition:!cancelled];
+            // Keep the guard through UIKit's synchronous item-stack restoration.
+            if (interactive && sApolloNavTransitionsInFlight > 0) sApolloNavTransitionsInFlight--;
+            if (holdsRevealedInset) {
+                holdsRevealedInset = NO;
+                // UIKit defers its final content-overlay layout until after
+                // completeTransition:. Flush it while the existing band is held;
+                // releasing the policy first lets that pass briefly remove it.
+                if (!ApolloNavTransitionInFlight() &&
+                    navigationController.topViewController == fromVC &&
+                    navigationController.visibleViewController == fromVC) {
+                    [navigationController.view setNeedsLayout];
+                    [navigationController.view layoutIfNeeded];
+                }
+                fromItem.hidesSearchBarWhenScrolling = YES;
+            }
+            if (cancelled && interactive) ApolloNavigationTitleGlassRefreshNavigationBar(navigationBar);
+        };
+        // The reversed animator has already returned the page to its rest frame.
+        // Item, inset and title restoration must not start a second animation.
+        if (cancelled) [UIView performWithoutAnimation:complete];
+        else complete();
         // The bar has settled on whichever item won; give the title capsules that were held
         // back during the cross-fade their chance now (they fade in rather than pop).
-        if (interactive) ApolloNavigationTitleGlassRefreshNavigationBar(navigationBar);
+        if (interactive && !cancelled) ApolloNavigationTitleGlassRefreshNavigationBar(navigationBar);
     }];
     // The animator's blocks hold ctx, the views and the dim/shadow until it finishes;
     // UIViewPropertyAnimator drops them then, so nothing here outlives the transition.

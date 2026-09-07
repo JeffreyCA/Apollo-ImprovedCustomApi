@@ -14,6 +14,7 @@
 static char kApolloNativeActionMenuControllerKey;
 static char kApolloNativeActionMenuInvokingActionKey;
 static char kApolloNativeActionMenuWrappedModeratorActionKey;
+static char kApolloNativeActionMenuModeratorSelectionKey;
 static char kApolloNativeActionMenuLifecycleFallbackKey;
 static char kApolloNativeActionMenuPresenterKey;
 static char kApolloNativeActionMenuSourceViewKey;
@@ -273,7 +274,7 @@ static NSString *ApolloNativeActionDefaultTitle(uint16_t actionKind) {
 }
 
 static UIColor *ApolloNativeActionMenuModeratorColor(void) {
-    return [UIColor colorWithRed:0.0 green:(148.0 / 255.0) blue:(16.0 / 255.0) alpha:1.0];
+    return ApolloModeratorColor();
 }
 
 static BOOL ApolloNativeActionKindOpensModeratorMenu(uint16_t actionKind) {
@@ -413,7 +414,7 @@ static void ApolloNativeActionMenuStyleElement(UIMenuElement *element, BOOL mode
     UIColor *moderatorTintColor = ApolloNativeActionMenuModeratorColor();
     UIColor *elementTintColor = (!destructive && (moderatorStyle || opensModeratorMenu)) ? moderatorTintColor : nil;
 
-    ApolloNativeActionMenuStyleElementTitle(element, elementTintColor);
+    ApolloNativeActionMenuStyleElementTitle(element, elementTintColor ? UIColor.labelColor : nil);
     if (elementTintColor) ApolloNativeActionMenuStyleElementImage(element, elementTintColor);
 
     if ([element isKindOfClass:[UIAction class]]) {
@@ -701,6 +702,12 @@ static void ApolloNativeActionMenuPrimeChainedSourceView(id actionController) {
 }
 
 static void ApolloNativeActionMenuSelectRow(id actionController, NSInteger row) {
+    // Finish the reverse menu morph before a moderator action changes pages.
+    // The presenter association is cleared before this deferred call runs.
+    if ([objc_getAssociatedObject(actionController, &kApolloNativeActionMenuModeratorSelectionKey) boolValue] &&
+        ApolloNativeActionMenuPerformAfterDismissal(actionController, ^{
+            ApolloNativeActionMenuSelectRow(actionController, row);
+        })) return;
     if (!actionController || ![actionController respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
         ApolloLog(@"[NativeActionMenu] Cannot invoke ActionController row %ld", (long)row);
         return;
@@ -741,7 +748,7 @@ static UIAction *ApolloNativeActionMenuAction(NSString *title, NSString *subtitl
         ApolloNativeActionMenuSelectRow(actionController, row);
     }];
 
-    ApolloNativeActionMenuStyleElementTitle(action, tintColor);
+    ApolloNativeActionMenuStyleElementTitle(action, tintColor ? UIColor.labelColor : nil);
 
     if (subtitle.length > 0 && [action respondsToSelector:@selector(setSubtitle:)]) {
         ((void (*)(id, SEL, id))objc_msgSend)(action, @selector(setSubtitle:), subtitle);
@@ -893,6 +900,8 @@ static NSArray<UIMenuElement *> *ApolloNativeActionMenuBuildModeratorReportSecti
 }
 
 static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderatorStyle) {
+    objc_setAssociatedObject(actionController, &kApolloNativeActionMenuModeratorSelectionKey,
+        @(moderatorStyle), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     void *actionsBuffer = ApolloReadRawIvar(actionController, "actions");
     void *textActionsBuffer = ApolloReadRawIvar(actionController, "textActions");
     int64_t actionCount = ApolloSwiftArrayCount(actionsBuffer);
@@ -1924,6 +1933,26 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
     // The nav-bar item and bottom filter node call the same no-argument action.
     // Texture dispatches the node's target synchronously from this method, so
     // preserve the actual touched node for the nested controller hook above.
+    ApolloNativeActionMenuBeginCapture(self, self);
+    %orig;
+    ApolloNativeActionMenuEndCapture();
+}
+%end
+
+%hook _TtC6Apollo27ModeratorLogsViewController
+- (void)modLogsFilterNodeTapped {
+    id filterNode = ApolloReadObjectIvar(self, "modLogsFilterNode");
+    UIView *filterNodeView = ApolloNativeActionMenuViewForObject(filterNode);
+    BOOL fromFilterNode = sApolloNativeActionMenuCaptureDepth > 0 &&
+        sApolloNativeActionMenuSourceView == filterNodeView;
+    ApolloNativeActionMenuBeginCapture(fromFilterNode ? filterNode : ApolloReadObjectIvar(self, "filterBarButtonItem"), self);
+    %orig;
+    ApolloNativeActionMenuEndCapture();
+}
+%end
+
+%hook _TtC6Apollo17ModLogsFilterNode
+- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
     ApolloNativeActionMenuBeginCapture(self, self);
     %orig;
     ApolloNativeActionMenuEndCapture();
