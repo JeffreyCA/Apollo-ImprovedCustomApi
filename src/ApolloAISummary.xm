@@ -823,11 +823,256 @@ static NSString *ApolloAIStringSel(id obj, SEL sel) {
     return [v isKindOfClass:[NSString class]] ? v : nil;
 }
 
+static NSString *ApolloAICleanGeneratedFragment(NSString *fragment) {
+    if (![fragment isKindOfClass:[NSString class]]) return nil;
+    NSString *plain = [fragment stringByReplacingOccurrencesOfString:@"**" withString:@""];
+    plain = [plain stringByReplacingOccurrencesOfString:@"__" withString:@""];
+    plain = [plain stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return plain.length > 0 ? plain : nil;
+}
+
+static void ApolloAIAppendGeneratedValue(id value,
+                                         NSMutableArray<NSString *> *parts,
+                                         NSMutableSet<NSString *> *seen) {
+    if ([value isKindOfClass:[NSString class]]) {
+        NSString *part = ApolloAICleanGeneratedFragment(value);
+        if (part.length > 0 && ![seen containsObject:part]) {
+            [seen addObject:part];
+            [parts addObject:part];
+        }
+        return;
+    }
+    if ([value isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)value) ApolloAIAppendGeneratedValue(item, parts, seen);
+    }
+}
+
+// iOS 27 betas sometimes ignore the plain-prose instruction and return either a
+// fenced JSON answer or the model's internal tool/schema envelope (#726, #762).
+// Content-bearing JSON is still useful, so recover only explicit summary fields;
+// protocol metadata (`_tool_calls`, `response_format`, URLs, titles) is never
+// surfaced as user-facing prose.
+static NSString *ApolloAISummaryTextFromJSONObject(id object) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    // Require named root fields. An arbitrary root string array could just as
+    // easily be a list of hallucinated tool names or URLs as summary prose.
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = (NSDictionary *)object;
+        id generalSummary = dictionary[@"summary"];
+        if (generalSummary) {
+            ApolloAIAppendGeneratedValue(generalSummary, parts, seen);
+        } else {
+            // A combined post/link response commonly has one field for each
+            // source rather than a single top-level summary.
+            NSArray<NSString *> *summaryKeys = @[
+                @"reddit_post_summary", @"post_summary", @"article_summary",
+                @"link_summary", @"discussion_summary"
+            ];
+            for (NSString *key in summaryKeys) {
+                ApolloAIAppendGeneratedValue(dictionary[key], parts, seen);
+            }
+        }
+        if (parts.count == 0) {
+            // Defensive compatibility with other structured-but-contentful
+            // shapes. These are deliberately root-only so an internal response
+            // schema that merely names such a field is not mistaken for output.
+            NSArray<NSString *> *fallbackKeys = @[
+                @"key_points", @"consensus", @"useful_details",
+                @"notable_disagreement", @"disagreement", @"takeaway", @"conclusion"
+            ];
+            for (NSString *key in fallbackKeys) {
+                ApolloAIAppendGeneratedValue(dictionary[key], parts, seen);
+            }
+        }
+    }
+    return parts.count > 0 ? [parts componentsJoinedByString:@" "] : nil;
+}
+
+static NSString *ApolloAIDecodeJSONStringFragment(NSString *encoded) {
+    if (encoded.length == 0) return nil;
+    NSString *literal = [NSString stringWithFormat:@"\"%@\"", encoded];
+    NSData *data = [literal dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return nil;
+    id value = [NSJSONSerialization JSONObjectWithData:data
+                                               options:NSJSONReadingFragmentsAllowed
+                                                 error:nil];
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+// Token limits can cut a JSON response off before its closing brace. Salvage
+// completed known fields from that prefix instead of showing raw JSON or losing
+// an otherwise good summary. This is intentionally not a general JSON repairer.
+static NSString *ApolloAISummaryTextFromTruncatedJSON(NSString *text) {
+    NSString *lower = text.lowercaseString;
+    if ([lower containsString:@"\"_tool_calls\""] ||
+        [lower containsString:@"\"response_format\""]) {
+        // A cut-off internal envelope can contain field descriptions that look
+        // like summary values. Without a complete object there is no reliable
+        // boundary between schema metadata and generated content, so discard it.
+        return nil;
+    }
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    // Discussion summaries on iOS 27 commonly use `"summary": ["…", "…"]`.
+    // Recover that primary content before supplemental scalar fields so the
+    // resulting prose keeps the same order as a successfully parsed object.
+    NSRegularExpression *arrayStartRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"\\\"summary\\\"\\s*:\\s*\\["
+                             options:0
+                               error:nil];
+    NSTextCheckingResult *arrayStart = [arrayStartRegex firstMatchInString:text
+                                                                   options:0
+                                                                     range:NSMakeRange(0, text.length)];
+    if (arrayStart) {
+        NSUInteger start = NSMaxRange(arrayStart.range);
+        NSRange closing = [text rangeOfString:@"]" options:0 range:NSMakeRange(start, text.length - start)];
+        NSUInteger end = closing.location == NSNotFound ? text.length : closing.location;
+        NSString *arrayBody = [text substringWithRange:NSMakeRange(start, end - start)];
+        NSRegularExpression *stringRegex = [NSRegularExpression
+            regularExpressionWithPattern:@"\\\"((?:\\\\.|[^\\\"\\\\])*)\\\""
+                                 options:0
+                                   error:nil];
+        [stringRegex enumerateMatchesInString:arrayBody
+                                      options:0
+                                        range:NSMakeRange(0, arrayBody.length)
+                                   usingBlock:^(NSTextCheckingResult *match, __unused NSMatchingFlags flags, __unused BOOL *stop) {
+            if (match.numberOfRanges < 2) return;
+            NSString *decoded = ApolloAIDecodeJSONStringFragment([arrayBody substringWithRange:[match rangeAtIndex:1]]);
+            ApolloAIAppendGeneratedValue(decoded, parts, seen);
+        }];
+    }
+
+    // Complete `"key": "value"` pairs — the cut landed after this field.
+    static NSString *const kSummaryKeys =
+        @"reddit_post_summary|post_summary|article_summary|link_summary|discussion_summary"
+        @"|summary|consensus|takeaway|conclusion|notable_disagreement|disagreement";
+    NSError *regexError = nil;
+    NSRegularExpression *scalarRegex = [NSRegularExpression
+        regularExpressionWithPattern:[NSString stringWithFormat:
+            @"\\\"(?:%@)\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"", kSummaryKeys]
+                             options:0
+                               error:&regexError];
+    if (!regexError) {
+        [scalarRegex enumerateMatchesInString:text
+                                      options:0
+                                        range:NSMakeRange(0, text.length)
+                                   usingBlock:^(NSTextCheckingResult *match, __unused NSMatchingFlags flags, __unused BOOL *stop) {
+            if (match.numberOfRanges < 2) return;
+            NSString *decoded = ApolloAIDecodeJSONStringFragment([text substringWithRange:[match rangeAtIndex:1]]);
+            ApolloAIAppendGeneratedValue(decoded, parts, seen);
+        }];
+    }
+    if (parts.count > 0) return [parts componentsJoinedByString:@" "];
+
+    // Nothing complete. The likeliest reason is that the cut landed INSIDE the
+    // summary value itself: Apollo's maximumResponseTokens are tight (110 for a
+    // Balanced comment summary) and a JSON envelope spends a chunk of that
+    // budget on syntax before the prose even starts, so generation stops
+    // mid-sentence with no closing quote. Recover the unterminated tail — a
+    // summary cut mid-sentence is what a token-capped PLAIN response gives the
+    // user today, so it is the consistent outcome, and it beats the "The model
+    // returned an empty summary." error the whole response would otherwise
+    // become.
+    NSRegularExpression *tailRegex = [NSRegularExpression
+        regularExpressionWithPattern:[NSString stringWithFormat:
+            // The trailing \\? lets the cut land on a lone backslash — half an
+            // escape sequence — without failing the whole match.
+            @"\\\"(?:%@)\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\\?$", kSummaryKeys]
+                             options:0
+                               error:NULL];
+    NSTextCheckingResult *tail = [tailRegex firstMatchInString:text options:0
+                                                         range:NSMakeRange(0, text.length)];
+    if (tail && tail.numberOfRanges >= 2) {
+        NSString *fragment = [text substringWithRange:[tail rangeAtIndex:1]];
+        // A trailing lone backslash is half an escape sequence; JSON-decoding
+        // it fails, so drop it before decoding.
+        while ([fragment hasSuffix:@"\\"]) fragment = [fragment substringToIndex:fragment.length - 1];
+        NSString *decoded = ApolloAIDecodeJSONStringFragment(fragment);
+        ApolloAIAppendGeneratedValue(decoded, parts, seen);
+    }
+    return parts.count > 0 ? [parts componentsJoinedByString:@" "] : nil;
+}
+
+// How much of a response the structure test below reads. An envelope announces
+// itself in its first field, and this runs on every streamed snapshot as well as
+// on the final text, so the scan is capped rather than growing with the response.
+static const NSUInteger kApolloAIStructureScanLimit = 512;
+
+// Does this response look like the model's structured/tool protocol rather than
+// a summary?
+//
+// A leading bracket is deliberately NOT sufficient. Reddit prose opens with one
+// constantly — "[Serious] the thread mostly argues…", "[OC] …" — and treating
+// that as protocol output is expensive to get wrong: the Swift side burns a
+// whole retry generation on it, then the normalizer below finds no known JSON
+// fields and returns nil, so a perfectly good summary reaches the user as "The
+// model returned an empty summary." A bracket therefore only counts when an
+// actual JSON key (`"name":`) sits beside it, which no summary sentence writes.
+//
+// Truncated envelopes still have to be caught here — a response cut off
+// mid-object never parses as JSON — which is why this is a shape test and not
+// simply NSJSONSerialization.
+static BOOL ApolloAIGeneratedResponseLooksStructured(NSString *summary) {
+    NSString *head = summary.length > kApolloAIStructureScanLimit
+        ? [summary substringToIndex:kApolloAIStructureScanLimit] : summary;
+    head = [head stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (head.length == 0) return NO;
+    NSString *lower = head.lowercaseString;
+    // Markers no natural-language summary produces.
+    if ([lower hasPrefix:@"```json"] || [lower hasPrefix:@"toolcall:"] ||
+        [lower hasPrefix:@"tool.call:"] || [lower containsString:@"\"_tool_calls\""] ||
+        [lower containsString:@"\"response_format\""]) {
+        return YES;
+    }
+    if (![head hasPrefix:@"{"] && ![head hasPrefix:@"["]) return NO;
+
+    static NSRegularExpression *keyRegex;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keyRegex = [NSRegularExpression regularExpressionWithPattern:@"\"[A-Za-z_][A-Za-z0-9_ ]*\"\\s*:"
+                                                             options:0 error:NULL];
+    });
+    return [keyRegex firstMatchInString:head options:0 range:NSMakeRange(0, head.length)] != nil;
+}
+
 static NSString *ApolloAINormalizeGeneratedSummary(NSString *summary) {
     if (![summary isKindOfClass:[NSString class]]) return nil;
-    NSString *plain = [summary stringByReplacingOccurrencesOfString:@"**" withString:@""];
-    plain = [plain stringByReplacingOccurrencesOfString:@"__" withString:@""];
-    return [plain stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!ApolloAIGeneratedResponseLooksStructured(summary)) {
+        return ApolloAICleanGeneratedFragment(summary);
+    }
+
+    // Ignore any leading toolcall markers / Markdown fence and isolate the JSON
+    // payload. Use the last closing delimiter so nested dictionaries survive.
+    NSRange objectStart = [summary rangeOfString:@"{"];
+    NSRange arrayStart = [summary rangeOfString:@"["];
+    NSUInteger start = NSNotFound;
+    unichar closingCharacter = 0;
+    if (objectStart.location != NSNotFound &&
+        (arrayStart.location == NSNotFound || objectStart.location < arrayStart.location)) {
+        start = objectStart.location;
+        closingCharacter = '}';
+    } else if (arrayStart.location != NSNotFound) {
+        start = arrayStart.location;
+        closingCharacter = ']';
+    }
+
+    if (start != NSNotFound) {
+        NSString *closing = [NSString stringWithCharacters:&closingCharacter length:1];
+        NSRange endRange = [summary rangeOfString:closing options:NSBackwardsSearch];
+        if (endRange.location != NSNotFound && endRange.location >= start) {
+            NSString *json = [summary substringWithRange:NSMakeRange(start, endRange.location - start + 1)];
+            NSData *data = [json dataUsingEncoding:NSUTF8StringEncoding];
+            id object = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+            NSString *decoded = ApolloAISummaryTextFromJSONObject(object);
+            if (decoded.length > 0) return decoded;
+        }
+    }
+
+    // A partial stream or token-limited final response may not be valid JSON yet.
+    // Return nil when there are no completed summary fields so raw protocol
+    // syntax never flashes in the card while the model is still streaming.
+    return ApolloAISummaryTextFromTruncatedJSON(summary);
 }
 
 // Remove input that costs context without helping a short summary. Keep this
@@ -917,11 +1162,15 @@ static NSString *ApolloAIFullNameForController(UIViewController *vc) {
     return fullName;
 }
 
-static void ApolloAICaptureCommentForController(id comment, UIViewController *vc) {
-    if (!ApolloAICommentIsEligible(comment) || !vc) return;
+// Returns YES only when this is a newly captured comment. Texture can send the
+// same node through didLoad / preload / model-update callbacks repeatedly while
+// UITableView remeasures rows; callers must not schedule another full-tree AI
+// pass for a duplicate.
+static BOOL ApolloAICaptureCommentForController(id comment, UIViewController *vc) {
+    if (!ApolloAICommentIsEligible(comment) || !vc) return NO;
     NSString *fullName = ApolloAIFullNameForController(vc);
     NSString *key = ApolloAICommentDedupKey(comment);
-    if (fullName.length == 0 || key.length == 0) return;
+    if (fullName.length == 0 || key.length == 0) return NO;
 
     NSMutableArray *comments = sCapturedComments[fullName];
     if (!comments) {
@@ -933,7 +1182,7 @@ static void ApolloAICaptureCommentForController(id comment, UIViewController *vc
         keys = [NSMutableSet set];
         sCapturedCommentKeys[fullName] = keys;
     }
-    if ([keys containsObject:key]) return;
+    if ([keys containsObject:key]) return NO;
     [keys addObject:key];
     [comments addObject:comment];
     // Do not show a discussion card until there is enough material to synthesize.
@@ -945,6 +1194,7 @@ static void ApolloAICaptureCommentForController(id comment, UIViewController *vc
         ApolloAIShowLoadingIfIdle(fullName, NO);
     }
     ApolloLog(@"[AISummary] captured comment %lu for %@", (unsigned long)comments.count, fullName);
+    return YES;
 }
 
 static void ApolloAIAppendCommentText(id comment,
@@ -2385,6 +2635,24 @@ static void ApolloAIScheduleCommentGeneration(UIViewController *vc) {
     if (!vc || !sEnableAISummaries) return;
     NSString *fullName = ApolloAIFullNameForController(vc);
     if (fullName.length == 0 || [sCommentGenerationScheduled containsObject:fullName]) return;
+
+    // In Tap-to-Summarize mode the first eligible pass installs an idle card and
+    // intentionally starts no request. Once that card exists, further comment
+    // preload callbacks have nothing to do until the user taps it. Previously
+    // every callback re-gathered/sorted the full comment model on the main queue
+    // and then forced two unchanged table remeasures (#863).
+    if (sEnableTapToSummarize) {
+        NSString *tapKey = [@"comment|" stringByAppendingString:fullName];
+        if (![sTapRequested containsObject:tapKey]) {
+            for (id headerNode in sHeaderNodes.allObjects) {
+                NSString *headerFullName = objc_getAssociatedObject(headerNode, &kApolloAIHeaderFullNameKey);
+                if ([headerFullName isEqualToString:fullName] &&
+                    ApolloAIGetBoxState(headerNode, NO) == ApolloAIBoxStateTapToSummarize) {
+                    return;
+                }
+            }
+        }
+    }
     [sCommentGenerationScheduled addObject:fullName];
 
     __weak UIViewController *weakVC = vc;
@@ -2949,8 +3217,9 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                ![sPostInFlight containsObject:fullName] && ![sPostFailed containsObject:fullName]) {
         // Tap-to-Summarize is on and the user hasn't tapped this card yet: show the
         // idle "Tap to summarize" prompt instead of generating automatically.
-        ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateTapToSummarize, nil);
-        ApolloAIForceHeaderRemeasure(fullName);
+        if (ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateTapToSummarize, nil)) {
+            ApolloAIForceHeaderRemeasure(fullName);
+        }
     } else if (![sPostInFlight containsObject:fullName] && ![sPostFailed containsObject:fullName]) {
         // Do NOT consume the tap request here — see the matching note in the comment
         // branch below. A concurrency-deferred retry must still re-drive generation
@@ -3094,8 +3363,9 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
             if (sEnableTapToSummarize && ![sTapRequested containsObject:commentTapKey]) {
             // Tap-to-Summarize is on and the user hasn't tapped: show the idle
             // "Tap to summarize" prompt instead of generating automatically.
-            ApolloAISetBoxStateOnMatchingHeaders(fullName, NO, ApolloAIBoxStateTapToSummarize, nil);
-            ApolloAIForceHeaderRemeasure(fullName);
+            if (ApolloAISetBoxStateOnMatchingHeaders(fullName, NO, ApolloAIBoxStateTapToSummarize, nil)) {
+                ApolloAIForceHeaderRemeasure(fullName);
+            }
             } else {
             // Do NOT consume the tap request here. A transient-concurrency (code 9)
             // deferral clears sCommentInFlight and re-enters this function ~0.75s later;
@@ -3322,8 +3592,9 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
             UIViewController *vc = sVisibleCommentsController;
             id comment = MSHookIvar<id>((id)result, "comment");
             if (!vc || !ApolloAICommentIsEligible(comment)) return;
-            ApolloAICaptureCommentForController(comment, vc);
-            ApolloAIScheduleCommentGeneration(vc);
+            if (ApolloAICaptureCommentForController(comment, vc)) {
+                ApolloAIScheduleCommentGeneration(vc);
+            }
         });
     }
     return result;
@@ -3344,8 +3615,9 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
         Ivar commentIvar = class_getInstanceVariable(object_getClass(sectionController), "comment");
         id comment = commentIvar ? object_getIvar(sectionController, commentIvar) : nil;
         if (!vc || !ApolloAICommentIsEligible(comment)) return;
-        ApolloAICaptureCommentForController(comment, vc);
-        ApolloAIScheduleCommentGeneration(vc);
+        if (ApolloAICaptureCommentForController(comment, vc)) {
+            ApolloAIScheduleCommentGeneration(vc);
+        }
     });
 }
 
@@ -3365,8 +3637,9 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
         UIViewController *vc = sVisibleCommentsController;
         id comment = ApolloAICommentFromCellNode((id)cellNode);
         if (!vc || !comment) return;
-        ApolloAICaptureCommentForController(comment, vc);
-        ApolloAIScheduleCommentGeneration(vc);
+        if (ApolloAICaptureCommentForController(comment, vc)) {
+            ApolloAIScheduleCommentGeneration(vc);
+        }
     });
 }
 
@@ -3380,8 +3653,9 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
         UIViewController *vc = sVisibleCommentsController;
         id comment = ApolloAICommentFromCellNode((id)cellNode);
         if (!vc || !comment) return;
-        ApolloAICaptureCommentForController(comment, vc);
-        ApolloAIScheduleCommentGeneration(vc);
+        if (ApolloAICaptureCommentForController(comment, vc)) {
+            ApolloAIScheduleCommentGeneration(vc);
+        }
     });
 }
 
