@@ -41,3 +41,15 @@ BOOL ApolloDevvitFeedOwnsInteractivePosts(void);
 // ApolloDevvitFeedOwnsInteractivePosts() && `link` (an RDKLink) is one of them.
 // Safe to call from Texture's background layout queue.
 BOOL ApolloDevvitFeedOwnsLink(id link);
+
+// YES when the feature is on and `link` (an RDKLink) is an interactive post —
+// i.e. wherever Apollo would render the post's body, the live widget stands in
+// for it (the comments header always; feed cards when the sub-toggle is on).
+// Consumers that derive anything from the post BODY — Apollo AI's post/link
+// summaries — must treat such a post as having no body at all: the selftext
+// is Reddit's old-Reddit fallback plus whatever data blob the app appended,
+// none of which the user can see once the widget replaces it, so "summarizing"
+// it only ever produced an error card (or a summary of invisible text).
+// Surface-agnostic and independent of the feed sub-toggle and of a widget that
+// gave up: an interactive post is never body-summarizable. Safe off-main.
+BOOL ApolloDevvitLinkShowsWidget(id link);

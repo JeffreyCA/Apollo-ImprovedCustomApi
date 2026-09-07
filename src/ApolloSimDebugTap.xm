@@ -51,7 +51,24 @@ void ApolloSubredditIndexDebugDescribeTables(void); // ApolloSubredditIndexPolis
 - (UIEvent *)_touchesEvent;
 @end
 
-static NSString *const kApolloSimTapFile = @"/tmp/apollofix-tap.txt";
+// The command file and the Darwin notification that announces it are
+// machine-global, and several simulators driven by parallel sessions are the
+// norm on a dev box — a tap meant for one app landed in every listening app.
+// Each launch can therefore name its own pair via the environment
+// (SIMCTL_CHILD_APOLLOFIX_TAP_FILE / SIMCTL_CHILD_APOLLOFIX_TAP_NOTIFY on the
+// simctl launch line); the historical defaults remain for single-session use.
+static NSString *const kApolloSimDefaultTapFile = @"/tmp/apollofix-tap.txt";
+static NSString *const kApolloSimDefaultTapNotify = @"apollofix.debugtap";
+
+static NSString *ApolloSimTapFile(void) {
+    NSString *env = NSProcessInfo.processInfo.environment[@"APOLLOFIX_TAP_FILE"];
+    return env.length ? env : kApolloSimDefaultTapFile;
+}
+
+static NSString *ApolloSimTapNotify(void) {
+    NSString *env = NSProcessInfo.processInfo.environment[@"APOLLOFIX_TAP_NOTIFY"];
+    return env.length ? env : kApolloSimDefaultTapNotify;
+}
 
 static void ApolloSimDebugSendTouch(UITouch *touch) {
     UIApplication *app = UIApplication.sharedApplication;
@@ -635,7 +652,7 @@ static void ApolloSimInstallLowPowerModeOverride(void) {
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *contents = [NSString stringWithContentsOfFile:kApolloSimTapFile
+        NSString *contents = [NSString stringWithContentsOfFile:ApolloSimTapFile()
                                                        encoding:NSUTF8StringEncoding error:nil];
         if ([contents hasPrefix:@"insetbottom "]) {
             ApolloSimDebugForceBottomInset([[contents substringFromIndex:12] doubleValue]);
@@ -714,12 +731,33 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             ApolloSimDebugNavChurn(mode);
             return;
         }
+        // "openurl <url>" command: route a reddit / apollo:// URL through
+        // Apollo's own scheme handling from INSIDE the process. `simctl openurl`
+        // goes through SpringBoard, which on iOS 26 fronts an "Open in Apollo?"
+        // confirmation that no in-process bridge can tap — this skips it.
+        if ([contents hasPrefix:@"openurl "]) {
+            NSString *raw = [[contents substringFromIndex:8]
+                             stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSURL *url = [NSURL URLWithString:raw];
+            NSURL *apolloURL = [url.scheme.lowercaseString isEqualToString:@"apollo"]
+                ? url : ApolloURLByConvertingResolvedURLToApolloScheme(url);
+            BOOL routed = apolloURL && ApolloRouteResolvedURLViaApolloScheme(apolloURL);
+            ApolloLog(@"[SimDebugTap] openurl %@ -> %@", raw, routed ? @"routed" : @"NOT routed");
+            return;
+        }
         // "devvitjs <js>" command: evaluate JS in the live interactive-post
         // widget's web view and log the result (DOM inspection without a web
         // inspector). See ApolloDevvitDebugEvaluateJS in ApolloDevvitPosts.xm.
         if ([contents hasPrefix:@"devvitjs "]) {
             extern void ApolloDevvitDebugEvaluateJS(NSString *js);
             ApolloDevvitDebugEvaluateJS([contents substringFromIndex:9]);
+            return;
+        }
+        // "devvitlayout": dump widget-vs-host geometry, force a host layout
+        // pass, dump again.
+        if ([contents hasPrefix:@"devvitlayout"]) {
+            extern void ApolloDevvitDebugLayout(void);
+            ApolloDevvitDebugLayout();
             return;
         }
         // "devvitsweep": run the interactive-post stale-width sweep now, with
@@ -862,9 +900,9 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
     %init(ApolloSimNavChurn);
     ApolloSimInstallLowPowerModeOverride();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
-        ApolloSimDebugTapNotification, CFSTR("apollofix.debugtap"), NULL,
+        ApolloSimDebugTapNotification, (__bridge CFStringRef)ApolloSimTapNotify(), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
-    ApolloLog(@"[SimDebugTap] listening for apollofix.debugtap");
+    ApolloLog(@"[SimDebugTap] listening for %@ (commands from %@)", ApolloSimTapNotify(), ApolloSimTapFile());
     ApolloLog(@"[CommentInsights][parser] self-tests %@",
               ApolloCommentVoteInsightsRunParserSelfTests() ? @"passed" : @"FAILED");
     NSString *charsetFailure = nil;
