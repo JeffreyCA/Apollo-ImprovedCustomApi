@@ -2609,7 +2609,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             NSString *currentURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL] ?: @"";
             UITableViewCell *cell = [weakSelf stackedTextFieldCellWithIdentifier:@"Cell_NotifBackend_URL"
-                                                                           label:@"Self-hosted Backend URL"
+                                                                           label:@"Self-Hosted Backend URL"
                                                                      placeholder:@"https://apollo.example.com"
                                                                             text:currentURL
                                                                              tag:TagNotificationBackendURL];
@@ -2635,7 +2635,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                     cell.textLabel.textAlignment = NSTextAlignmentCenter;
                     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
                 }
-                cell.textLabel.text = @"Setup Instructions";
+                cell.textLabel.text = @"Backend Setup Instructions";
                 [weakSelf apollo_applyAccentActionTextColorToCell:cell];
                 return cell;
             }
@@ -2762,19 +2762,18 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         }
                                   onSelect:^{ [weakSelf testBarkNotification]; }];
     testBark.visible = ^BOOL {
-        NSString *barkURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyBarkPushURL];
-        return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBarkNotificationsEnabled] &&
-            barkURL.length > 0 &&
-            [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"bark://"]];
-    };
+    NSString *backendURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL];
+    return [self isNotificationBackendURLValid:backendURL] &&
+        [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBarkNotificationsEnabled];
+};
 
     // Custom rather than a button row: the label is centered, which the shared
     // button-row cell doesn't do.
     
-    return [ApolloSettingsSection sectionWithTitle:@"Notification Backend"
+    return [ApolloSettingsSection sectionWithTitle:@"Setup"
                                             footer:nil
-                                              rows:@[ backendURL, registrationToken, setupInstructions, installBark, barkSwitch, barkURL,
-                                                      testConnection, testBark ]];
+                                              rows:@[ backendURL, registrationToken, barkSwitch, barkURL,
+                                                      setupInstructions, installBark, testConnection, testBark ]];
 }
 
 - (ApolloSettingsSection *)buildPrivacySection {
@@ -3327,25 +3326,41 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         attributes:plainAttrs];
 
     if (ApolloPushNotificationsSupported()) {
-        [text appendAttributedString:[[NSAttributedString alloc]
-            initWithString:@"Bark Delivery is optional. Enable it if you'd prefer to receive notifications through the free "
-            attributes:plainAttrs]];
+        if ([self isNotificationBackendURLValid:[[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL]]) {
+            [text appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"Bark Delivery is optional. Enable Bark Delivery if you'd prefer to receive notifications through the free "
+                attributes:plainAttrs]];
+        } else {
+            [text appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"Bark Delivery is optional. Once a valid backend is configured, you can enable it to receive notifications through the free "
+                attributes:plainAttrs]];
+        }
     } else {
         [text appendAttributedString:[[NSAttributedString alloc]
-            initWithString:@"This build can't receive native push notifications because it isn't signed with a paid Apple Developer account. Enable Bark Delivery to receive notifications through the free "
+            initWithString:@"This build can't receive native push notifications because it isn't signed with a paid Apple Developer account. "
             attributes:plainAttrs]];
+
+        if ([self isNotificationBackendURLValid:[[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL]]) {
+            [text appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"Enable Bark Delivery to receive notifications through the free "
+                attributes:plainAttrs]];
+        } else {
+            [text appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"Once a valid backend is configured, you can enable Bark Delivery to receive notifications through the free "
+                attributes:plainAttrs]];
+        }
     }
 
-    [text appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@"Bark app"
-        attributes:@{
-            NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],
-            NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]
-        }]];
+[text appendAttributedString:[[NSAttributedString alloc]
+    initWithString:@"Bark app"
+    attributes:@{
+        NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],
+        NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]
+    }]];
 
-    [text appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@".\n\n"
-        attributes:plainAttrs]];
+[text appendAttributedString:[[NSAttributedString alloc]
+    initWithString:@".\n\n"
+    attributes:plainAttrs]];
 
     NSMutableDictionary *boldAttrs = [plainAttrs mutableCopy];
     boldAttrs[NSFontAttributeName] = [UIFont boldSystemFontOfSize:
