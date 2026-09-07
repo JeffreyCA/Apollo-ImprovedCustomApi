@@ -50,6 +50,11 @@ UIViewController *ApolloCreateModernChatViewController(void);
 // Reddit Chat path such as /chat/room/<opaque-room-id>; invalid paths safely
 // fall back to the normal Chat entry screen.
 UIViewController *ApolloCreateModernChatViewControllerForPath(NSString * _Nullable destinationPath);
+// Opens a Chat destination where Chat lives: the Inbox tab, reset to Boxes
+// with the Chat screen pushed on top (the same place a chat notification
+// lands). NO when the tab bar or its Inbox stack cannot be reached, so the
+// caller can push on its own stack instead.
+BOOL ApolloModernChatOpenInInbox(NSString *destinationPath);
 // Inbox-only variant. It embeds the authenticated web client below Apollo's
 // Notifications / Chat and Messages / Requests / Threads controls instead of
 // pushing a second full-screen Chat controller.

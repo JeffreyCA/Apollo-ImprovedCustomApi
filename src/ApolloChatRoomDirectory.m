@@ -456,7 +456,9 @@ static void ApolloChatRoomDirectoryLookupFullname(NSString *username, void (^com
         completion(known);
         return;
     }
-    NSString *cookie = ApolloActiveWebSession().cookieHeader;
+    // The poll-session accessor: an API-key account keeps its web session as an
+    // auxiliary one, which the primary-session accessor deliberately hides.
+    NSString *cookie = ApolloWebSessionPollFor(ApolloActiveWebSessionUsername()).cookieHeader;
     NSString *escaped = [username stringByAddingPercentEncodingWithAllowedCharacters:
         [NSCharacterSet URLPathAllowedCharacterSet]];
     if (cookie.length == 0 || escaped.length == 0) {
@@ -489,6 +491,18 @@ static void ApolloChatRoomDirectoryLookupFullname(NSString *username, void (^com
         ApolloLog(@"[ChatRooms] Partner id lookup %@ (HTTP %ld)", fullname ? @"succeeded" : @"failed", (long)statusCode);
         dispatch_async(dispatch_get_main_queue(), ^{ completion(fullname); });
     }] resume];
+}
+
+void ApolloChatRoomDirectoryFullnameForUser(NSString *username, void (^completion)(NSString *fullname)) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ ApolloChatRoomDirectoryFullnameForUser(username, completion); });
+        return;
+    }
+    if (username.length == 0) {
+        completion(nil);
+        return;
+    }
+    ApolloChatRoomDirectoryLookupFullname(username, completion);
 }
 
 #pragma mark - Resolve

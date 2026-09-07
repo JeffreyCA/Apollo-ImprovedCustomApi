@@ -18,6 +18,8 @@
 #import "ApolloProfileSocialLinks.h"
 #import "ApolloBadgeBookStrip.h"
 #import "ApolloAccountCredentials.h"
+#import "ApolloChatRoomDirectory.h"
+#import "ApolloDirectChatWeb.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloImmersiveHeaderBackground.h"
 #import "ApolloIdentityHeaderLayout.h"
@@ -218,6 +220,7 @@ static void ApolloProfileUpdateAmbientScroll(id viewControllerObject, UIScrollVi
 static void ApolloProfileSyncNavTitleFade(UIViewController *viewController);
 static void ApolloProfileSetUserFollowed(NSString *username, BOOL follow, ApolloProfileHeaderView *header);
 static void ApolloProfileOpenMessageComposer(NSString *username);
+static void ApolloProfileOpenModernChat(NSString *username, UIViewController *host, UIButton *button);
 static void ApolloProfileScheduleInstallOrUpdateHeader(id viewControllerObject);
 
 // Height of the glass stat-card row, the inter-card gap, and the gap above the row.
@@ -1185,6 +1188,14 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 - (void)apollo_messageTapped {
     NSString *username = ApolloAvatarNormalizedUsername(self.username);
     if (username.length == 0) return;
+    // Reddit folded private messages into Chat: with modern Chat on (and a
+    // web session to run it), the envelope means the conversation with this
+    // user on the Chat side, like "start chat" on a profile on the site. Off,
+    // or without a session, it stays the legacy subject/body composer.
+    if (ApolloModernChatShouldOpen() && ApolloModernChatIsAvailable()) {
+        ApolloProfileOpenModernChat(username, self.hostViewController, self.messageButton);
+        return;
+    }
     ApolloProfileOpenMessageComposer(username);
 }
 
@@ -3789,6 +3800,46 @@ void ApolloProfileOpenRedditProfileEditor(void) {
 // and presents the native composer with the recipient pre-filled. Going through
 // -openURL: (not calling application:openURL: directly) is what reaches the scene
 // router; the direct AppDelegate call hit only a partial handler and silently no-oped.
+// The conversation with `username` on the Chat side. An existing direct room
+// (or a pending request from them, which lives under Requests) is found
+// through the room directory; otherwise Reddit's own chat-with-user route for
+// the account id, which shows the new-chat pane. It opens where Chat lives —
+// the Inbox tab, like a chat notification — and goes straight to the
+// conversation (the list loads under the cover, so its back swipe returns to
+// the list and then to Boxes). Anything that cannot be resolved falls back to
+// the legacy composer.
+static void ApolloProfileOpenModernChat(NSString *username, UIViewController *host, UIButton *button) {
+    button.enabled = NO;   // one open per tap while the directory answers
+    __weak UIViewController *weakHost = host;
+    __weak UIButton *weakButton = button;
+    void (^open)(NSString *) = ^(NSString *path) {
+        weakButton.enabled = YES;
+        ApolloLog(@"[UserAvatars] Message: opening Reddit Chat for u/%@ (%@)", username,
+                  [path hasPrefix:@"/chat/room/"] ? @"existing room"
+                      : ([path isEqualToString:ApolloChatRequestsPath] ? @"pending request" : @"new chat"));
+        if (ApolloModernChatOpenInInbox(path)) return;
+        // No reachable Inbox stack: the profile's own stack is the fallback.
+        UINavigationController *navigationController = weakHost.navigationController;
+        if (!navigationController) return;
+        [navigationController pushViewController:ApolloCreateModernChatViewControllerForPath(path) animated:YES];
+    };
+    ApolloChatRoomDirectoryResolve(@"[direct chat room]", username, 0, ^(NSString *chatPath) {
+        if (chatPath.length > 0) {
+            open(chatPath);
+            return;
+        }
+        ApolloChatRoomDirectoryFullnameForUser(username, ^(NSString *fullname) {
+            if (fullname.length > 0) {
+                open([@"/chat/user/" stringByAppendingString:fullname]);
+                return;
+            }
+            weakButton.enabled = YES;
+            ApolloLog(@"[UserAvatars] Message: no account id for u/%@; opening the message composer instead", username);
+            ApolloProfileOpenMessageComposer(username);
+        });
+    });
+}
+
 static void ApolloProfileOpenMessageComposer(NSString *username) {
     NSString *recipient = ApolloAvatarNormalizedUsername(username);
     if (recipient.length == 0) return;

@@ -49,6 +49,12 @@ void ApolloChatRoomDirectoryNoteUserFullname(NSString * _Nullable username, NSSt
 // on the main queue — with nil when no room could be matched, the directory
 // could not be fetched, or the lookup took longer than a tap should wait — so
 // the caller can fall back to Apollo's legacy thread.
+// The account id ("t2_…") for a username: the cache of ids seen in parsed
+// messages first, else one profile lookup with the active web session.
+// Completion runs on the main queue, with nil when unknown. Safe from any
+// thread.
+void ApolloChatRoomDirectoryFullnameForUser(NSString *username,
+                                            void (^completion)(NSString * _Nullable fullname));
 extern NSString * const ApolloChatRequestsPath;
 void ApolloChatRoomDirectoryResolve(NSString * _Nullable subject,
                                     NSString * _Nullable partner,
