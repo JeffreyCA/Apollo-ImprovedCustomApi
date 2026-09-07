@@ -192,6 +192,51 @@
 				</dict>
 			</array>
 		</dict>
+		<dict>
+			<key>INEnumDisplayName</key>
+			<string>Feed Source</string>
+			<key>INEnumGeneratesHeader</key>
+			<true/>
+			<key>INEnumName</key>
+			<string>RebornFeedSource</string>
+			<key>INEnumType</key>
+			<string>Regular</string>
+			<key>INEnumValues</key>
+			<array>
+				<dict>
+					<key>INEnumValueDisplayName</key>
+					<string>Home</string>
+					<key>INEnumValueIndex</key>
+					<integer>1</integer>
+					<key>INEnumValueName</key>
+					<string>home</string>
+				</dict>
+				<dict>
+					<key>INEnumValueDisplayName</key>
+					<string>Popular</string>
+					<key>INEnumValueIndex</key>
+					<integer>2</integer>
+					<key>INEnumValueName</key>
+					<string>popular</string>
+				</dict>
+				<dict>
+					<key>INEnumValueDisplayName</key>
+					<string>All</string>
+					<key>INEnumValueIndex</key>
+					<integer>3</integer>
+					<key>INEnumValueName</key>
+					<string>all</string>
+				</dict>
+				<dict>
+					<key>INEnumValueDisplayName</key>
+					<string>Subreddit or Multireddit</string>
+					<key>INEnumValueIndex</key>
+					<integer>4</integer>
+					<key>INEnumValueName</key>
+					<string>custom</string>
+				</dict>
+			</array>
+		</dict>
 	</array>
 	<key>INIntentDefinitionModelVersion</key>
 	<string>1.2</string>
@@ -333,7 +378,7 @@
 			<key>INIntentConfigurable</key>
 			<true/>
 			<key>INIntentDescription</key>
-			<string>Posts from a subreddit you choose.</string>
+			<string>Posts from a subreddit, multireddit, or feed you choose.</string>
 			<key>INIntentEligibleForWidgets</key>
 			<true/>
 			<key>INIntentIneligibleForSuggestions</key>
@@ -366,9 +411,34 @@
 					<key>INIntentParameterConfigurable</key>
 					<true/>
 					<key>INIntentParameterDisplayName</key>
-					<string>Subreddit</string>
+					<string>Source</string>
 					<key>INIntentParameterDisplayPriority</key>
 					<integer>2</integer>
+					<key>INIntentParameterEnumType</key>
+					<string>RebornFeedSource</string>
+					<key>INIntentParameterMetadata</key>
+					<dict>
+						<key>INIntentParameterMetadataDefaultValue</key>
+						<integer>4</integer>
+					</dict>
+					<key>INIntentParameterName</key>
+					<string>feedSource</string>
+					<key>INIntentParameterPromptDialogs</key>
+					<array/>
+					<key>INIntentParameterSupportsResolution</key>
+					<false/>
+					<key>INIntentParameterTag</key>
+					<integer>5</integer>
+					<key>INIntentParameterType</key>
+					<string>Integer</string>
+				</dict>
+				<dict>
+					<key>INIntentParameterConfigurable</key>
+					<true/>
+					<key>INIntentParameterDisplayName</key>
+					<string>Subreddit or Multireddit</string>
+					<key>INIntentParameterDisplayPriority</key>
+					<integer>3</integer>
 					<key>INIntentParameterName</key>
 					<string>subreddit</string>
 					<key>INIntentParameterPromptDialogs</key>
@@ -386,7 +456,7 @@
 					<key>INIntentParameterDisplayName</key>
 					<string>Sort</string>
 					<key>INIntentParameterDisplayPriority</key>
-					<integer>3</integer>
+					<integer>4</integer>
 					<key>INIntentParameterEnumType</key>
 					<string>RebornSort</string>
 					<key>INIntentParameterName</key>
@@ -406,7 +476,7 @@
 					<key>INIntentParameterDisplayName</key>
 					<string>Compact (hide thumbnails)</string>
 					<key>INIntentParameterDisplayPriority</key>
-					<integer>4</integer>
+					<integer>5</integer>
 					<key>INIntentParameterMetadata</key>
 					<dict>
 						<key>INIntentParameterMetadataDefaultValue</key>
@@ -455,7 +525,7 @@
 			<key>INIntentConfigurable</key>
 			<true/>
 			<key>INIntentDescription</key>
-			<string>A rotating post from a subreddit you choose.</string>
+			<string>A rotating post from a subreddit, multireddit, or feed you choose.</string>
 			<key>INIntentEligibleForWidgets</key>
 			<true/>
 			<key>INIntentIneligibleForSuggestions</key>
@@ -488,9 +558,34 @@
 					<key>INIntentParameterConfigurable</key>
 					<true/>
 					<key>INIntentParameterDisplayName</key>
-					<string>Subreddit</string>
+					<string>Source</string>
 					<key>INIntentParameterDisplayPriority</key>
 					<integer>2</integer>
+					<key>INIntentParameterEnumType</key>
+					<string>RebornFeedSource</string>
+					<key>INIntentParameterMetadata</key>
+					<dict>
+						<key>INIntentParameterMetadataDefaultValue</key>
+						<integer>4</integer>
+					</dict>
+					<key>INIntentParameterName</key>
+					<string>feedSource</string>
+					<key>INIntentParameterPromptDialogs</key>
+					<array/>
+					<key>INIntentParameterSupportsResolution</key>
+					<false/>
+					<key>INIntentParameterTag</key>
+					<integer>5</integer>
+					<key>INIntentParameterType</key>
+					<string>Integer</string>
+				</dict>
+				<dict>
+					<key>INIntentParameterConfigurable</key>
+					<true/>
+					<key>INIntentParameterDisplayName</key>
+					<string>Subreddit or Multireddit</string>
+					<key>INIntentParameterDisplayPriority</key>
+					<integer>3</integer>
 					<key>INIntentParameterName</key>
 					<string>subreddit</string>
 					<key>INIntentParameterPromptDialogs</key>
@@ -508,7 +603,7 @@
 					<key>INIntentParameterDisplayName</key>
 					<string>Sort</string>
 					<key>INIntentParameterDisplayPriority</key>
-					<integer>3</integer>
+					<integer>4</integer>
 					<key>INIntentParameterEnumType</key>
 					<string>RebornSort</string>
 					<key>INIntentParameterName</key>
@@ -528,7 +623,7 @@
 					<key>INIntentParameterDisplayName</key>
 					<string>Caption</string>
 					<key>INIntentParameterDisplayPriority</key>
-					<integer>4</integer>
+					<integer>5</integer>
 					<key>INIntentParameterEnumType</key>
 					<string>RebornCaption</string>
 					<key>INIntentParameterName</key>
@@ -675,7 +770,7 @@
 			<key>INIntentConfigurable</key>
 			<true/>
 			<key>INIntentDescription</key>
-			<string>A daily photo from a subreddit with the date overlaid. One locked photo per day.</string>
+			<string>A daily photo from a subreddit or multireddit with the date overlaid. One locked photo per day.</string>
 			<key>INIntentEligibleForWidgets</key>
 			<true/>
 			<key>INIntentIneligibleForSuggestions</key>
@@ -708,7 +803,7 @@
 					<key>INIntentParameterConfigurable</key>
 					<true/>
 					<key>INIntentParameterDisplayName</key>
-					<string>Subreddit</string>
+					<string>Subreddit or Multireddit</string>
 					<key>INIntentParameterDisplayPriority</key>
 					<integer>2</integer>
 					<key>INIntentParameterName</key>
@@ -797,7 +892,7 @@
 			<key>INIntentConfigurable</key>
 			<true/>
 			<key>INIntentDescription</key>
-			<string>The top image from a subreddit you choose, with optional caption details.</string>
+			<string>The top image from a subreddit or multireddit you choose, with optional caption details.</string>
 			<key>INIntentEligibleForWidgets</key>
 			<true/>
 			<key>INIntentIneligibleForSuggestions</key>
@@ -830,7 +925,7 @@
 					<key>INIntentParameterConfigurable</key>
 					<true/>
 					<key>INIntentParameterDisplayName</key>
-					<string>Subreddit</string>
+					<string>Subreddit or Multireddit</string>
 					<key>INIntentParameterDisplayPriority</key>
 					<integer>2</integer>
 					<key>INIntentParameterName</key>
@@ -916,7 +1011,7 @@
 			<key>INIntentConfigurable</key>
 			<true/>
 			<key>INIntentDescription</key>
-			<string>The top post headline from a subreddit you choose, for the Lock Screen.</string>
+			<string>The top post headline from a subreddit or multireddit you choose, for the Lock Screen.</string>
 			<key>INIntentEligibleForWidgets</key>
 			<true/>
 			<key>INIntentIneligibleForSuggestions</key>
@@ -949,7 +1044,7 @@
 					<key>INIntentParameterConfigurable</key>
 					<true/>
 					<key>INIntentParameterDisplayName</key>
-					<string>Subreddit</string>
+					<string>Subreddit or Multireddit</string>
 					<key>INIntentParameterDisplayPriority</key>
 					<integer>2</integer>
 					<key>INIntentParameterName</key>

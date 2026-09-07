@@ -11,13 +11,13 @@ widgets live in one extension (one App ID), built with classic SiriKit
 |---|---|---|---|
 | **Showerthoughts** | S · M · L · Lock (rect, inline) | Setup code only | r/showerthoughts · Top: Week |
 | **Jokes** | S · M · L · Lock (rect, inline) | Setup code only | r/Jokes · Top: Today |
-| **Post** | S · M · L | Subreddit, Sort, Caption | r/popular · Hot |
-| **Feed** | M · L | Subreddit, Sort, Compact | r/popular · Hot |
-| **Photo** | S · M · L | Subreddit, Sort, Caption | r/EarthPorn · Top: Today |
+| **Post** | S · M · L | Source, Subreddit or Multireddit, Sort, Caption | Popular · Hot |
+| **Feed** | M · L | Source, Subreddit or Multireddit, Sort, Compact | Popular · Hot |
+| **Photo** | S · M · L | Subreddit or Multireddit, Sort, Caption | r/EarthPorn · Top: Today |
 | **Shortcuts** | S · M · L | Source, Subreddits | curated / your list |
 | **Apollo Actions** | M | — (static) | fixed actions |
-| **Calendar** | S · M · L | Subreddit, Date Style, Show Title | r/EarthPorn · Top: Week (fixed) |
-| **Headline** | Lock (rect, inline) | Subreddit | r/worldnews · Hot |
+| **Calendar** | S · M · L | Subreddit or Multireddit, Date Style, Show Title | r/EarthPorn · Top: Week (fixed) |
+| **Headline** | Lock (rect, inline) | Subreddit or Multireddit | r/worldnews · Hot |
 
 Sizes: **S** = small (2×2), **M** = medium (4×2), **L** = large (4×4), **Lock**
 = Lock Screen / StandBy accessory slots. Any widget that supports **S** also
@@ -38,6 +38,35 @@ Paste it into **one** widget and the rest pick it up automatically — they all
 share the same stash and reload immediately. The field also accepts a bare
 Reddit client ID (your API key) instead of the full code. *Apollo Actions* and
 *Shortcuts* (with letter avatars) need no setup code at all.
+
+When an API-key account is signed in, the button asks whether to **include
+your account**. That code additionally carries the account's OAuth refresh
+token, which is what lets the widgets read **Home** and your **private
+multireddits** (the app-only key can only see public listings). It's the same
+paste-once flow — a with-account code pasted into any widget upgrades every
+widget, and the plain codes still sitting in other widgets' fields don't
+downgrade it. Public sources keep using the app-only token, so a revoked
+account never breaks r/aww. The code includes your login — don't share it.
+Keyless (web-session) accounts have no refresh token, so they get the plain code.
+
+### Feed sources (Feed, Post, Photo, Headline, Calendar)
+The **Subreddit or Multireddit** field accepts everything people actually type
+or paste; Feed and Post also have a **Source** picker (Home / Popular / All /
+Subreddit or Multireddit) for the built-in feeds.
+
+| You type | You get |
+|---|---|
+| `soccer`, `r/soccer`, `https://reddit.com/r/soccer/top` | r/soccer |
+| `soccer+nba`, `soccer, nba`, `r/soccer r/nba` | the combined r/soccer+nba listing |
+| `home`, `popular`, `all` (or the Source picker) | the built-in feeds |
+| `https://reddit.com/user/foo/m/bar`, `u/foo/m/bar` | foo's multireddit (public, or yours) |
+| `m/bar`, `/me/m/bar` | your own multireddit |
+| `bar` — when it's the name of one of your multireddits | your own multireddit (`r/bar` forces the subreddit) |
+
+Home and your own multireddits need the with-account setup code; the widget
+says so ("Sign in for this feed") instead of failing quietly. The Feed header
+shows the source ("Home", "r/soccer+nba", "m/bar") and tapping it opens that
+feed in Apollo.
 
 ### Sort options
 Where a widget exposes **Sort**: **Hot**, **New**, **Top: Today**, **Top: This
@@ -95,31 +124,35 @@ purple gradient.
   tap to open Apollo for the punchline.
 
 ### Post
-The top post from a subreddit you choose. Adapts to content: image posts get a
-full-bleed photo with a title scrim; text/self posts render title + body on the
-gradient.
+The top post from a subreddit, multireddit, or feed you choose. Adapts to
+content: image posts get a full-bleed photo with a title scrim; text/self posts
+render title + body on the gradient.
 - **Sizes:** Small, Medium, Large.
-- **Config:** Setup Code · **Subreddit** (default `popular`) · **Sort** (default
-  Hot) · **Caption** (default Title + Stats).
+- **Config:** Setup Code · **Source** (Home / Popular / All / Subreddit or
+  Multireddit) · **Subreddit or Multireddit** (default `popular`) · **Sort**
+  (default Hot) · **Caption** (default Title + Stats).
 - **How it works:** fetches the top ~50, rotates through them, ↻ for the next,
   tap opens the post in Apollo.
 
 ### Feed
-A scrolling-style list of a subreddit's top posts, each row linking to its post.
+A scrolling-style list of a feed's top posts — a subreddit, several subreddits,
+a multireddit, or your Home feed — each row linking to its post.
 - **Sizes:** Medium, Large.
-- **Config:** Setup Code · **Subreddit** (default `popular`) · **Sort** (default
-  Hot) · **Compact** (default off — hides thumbnails and fits more rows).
+- **Config:** Setup Code · **Source** (Home / Popular / All / Subreddit or
+  Multireddit) · **Subreddit or Multireddit** (default `popular`) · **Sort**
+  (default Hot) · **Compact** (default off — hides thumbnails and fits more rows).
 - **How it works:** fetches the top ~12; the row count fits the widget height
   (a Medium shows ~2–3, a Large fills by device size). ↻ reloads. Thumbnails on
-  the trailing edge unless Compact is on.
+  the trailing edge unless Compact is on. The header names the source and
+  opens it in Apollo.
 
 ### Photo
 A full-bleed top image from a subreddit, minimal chrome — great as a rotating
 art/photography frame.
 - **Sizes:** Small, Medium, Large.
-- **Config:** Setup Code · **Subreddit** (default `EarthPorn`) · **Sort**
-  (default Top: Today) · **Caption** (default Title; choose **None** for a clean
-  image).
+- **Config:** Setup Code · **Subreddit or Multireddit** (default `EarthPorn`) ·
+  **Sort** (default Top: Today) · **Caption** (default Title; choose **None** for
+  a clean image).
 - **How it works:** image posts only, top ~25, rotates, ↻ for the next, subtle
   vignette, StandBy night dim, tap opens the post.
 
@@ -147,8 +180,9 @@ mascot) plus four tiles — **Home** (front-page feed), **Popular**, **All**,
 One **locked photo of the day** from a subreddit with the date overlaid — a
 photo by day, a clean date display by night.
 - **Sizes:** Small, Medium, Large.
-- **Config:** Setup Code · **Subreddit** (default `EarthPorn`) · **Date Style**
-  · **Show Title** (default off). Sort is fixed to Top: This Week (best image).
+- **Config:** Setup Code · **Subreddit or Multireddit** (default `EarthPorn`) ·
+  **Date Style** · **Show Title** (default off). Sort is fixed to Top: This Week
+  (best image).
 - **Date styles** (each a distinct system font):
   - **Rounded** – SF Pro Rounded, big friendly day number.
   - **Serif** – New York, editorial masthead with a hairline rule.
@@ -165,7 +199,7 @@ photo by day, a clean date display by night.
 The top headline from a subreddit, on your Lock Screen — a rotating ticker of
 what's hot.
 - **Sizes:** Lock Screen only (Rectangular, Inline).
-- **Config:** Setup Code · **Subreddit** (default `worldnews`).
+- **Config:** Setup Code · **Subreddit or Multireddit** (default `worldnews`).
 - **How it works:** fetches the current top ~10 (Hot) and rotates through their
   titles; tap opens the post in Apollo. Text-only, like all Lock-Screen widgets.
 

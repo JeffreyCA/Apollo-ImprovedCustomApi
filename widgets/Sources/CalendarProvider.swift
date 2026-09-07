@@ -149,10 +149,10 @@ struct CalendarProvider: IntentTimelineProvider {
             e.calendarStyle = style; e.calendarShowTitle = showTitle
             completion(e); return
         }
-        let sub = resolvedSubreddit(configuration.subreddit, default: "EarthPorn")
-        let cfg = configKey(sub: sub, sort: Self.calendarSort)
+        let source = Self.source(configuration, ownMultis: OwnMultis.names(for: widgetAccountKey(configuration.setupCode)))
+        let cfg = configKey(source: source, sort: Self.calendarSort)
         let today = DailyPhoto.dayString(Date())
-        if let locked = lockedPostForSnapshot(cfg: cfg, day: today, sub: sub) {
+        if let locked = lockedPostForSnapshot(cfg: cfg, day: today) {
             var e = WidgetEntry(date: Date(), state: .posts([RenderPost(post: locked, imageData: nil)]))
             e.calendarStyle = style; e.calendarShowTitle = showTitle
             completion(e)
@@ -163,31 +163,37 @@ struct CalendarProvider: IntentTimelineProvider {
         }
     }
 
+    private static func source(_ configuration: Intent, ownMultis: Set<String>) -> FeedSource {
+        widgetSource(text: configuration.subreddit, default: .subreddits(["EarthPorn"]), ownMultis: ownMultis)
+    }
+
     func getTimeline(for configuration: Intent, in context: Context,
                      completion: @escaping (Timeline<WidgetEntry>) -> Void) {
-        let sub = resolvedSubreddit(configuration.subreddit, default: "EarthPorn")
+        let source = Self.source(configuration, ownMultis: OwnMultis.names(for: widgetAccountKey(configuration.setupCode)))
         let sort = Self.calendarSort
         let style = calendarStyle(configuration.dateStyle)
         let showTitle = configuration.showTitle?.boolValue ?? false
-        let cfg = configKey(sub: sub, sort: sort)
+        let cfg = configKey(source: source, sort: sort)
 
-        runPostTimeline(
-            code: configuration.setupCode, cacheKey: "calpool.\(sub)",
-            fetch: { try await $0.topPosts(subreddit: sub, sort: sort, limit: 50).filter { $0.isImagePost } },
-            assemble: { pool in
+        runSourceTimeline(
+            code: configuration.setupCode, cacheKey: "calpool.\(source.cacheKey)",
+            resolve: { Self.source(configuration, ownMultis: $0) },
+            sort: sort, limit: 50,
+            filter: { $0.filter { $0.isImagePost } },
+            assemble: { pool, _ in
                 await assembleCalendar(pool, cfg: cfg, style: style, showTitle: showTitle,
                                        windowDays: windowDays)
             },
             completion: completion)
     }
 
-    private func configKey(sub: String, sort: WidgetSort) -> String {
-        "cal.\(sub.lowercased()).\(sort.path)\(sort.timeWindow ?? "")"
+    private func configKey(source: FeedSource, sort: WidgetSort) -> String {
+        "cal.\(source.cacheKey.lowercased()).\(sort.path)\(sort.timeWindow ?? "")"
     }
 
     /// For the snapshot we only want a previously-locked pick; never lock a new
     /// one off the snapshot path (no pool here).
-    private func lockedPostForSnapshot(cfg: String, day: String, sub: String) -> RedditPost? {
+    private func lockedPostForSnapshot(cfg: String, day: String) -> RedditPost? {
         // DailyPhoto.pick with an empty pool returns the stored pick if locked,
         // else nil — exactly the read-only behaviour we want here.
         DailyPhoto.pick(cfg: cfg, day: day, pool: [])

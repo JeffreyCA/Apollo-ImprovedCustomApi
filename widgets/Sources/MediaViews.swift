@@ -186,6 +186,7 @@ struct FeedWidgetView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     WidgetHeader(label: label,
                                  tint: palette.accent,
+                                 url: entry.sourceURL,
                                  trailing: AnyView(ReloadButton(kind: "FeedWidget")))
                         .padding(.bottom, 6)
                     ForEach(Array(rows.enumerated()), id: \.element.post.id) { idx, render in

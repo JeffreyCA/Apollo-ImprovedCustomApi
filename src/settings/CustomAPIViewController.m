@@ -17,6 +17,7 @@
 #import "settings/ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
+#import "ApolloWebJSON.h"           // ApolloWebJSONBearerIsSynthetic() — widget setup code
 #import "ApolloPerAccountFavorites.h"
 #import "ApolloState.h"
 #import "ApolloTabBarHideStyle.h"
@@ -1540,7 +1541,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onSelect:^{ [weakSelf copyWidgetSetupCode]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Extras"
-                                            footer:@"Copy a code to set up the Apollo home-screen widget."
+                                            footer:@"Copy a code to set up Apollo's home-screen widgets. Include your account for Home and multireddit feeds."
                                               rows:@[ widgetSetupCode ]];
 }
 
@@ -3355,6 +3356,42 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     }
 }
 
+// The signed-in account's OAuth refresh token plus the client id it was issued
+// under, for the "with account" widget setup code. Nil when nobody is signed
+// in, when the active account is a web-session (keyless) one — those carry a
+// synthetic bearer and no refresh token — or when the credential is missing.
+static NSDictionary *ApolloWidgetAccountCredentials(void) {
+    id client = ApolloActiveAccountClient();
+    if (!client) return nil;
+    NSString *username = ApolloActiveAccountUsername();
+    if (username.length > 0 && ApolloWebSessionFor(username) != nil) return nil;
+
+    id refreshToken = nil, accessToken = nil, credentialClientId = nil;
+    @try {
+        id credential = [client valueForKey:@"authorizationCredential"];
+        id token = [credential valueForKey:@"accessToken"];
+        refreshToken = [token valueForKey:@"refreshToken"];
+        accessToken = [token valueForKey:@"accessToken"];
+        credentialClientId = [credential valueForKey:@"clientIdentifier"];
+    } @catch (__unused NSException *e) {
+        return nil;
+    }
+    if (![refreshToken isKindOfClass:[NSString class]] || [refreshToken length] == 0) return nil;
+    if ([accessToken isKindOfClass:[NSString class]] && ApolloWebJSONBearerIsSynthetic(accessToken)) return nil;
+
+    // Reddit binds a refresh token to the client id that issued it, and the
+    // credential's own id is what RedditKit presents on every refresh — so
+    // that's the id the widget must present too. Fall back to the effective
+    // (per-account, then global) key only when the credential carries none.
+    NSString *clientId = ([credentialClientId isKindOfClass:[NSString class]] && [credentialClientId length] > 0)
+        ? credentialClientId : (ApolloEffectiveRedditClientId() ?: sRedditClientId);
+    if (clientId.length == 0) return nil;
+
+    NSMutableDictionary *account = [@{ @"clientID": clientId, @"refreshToken": refreshToken } mutableCopy];
+    if (username.length > 0) account[@"username"] = username;
+    return account;
+}
+
 - (void)copyWidgetSetupCode {
     NSString *clientID = sRedditClientId ?: @"";
     if (clientID.length == 0) {
@@ -3363,11 +3400,53 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         return;
     }
 
-    // base64( JSON { v, clientID, userAgent } ) — decoded by the widget's
-    // SetupCode parser. userAgent is included so the widget's Reddit requests
-    // carry the same identity as the configured (spoofed) app.
-    NSMutableDictionary *payload = [@{ @"v": @1, @"clientID": clientID } mutableCopy];
+    // With a signed-in API-key account the code can carry its login, which is
+    // what the widgets need for Home and private multireddits — but that's the
+    // user's choice, so ask. Keyless/no account: the plain code, as before.
+    NSDictionary *account = ApolloWidgetAccountCredentials();
+    if (!account) {
+        [self copyWidgetSetupCodeWithAccount:nil];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:@"Widget Setup Code"
+                         message:@"Include your account so widgets can show Home and your private multireddits."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Copy with Account" style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        [weakSelf copyWidgetSetupCodeWithAccount:account];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Copy without Account" style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        [weakSelf copyWidgetSetupCodeWithAccount:nil];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    UITableViewCell *cell = [self cellForRowID:@"api.widgetSetupCode"];
+    sheet.popoverPresentationController.sourceView = cell ?: self.view;
+    sheet.popoverPresentationController.sourceRect = (cell ?: self.view).bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)copyWidgetSetupCodeWithAccount:(NSDictionary *)account {
+    // base64( JSON { v, clientID, userAgent[, clientSecret][, refreshToken,
+    // username] } ) — decoded by the widget's SetupCode parser. userAgent is
+    // included so the widget's Reddit requests carry the same identity as the
+    // configured (spoofed) app. clientSecret only exists for "web app" keys,
+    // whose token endpoint refuses the empty password installed apps use.
+    // With an account the code is v2 and carries the OAuth refresh token —
+    // that is what lets the widget read Home and private multireddits. Reddit
+    // does not rotate refresh tokens on use, so the widget minting its own
+    // access tokens never invalidates the app's session.
+    NSString *clientID = account[@"clientID"] ?: (sRedditClientId ?: @"");
+    NSMutableDictionary *payload = [@{ @"v": account ? @2 : @1, @"clientID": clientID } mutableCopy];
     if (sUserAgent.length > 0) payload[@"userAgent"] = sUserAgent;
+    NSString *secret = ApolloSecretForClientId(clientID);
+    if (secret.length > 0) payload[@"clientSecret"] = secret;
+    if (account) {
+        payload[@"refreshToken"] = account[@"refreshToken"];
+        if ([account[@"username"] length] > 0) payload[@"username"] = account[@"username"];
+    }
 
     NSData *json = [NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL];
     if (!json) {
@@ -3382,8 +3461,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     };
     [[UIPasteboard generalPasteboard] setItems:@[item] options:options];
 
+    NSString *how = @"Long-press an Apollo widget → Edit Widget and paste it into Setup Code. One paste covers every widget.";
     [self showAlertWithTitle:@"Copied"
-                     message:@"Setup code copied. On your Home Screen, add the Apollo “Showerthoughts” widget, long-press it → Edit Widget, and paste this code into Setup Code."];
+                     message:account
+                         ? [NSString stringWithFormat:@"Setup code copied. %@ It includes your account login, so don't share it.", how]
+                         : [NSString stringWithFormat:@"Setup code copied. %@", how]];
 }
 
 - (void)testNotificationBackendConnection {

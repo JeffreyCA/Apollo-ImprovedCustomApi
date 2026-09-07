@@ -57,8 +57,7 @@ struct ShortcutsProvider: IntentTimelineProvider {
             var items = shortcuts
             // Best-effort icons via the shared setup code; letter avatars otherwise.
             if let creds = SetupCode.resolve(configuration.setupCode) {
-                let client = RedditAppOnlyClient(clientID: creds.clientID, userAgent: creds.resolvedUserAgent)
-                items = await Self.withIcons(shortcuts, client: client)
+                items = await Self.withIcons(shortcuts, client: RedditClient(code: creds))
             }
             // Refresh icons daily; subreddit icons rarely change.
             completion(Timeline(entries: [ShortcutsEntry(date: Date(), items: items, needsConfig: false)],
@@ -67,7 +66,7 @@ struct ShortcutsProvider: IntentTimelineProvider {
     }
 
     /// Concurrently fetch each subreddit's icon + brand color, preserving order.
-    private static func withIcons(_ items: [ShortcutItem], client: RedditAppOnlyClient) async -> [ShortcutItem] {
+    private static func withIcons(_ items: [ShortcutItem], client: RedditClient) async -> [ShortcutItem] {
         await withTaskGroup(of: (Int, Data?, String?).self) { group in
             for (i, item) in items.enumerated() {
                 group.addTask {

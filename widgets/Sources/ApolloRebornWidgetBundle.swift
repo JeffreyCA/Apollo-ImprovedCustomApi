@@ -28,7 +28,7 @@ struct HeadlineWidget: Widget {
             HeadlineWidgetView(entry: entry)
         }
         .configurationDisplayName("Headline")
-        .description("The top headline from a subreddit you choose, on your Lock Screen.")
+        .description("The top headline from a subreddit or multireddit you choose, on your Lock Screen.")
         .supportedFamilies([.accessoryRectangular, .accessoryInline])
     }
 }
@@ -114,7 +114,7 @@ struct SinglePostWidget: Widget {
             SinglePostWidgetView(entry: entry)
         }
         .configurationDisplayName("Post")
-        .description("The top post from a subreddit you choose.")
+        .description("The top post from a subreddit, multireddit, or your Home feed.")
         // Home-screen only. Lock-screen content comes from the zero-config
         // Showerthoughts widget, so the lock screen stays option-free.
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
@@ -130,7 +130,7 @@ struct FeedWidget: Widget {
             FeedWidgetView(entry: entry)
         }
         .configurationDisplayName("Feed")
-        .description("Top posts from a subreddit you choose.")
+        .description("Top posts from a subreddit, multireddit, or your Home feed.")
         .supportedFamilies([.systemMedium, .systemLarge])
     }
 }
@@ -144,7 +144,7 @@ struct PhotoWidget: Widget {
             PhotoWidgetView(entry: entry)
         }
         .configurationDisplayName("Photo")
-        .description("The top image from a subreddit you choose. Toggle the title, subreddit and stats.")
+        .description("The top image from a subreddit or multireddit you choose. Toggle the title, subreddit and stats.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
