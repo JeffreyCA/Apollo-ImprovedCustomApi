@@ -13,8 +13,9 @@
 // so nothing is re-encoded and nothing is lost. Self-contained sources (imgur
 // mp4, Reddit's silent GIF transcodes) skip all of that and download directly.
 //
-// The DASH manifest parsing is shared with Share as Video rather than copied
-// (see ApolloSVLowestDashURL / ApolloSVRedditAssetID in ApolloShareAsVideo.xm).
+// This export selects the highest-quality DASH tracks; Share as Video has a
+// separate parser because its share-card export deliberately selects smaller
+// tracks.
 
 #import <Foundation/Foundation.h>
 
@@ -37,6 +38,16 @@ __BEGIN_DECLS
 void ApolloGallerySaveVideoToPhotos(NSURL *progressiveURL,
                                     void (^_Nullable status)(NSString *text),
                                     void (^completion)(BOOL success, NSString *message));
+
+// Batch-save variant: a v.redd.it source may be a progressive URL or its DASH
+// manifest URL. Requires a valid manifest and preserves its declared audio:
+// if audio resolution/download/mux fails, the item fails
+// instead of writing a silent fallback and counting it as fully saved. A valid
+// manifest with no audio is a supported silent clip. Other hosts use the same
+// self-contained-video path. Callback threading matches the entry point above.
+void ApolloGallerySaveVideoToPhotosStrict(NSURL *sourceURL,
+                                          void (^_Nullable status)(NSString *text),
+                                          void (^completion)(BOOL success, NSString *message));
 
 __END_DECLS
 
