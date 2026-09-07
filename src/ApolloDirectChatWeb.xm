@@ -358,6 +358,17 @@ static NSString *ApolloDirectChatEnhancementScript(NSDictionary *palette) {
         // The :host(.tooltip) guard restricts the arrow rule to tooltip poppers;
         // menu/popover arrows and aria-label/aria-describedby stay untouched.
         "const chatTouchLayout=()=>mailRoute()?'':'@media (hover:none),(pointer:coarse){[role=tooltip],:host(.tooltip) .popup--arrow[part=arrow]{display:none!important;}}';"
+        // The same sizes fixChatListTypography (below) writes inline, as
+        // stylesheet rules scoped to the list rows' own shadow trees. Reddit
+        // rebuilds every row when a room gives way to the list, and the
+        // rebuilt rows painted at Reddit's 12px until the next sweep reached
+        // them — a visible text-size pop on every in-page Back tap once the
+        // list chrome stopped covering for it. The stylesheet lands in each
+        // new row's shadow root at attachShadow time, so the rows are sized
+        // before their first paint. Gated on the embedded Messages flag, not
+        // the route: the flag is set once the list hydrates and outlives a
+        // room visit, and the rows it targets exist only in the list.
+        "const listTypography=()=>window.__apolloEmbeddedInboxMessages?':host(rs-rooms-nav-room) .room-name{font-size:15px!important;line-height:20px!important;}:host(rs-rooms-nav-room) .last-message{font-size:14px!important;line-height:20px!important;}:host(rs-rooms-nav-room) .last-message-time{font-size:12px!important;line-height:20px!important;}':'';"
         // fixEmbeddedMessagesChrome (below) hides Reddit's redundant list rows
         // with inline styles, but only after the elements exist and a sweep has
         // run — one visible frame of Requests/Threads rows and filter chips
@@ -368,7 +379,19 @@ static NSString *ApolloDirectChatEnhancementScript(NSDictionary *palette) {
         // Scoped to the root list route: Requests/Threads crop their redundant
         // chrome natively and must keep those rows in layout, and on room
         // routes the background list pane keeps the sweep's inline styles.
-        "const embeddedChrome=()=>window.__apolloEmbeddedInboxMessages&&chatListRoute()?'li[data-testid=requests-button],li[data-testid=threads-button],rs-rooms-nav-filter-chips{display:none!important;}':'';"
+        // Reddit rebuilds the whole list nav (rs-rooms-nav and its shadow
+        // tree) when a room gives way to the list, and the URL still reads
+        // the room for the first beat of that flip (until the click
+        // interception's history.back() lands). Gating these rules on the
+        // list route left the rebuilt nav's stylesheet without them, so
+        // Reddit's header, filter chip and Threads row painted for a few
+        // frames on every in-page Back tap. The rules apply whenever the
+        // Messages list is embedded — off the list route nothing they match
+        // exists — and the stylesheet lands in every new shadow root at
+        // attachShadow time, before its first paint. The header is Reddit's
+        // own top row (the one holding its home link), the same element
+        // fixEmbeddedMessagesChrome walks up to.
+        "const embeddedChrome=()=>window.__apolloEmbeddedInboxMessages?'li[data-testid=requests-button],li[data-testid=threads-button],rs-rooms-nav-filter-chips,:host(rs-rooms-nav)>div:has(a[aria-label=\"Go to Reddit home\"]){display:none!important;}':'';"
         // Every keystroke in the Modmail reply box makes Reddit re-render the
         // composer header, which REPLACES the "Reply as r/…" avatar with a
         // brand-new <img> carrying the same src. A fresh element re-runs the
@@ -399,7 +422,7 @@ static NSString *ApolloDirectChatEnhancementScript(NSDictionary *palette) {
             "--color-tone-1:${palette.text}!important;--color-tone-2:${palette.secondaryText}!important;--color-tone-3:${palette.secondaryText}!important;--color-tone-4:${palette.separator}!important;--color-tone-5:${palette.tertiary}!important;--color-tone-6:${palette.secondary}!important;--color-tone-7:${palette.primary}!important;"
             "--newCommunityTheme-body:${palette.primary}!important;--newCommunityTheme-bodyText:${palette.text}!important;--newCommunityTheme-button:${palette.accent}!important;--newCommunityTheme-line:${palette.separator}!important;"
         "}html,body,button,input,textarea,select{font-family:var(--apollo-chat-font)!important;}html,body{background-color:var(--apollo-chat-bg)!important;color:var(--apollo-chat-text)!important;-webkit-text-size-adjust:${textScale()}%!important;text-size-adjust:${textScale()}%!important;}body{accent-color:var(--apollo-chat-accent)!important;}a{color:var(--apollo-chat-accent)!important;}input,textarea,[contenteditable=true]{caret-color:var(--apollo-chat-accent)!important;font-size:16px!important;}::selection{background:var(--apollo-chat-accent)!important;color:var(--apollo-chat-bg)!important;}"
-        "shreddit-app{--page-y-padding:0px!important;padding-top:0!important;}header.v2.hui{display:none!important;}modmail-mailbox-wrapper{top:0!important;margin-top:0!important;}${mailLayout()}${chatTouchLayout()}${embeddedChrome()}${mailAvatarHold()}"
+        "shreddit-app{--page-y-padding:0px!important;padding-top:0!important;}header.v2.hui{display:none!important;}modmail-mailbox-wrapper{top:0!important;margin-top:0!important;}${mailLayout()}${chatTouchLayout()}${embeddedChrome()}${listTypography()}${mailAvatarHold()}"
         // A press-and-hold on a chat-list row used to bring up WebKit's stock
         // link menu — the rows are links to Reddit's client-side /room/… routes,
         // which do not exist as pages, so the preview was a 404 — and start a
@@ -3151,6 +3174,18 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
             self.embeddedInboxSection == ApolloModernChatInboxSectionMessages) {
             topOffset = self.messagesAlignedTopOffset;
         }
+    } else if (self.embeddedInboxSection == ApolloModernChatInboxSectionMessages &&
+               !isnan(self.messagesAlignedTopOffset) && self.messagesAlignedTopOffset >= 0.0) {
+        // A conversation reached from the Messages list — a room, the
+        // new-chat pane, the composer — keeps the list's measured breathing
+        // gap. Reddit's Back control flips the pane back to the list under
+        // the same web view, and the geometry change on top of that flip
+        // (0 back to the gap) landed a beat later, as a ~3pt hop on every
+        // in-page Back tap; the swipe path only hid it under its still
+        // frame. A few points of gap above a room's header are invisible. A
+        // negative (cropping) measurement is not reused: it would clip the
+        // header.
+        topOffset = self.messagesAlignedTopOffset;
     }
 
     // Standalone Direct Chat hides Apollo's tab bar, but the embedded Inbox
