@@ -2644,7 +2644,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                         SFSafariViewController *safariVC = [[SFSafariViewController alloc] initWithURL:url];
                                         [weakSelf presentViewController:safariVC animated:YES completion:nil];
 }];
-    
+
     ApolloSettingsRow *installBark = nil;
     if (![[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"bark://"]]) {
         installBark =
@@ -2664,8 +2664,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                         NSURL *url = [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"];
                                         [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
                                     }];
-    }                                
-                                        
+    }
+
     ApolloSettingsRow *testConnection =
             [ApolloSettingsRow customRowWithID:@"notif.test"
                                         cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -2682,9 +2682,10 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                     onSelect:^{ [weakSelf testNotificationBackendConnection]; }];
     testConnection.visible = ^BOOL {
         NSString *url = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL];
-        return [self isNotificationBackendURLValid:url];
+        return url.length > 0 &&
+           [self isNotificationBackendURLValid:url];
 };
-                                    
+              
     ApolloSettingsRow *registrationToken =
         [ApolloSettingsRow customRowWithID:@"notif.token"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -2763,17 +2764,18 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
                                   onSelect:^{ [weakSelf testBarkNotification]; }];
     testBark.visible = ^BOOL {
     NSString *backendURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL];
-    return [self isNotificationBackendURLValid:backendURL] &&
-        [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBarkNotificationsEnabled];
+    return backendURL.length > 0 &&
+           [self isNotificationBackendURLValid:backendURL] &&
+           [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBarkNotificationsEnabled];
 };
 
     // Custom rather than a button row: the label is centered, which the shared
     // button-row cell doesn't do.
-    
-    return [ApolloSettingsSection sectionWithTitle:@"Setup"
+
+    return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:nil
                                               rows:@[ backendURL, registrationToken, barkSwitch, barkURL,
-                                                      setupInstructions, installBark, testConnection, testBark ]];
+                                                    testConnection, testBark, setupInstructions, installBark ]];
 }
 
 - (ApolloSettingsSection *)buildPrivacySection {
@@ -3320,65 +3322,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still show where Imgur is blocked (like the UK).\n\nDuckDuckGo can't fetch an album's list of images, so Album Fallback Proxies gets it through public text proxies (r.jina.ai, allorigins.win, codetabs.com) instead. Only the album's Imgur address is sent to them. Turn it off and albums won't load while Imgur is blocked.\n\nVideos and uploads can't be proxied."
             attributes:plainAttrs];
-    } else if ([sectionTitle isEqualToString:@"Notification Backend"]) {
-    text = [[NSMutableAttributedString alloc]
-        initWithString:@""
-        attributes:plainAttrs];
-
-    if (ApolloPushNotificationsSupported()) {
-        if ([self isNotificationBackendURLValid:[[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL]]) {
-            [text appendAttributedString:[[NSAttributedString alloc]
-                initWithString:@"Bark Delivery is optional. Enable Bark Delivery if you'd prefer to receive notifications through the free "
-                attributes:plainAttrs]];
-        } else {
-            [text appendAttributedString:[[NSAttributedString alloc]
-                initWithString:@"Bark Delivery is optional. Once a valid backend is configured, you can enable it to receive notifications through the free "
-                attributes:plainAttrs]];
-        }
-    } else {
-        [text appendAttributedString:[[NSAttributedString alloc]
-            initWithString:@"This build can't receive native push notifications because it isn't signed with a paid Apple Developer account. "
-            attributes:plainAttrs]];
-
-        if ([self isNotificationBackendURLValid:[[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL]]) {
-            [text appendAttributedString:[[NSAttributedString alloc]
-                initWithString:@"Enable Bark Delivery to receive notifications through the free "
-                attributes:plainAttrs]];
-        } else {
-            [text appendAttributedString:[[NSAttributedString alloc]
-                initWithString:@"Once a valid backend is configured, you can enable Bark Delivery to receive notifications through the free "
-                attributes:plainAttrs]];
-        }
-    }
-
-[text appendAttributedString:[[NSAttributedString alloc]
-    initWithString:@"Bark app"
-    attributes:@{
-        NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],
-        NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]
-    }]];
-
-[text appendAttributedString:[[NSAttributedString alloc]
-    initWithString:@".\n\n"
-    attributes:plainAttrs]];
-
-    NSMutableDictionary *boldAttrs = [plainAttrs mutableCopy];
-    boldAttrs[NSFontAttributeName] = [UIFont boldSystemFontOfSize:
-        [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote].pointSize];
-
-    [text appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@"Note:"
-        attributes:boldAttrs]];
-
-    [text appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@" Notification content passes through the Bark relay unencrypted.\n\n"
-        attributes:plainAttrs]];
-
-    [text appendAttributedString:[[NSAttributedString alloc]
-        initWithString:@"To use one of Apollo's notification sounds, import the matching .caf from the project's "
-        @"assets/Bark Sounds via Bark's Service tab → Alert Sound → View All Sounds → Upload Sound."
-        attributes:plainAttrs]];
-} else if ([sectionTitle isEqualToString:@"Privacy"]) {
+    } else if ([sectionTitle isEqualToString:@"Privacy"]) {
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Sends one anonymous heartbeat so we can estimate active Apollo Reborn installs. No Reddit activity, account details, or feature usage is collected. More details can be found in our "
             attributes:plainAttrs];
@@ -4879,5 +4823,71 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 - (NSString *)apollo_screenTitle { return @"Notification Backend"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     return @[ [self buildNotificationBackendSection] ];
+}
+- (NSAttributedString *)footerAttributedTextForSection:(NSInteger)section {
+    NSDictionary *plainAttrs = @{
+        NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],
+        NSForegroundColorAttributeName: [UIColor secondaryLabelColor]
+    };
+
+    NSMutableAttributedString *text = [[NSMutableAttributedString alloc]
+        initWithString:@""
+        attributes:plainAttrs];
+
+    if (ApolloPushNotificationsSupported()) {
+        if ([self isNotificationBackendURLValid:[[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL]]) {
+            [text appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"Bark Delivery is optional. Enable Bark Delivery if you'd prefer to receive notifications through the free "
+                attributes:plainAttrs]];
+        } else {
+            [text appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"Bark Delivery is optional. Once a valid backend is configured, you can enable it to receive notifications through the free "
+                attributes:plainAttrs]];
+        }
+    } else {
+        [text appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"This build can't receive native push notifications because it isn't signed with a paid Apple Developer account. "
+            attributes:plainAttrs]];
+
+        if ([self isNotificationBackendURLValid:[[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL]]) {
+            [text appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"Enable Bark Delivery to receive notifications through the free "
+                attributes:plainAttrs]];
+        } else {
+            [text appendAttributedString:[[NSAttributedString alloc]
+                initWithString:@"Once a valid backend is configured, you can enable Bark Delivery to receive notifications through the free "
+                attributes:plainAttrs]];
+        }
+    }
+
+[text appendAttributedString:[[NSAttributedString alloc]
+    initWithString:@"Bark app"
+    attributes:@{
+        NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],
+        NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]
+    }]];
+
+[text appendAttributedString:[[NSAttributedString alloc]
+    initWithString:@".\n\n"
+    attributes:plainAttrs]];
+
+    NSMutableDictionary *boldAttrs = [plainAttrs mutableCopy];
+    boldAttrs[NSFontAttributeName] = [UIFont boldSystemFontOfSize:
+        [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote].pointSize];
+
+    [text appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@"Note:"
+        attributes:boldAttrs]];
+
+    [text appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@" Notification content passes through the Bark relay unencrypted.\n\n"
+        attributes:plainAttrs]];
+
+    [text appendAttributedString:[[NSAttributedString alloc]
+        initWithString:@"To use one of Apollo's notification sounds, import the matching .caf from the project's "
+        @"assets/Bark Sounds via Bark's Service tab → Alert Sound → View All Sounds → Upload Sound."
+        attributes:plainAttrs]];
+
+    return text;
 }
 @end
