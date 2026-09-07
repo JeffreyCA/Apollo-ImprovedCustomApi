@@ -4722,12 +4722,69 @@ static void ApolloStandaloneChatBackPanForgetHost(ApolloDirectChatWebViewControl
 
 %end
 
+// Apollo's rule for tapping the tab that is already selected — scroll the
+// screen on top back to its top, or step back one screen once it is there —
+// only recognizes Apollo's own screens; the tweak's mailbox screens (the
+// stand-alone Chat hub, Modmail) sat inert under that tap. The same rule
+// applies to them here. Their list scrolls inside the web view (Reddit's own
+// scroller, not the WKWebView's), so any scrolled scroll view under the web
+// view is the one to bring back to the top.
+static UIScrollView *ApolloScrolledScrollViewUnder(UIView *view) {
+    if ([view isKindOfClass:[UIScrollView class]]) {
+        UIScrollView *scrollView = (UIScrollView *)view;
+        if (scrollView.contentOffset.y > -scrollView.adjustedContentInset.top + 1.0 &&
+            scrollView.contentSize.height > 1.0) {
+            return scrollView;
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        UIScrollView *found = ApolloScrolledScrollViewUnder(subview);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static BOOL ApolloMailboxScreenHandleTabReselect(UINavigationController *navigationController) {
+    UIViewController *top = navigationController.topViewController;
+    ApolloDirectChatWebViewController *mailbox = nil;
+    if ([top isKindOfClass:[ApolloDirectChatWebViewController class]]) {
+        mailbox = (ApolloDirectChatWebViewController *)top;
+    } else {
+        UIViewController *embedded = ApolloStandaloneInboxChatHubEmbeddedController(top);
+        if ([embedded isKindOfClass:[ApolloDirectChatWebViewController class]]) {
+            mailbox = (ApolloDirectChatWebViewController *)embedded;
+        }
+    }
+    if (!mailbox) return NO;
+    UIScrollView *scrolled = mailbox.webView ? ApolloScrolledScrollViewUnder(mailbox.webView) : nil;
+    if (scrolled) {
+        [scrolled setContentOffset:CGPointMake(scrolled.contentOffset.x,
+                                               -scrolled.adjustedContentInset.top)
+                          animated:YES];
+        ApolloLog(@"[DirectChatWeb] Inbox tab re-tap: scrolled %@ back to the top",
+                  NSStringFromClass(top.class));
+        return YES;
+    }
+    if (navigationController.viewControllers.count > 1) {
+        ApolloLog(@"[DirectChatWeb] Inbox tab re-tap: stepping back from %@",
+                  NSStringFromClass(top.class));
+        [navigationController popViewControllerAnimated:YES];
+        return YES;
+    }
+    return NO;
+}
+
 // Selecting Inbox already reveals the untouched mailbox. Clear the optional
 // native-Back return marker so a later Back action in Posts behaves normally.
 %hook _TtC6Apollo13SceneDelegate
 
 - (BOOL)tabBarController:(UITabBarController *)tabBarController
  shouldSelectViewController:(UIViewController *)viewController {
+    if (viewController == tabBarController.selectedViewController &&
+        [viewController isKindOfClass:[UINavigationController class]] &&
+        ApolloMailboxScreenHandleTabReselect((UINavigationController *)viewController)) {
+        return NO;
+    }
     for (UIViewController *candidate in tabBarController.viewControllers) {
         if (![candidate isKindOfClass:[UINavigationController class]]) continue;
         UINavigationController *navigationController = (UINavigationController *)candidate;

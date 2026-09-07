@@ -64,6 +64,10 @@ UIViewController *ApolloCreateStandaloneInboxChatHub(NSString * _Nullable destin
 // lands). NO when the tab bar or its Inbox stack cannot be reached, so the
 // caller can push on its own stack instead. Implemented by the hub's module.
 BOOL ApolloModernChatOpenInInbox(NSString * _Nullable destinationPath);
+// The embedded Chat controller of a stand-alone hub screen, nil for any other
+// view controller. Implemented by the hub's module; used by the tab re-tap
+// rule in ApolloDirectChatWeb.
+UIViewController * _Nullable ApolloStandaloneInboxChatHubEmbeddedController(UIViewController * _Nullable viewController);
 // Queue a conversation for a Chat controller that has not loaded its list
 // yet (the stand-alone hub's): the list loads under the loading cover and the
 // conversation opens in place once the list is up.

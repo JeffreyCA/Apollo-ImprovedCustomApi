@@ -1124,6 +1124,12 @@ UIViewController *ApolloCreateStandaloneInboxChatHub(NSString *destinationPath) 
     return hub;
 }
 
+UIViewController *ApolloStandaloneInboxChatHubEmbeddedController(UIViewController *viewController) {
+    if (![viewController isKindOfClass:[ApolloInboxChatHubViewController class]]) return nil;
+    ApolloInboxChatHubViewController *hub = (ApolloInboxChatHubViewController *)viewController;
+    return hub.standalone ? hub.chatController : nil;
+}
+
 BOOL ApolloModernChatOpenInInbox(NSString *destinationPath) {
     id tabBarController = ApolloMainTabBarController();
     if (![tabBarController isKindOfClass:[UITabBarController class]]) return NO;
